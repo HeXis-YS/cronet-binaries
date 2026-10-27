@@ -2,12 +2,11 @@
 """Stage a Chromium release without replacing sources or rewriting Git history.
 
 Usage: python3 tools/stage-upstream.py VERSION OUTPUT_DIRECTORY
-The output directory must not exist. Uses tools/include.txt and exclude.txt;
-downloads are streamed, so the full Chromium archive is not stored locally.
+The output directory must not exist. Extracts the complete release;
+downloads are streamed, so the Chromium archive is not stored locally.
 """
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -21,16 +20,10 @@ def main():
     args = parser.parse_args()
     if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", args.version):
         parser.error("version must contain four numeric components")
-    root = Path(__file__).resolve().parent.parent
-    include_file = root / "tools/include.txt"
-    exclude_file = root / "tools/exclude.txt"
-    includes = include_file.read_text().splitlines()
     args.output.mkdir(parents=True, exist_ok=False)
-    prefix = f"chromium-{args.version}/"
     url = f"https://commondatastorage.googleapis.com/chromium-browser-official/chromium-{args.version}.tar.xz"
-    # GNU tar handles selection and decompression, as in the upstream importer.
+    # Extract the complete release to avoid maintaining a source-path allowlist.
     # curl's progress meter goes to stderr; both process failures are checked.
-    patterns = [prefix + pattern.removeprefix("^") for pattern in includes]
     print(f"Staging {url} into {args.output.resolve()}", flush=True)
     with subprocess.Popen(
         ["curl", "--fail", "--location", "--show-error", url],
@@ -40,8 +33,7 @@ def main():
             extraction = subprocess.run(
                 ["tar", "--extract", "--xz", "--file=-",
                  "--directory", str(args.output.resolve()),
-                 "--strip-components=1", "--wildcards", "--wildcards-match-slash",
-                 "--exclude-from", str(exclude_file), "--", *patterns],
+                 "--strip-components=1"],
                 stdin=download.stdout,
             )
             download.stdout.close()
@@ -58,8 +50,7 @@ def main():
         "version": args.version,
         "url": url,
         "extractor": "curl | GNU tar --xz",
-        "include_sha256": hashlib.sha256(include_file.read_bytes()).hexdigest(),
-        "exclude_sha256": hashlib.sha256(exclude_file.read_bytes()).hexdigest(),
+        "source_selection": "complete release",
     }
     (args.output / "upstream-stage.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(json.dumps(metadata), flush=True)
