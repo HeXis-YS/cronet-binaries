@@ -27,7 +27,7 @@ Linux 库仍在首次完整构建；Windows、Android 尚无构建或运行结�
 | 11 | 禁止显式链接Clang builtins | 条件项；与02耦合，需三平台链接证据再判断。 |
 | 12 | ThinLTO最大优化 | 按用户要求暂时保留；当前build.sh关闭LTO，生产配置尚待落实，不能宣称生产优化已启用。 |
 | 13 | ICU移除与dummy替代 | 有功能损失。IDNToASCII直接false，字符集转换也直接false；Unicode域名支持未经授权不应被静默缩减。需比较上游替代或保留ICU。 |
-| 14 | 移除ICU的32位时间处理 | 高风险条件项。Time::Explode仍将秒值checked_cast到SysTime；sizeof(SysTime)<8时无原ICU补救。需确认arm/x86实际time_t和证书时间调用，不能以TLS当前可用证明安全。 |
+| 14 | 移除ICU的32位时间处理 | 与13耦合。32位Android明确使用time64_t及mktime64/gmtime64_r，不存在此前推测的32位SysTime问题；风险限于实际使用窄SysTime的平台。不能据此要求Android恢复ICU，也不能据此证明整个ICU移除安全。 |
 | 15 | 删除未知CPU的#error | 对当前x86/x64/arm/arm64无用途；建议删除。 |
 | 16 | libc++/abi无异常与RTTI裁剪 | 可选优化，不是协议要求；应与17成组比较收益与维护成本。 |
 | 17 | Windows无异常标准库修复 | 仅16保留时条件需要；尚无Windows编译证据。 |
@@ -64,9 +64,32 @@ Linux 库仍在首次完整构建；Windows、Android 尚无构建或运行结�
   因此不能把stub概括为“Android DNS不可用”，也不能认定行为与平台实现等价。
 - `url/url_canon_icu_alternatives_dummy.cc` 的IDNToASCII无条件失败；
   `net/base/net_string_util_icu_alternatives_dummy.cc` 的多种转换同样失败。
-- `base/time/time_exploded_posix.cc` 的32位SysTime分支被14禁用补救，之后仍有checked_cast。
+- `base/time/time_exploded_posix.cc:19–55` 在32位Android上使用time64_t及64位转换函数；
+  其他POSIX路径才使用time_t。14禁用的ICU补救只在sizeof(SysTime)<8时相关。
 - `components/grpc_support/xray_engine.cc` 主动修改socket池及proxy-chain上限；
   21的必要性必须连同这些调用审查，不能只看patch本身很小。
+
+### Android原生边界与证书来源
+
+03的默认网络解析仍能走`net/dns/address_info.cc`中的`::getaddrinfo`，
+不能将指定网络API的stub失败扩大为所有DNS失败。04的
+`base/android/android_info_stub.cc:47`却将SDK版本固定为0；
+`net/dns/host_resolver.cc`用SDK版本判断builtin resolver能力，因而这不只是删除设备描述信息。
+默认解析可用也不证明网络切换通知、指定网络绑定或Android平台DNS行为完整。
+当前引擎以host mapping连接给定地址，但另建的证书抓取context没有这条映射，
+DNS裁剪仍须覆盖AIA等证书网络请求，不能只看主XHTTP连接。
+
+18并未把CA信任缩减为几个文件目录。`net/cert/cert_verify_proc.cc:416–425`
+创建TrustStoreChrome，再交给`internal/system_trust_store.cc:495–498`，
+与TrustStoreUnix合并。因此Chrome根库仍在，SSL_CERT_FILE/SSL_CERT_DIR只影响
+附加文件来源，并不替换全部信任根。Android平台用户根的上游路径
+`net/android/network_library.cc:42–49`调用Java；当前文件加载实现不能宣称保留了
+用户/企业根、禁用根及平台更新的全部语义。是否需要这些语义尚无用户决定。
+
+13的IDN损失在当前入口可达：`components/grpc_support/xray_engine.cc:177`
+直接用传入server_name构造GURL，Rust的`src/xhttp/cronet.rs`只转换CString，
+没有在该边界做IDNA归一化。因而不能以“Rust已处理域名”为由认定dummy无影响。
+这是源码结论，尚未执行Unicode域名的端到端测试。
 
 ## grpc_support审查
 
@@ -79,6 +102,16 @@ Linux 库仍在首次完整构建；Windows、Android 尚无构建或运行结�
 但仍必须实现读写结束状态和异步销毁，不能把删除旧状态机当作无需状态管理。
 本轮不因旧适配器已通过编译而认定应保留，也不未经实现对照就认定重写一定更少。
 下一步比较最小接口、所有权及终止事件映射，并与26/27的接入点一起决定。
+
+`net/http/bidirectional_stream_request_info.h`当前没有隔离key或独立authority字段，
+只有URL、extra_headers及target_network等。因此仅绕过grpc_support并不能消除26/27：
+仍须在Chromium请求边界传入这些信息。可将26改成显式请求字段，避免私有header，
+但这仍是需要随上游维护的补丁。27目前修改全局SPDY转换，影响面更大；
+在确定局部接入方式前，不将“删除适配器”等同于“无需修改Chromium”。
+
+审查建议是保留必要的线程、缓冲区和终止状态职责，比较直接Delegate实现，
+不以grpc_support兼容性为约束保留未使用的批量写/flush接口。
+本轮没有删除它；也没有将重写后的代码量或性能收益作为已验证事实。
 
 ## 文档与实现差异
 
