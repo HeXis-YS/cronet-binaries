@@ -7,14 +7,11 @@ downloads are streamed, so the full Chromium archive is not stored locally.
 """
 
 import argparse
-import copy
-import fnmatch
 import hashlib
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
-import tarfile
-import urllib.request
+import subprocess
 
 
 def main():
@@ -25,40 +22,44 @@ def main():
     if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", args.version):
         parser.error("version must contain four numeric components")
     root = Path(__file__).resolve().parent.parent
-    includes = (root / "tools/include.txt").read_text().splitlines()
-    excludes = (root / "tools/exclude.txt").read_text().splitlines()
+    include_file = root / "tools/include.txt"
+    exclude_file = root / "tools/exclude.txt"
+    includes = include_file.read_text().splitlines()
     args.output.mkdir(parents=True, exist_ok=False)
     prefix = f"chromium-{args.version}/"
     url = f"https://commondatastorage.googleapis.com/chromium-browser-official/chromium-{args.version}.tar.xz"
-    count = 0
-    include_regex = re.compile("|".join(fnmatch.translate(pattern.lstrip("^")) for pattern in includes))
-    prefixes = tuple(pattern.lstrip("^").rstrip("/") + "/" for pattern in includes if not any(c in pattern for c in "*?["))
-    exclude_regex = re.compile("|".join(fnmatch.translate(pattern) for pattern in excludes))
-    with urllib.request.urlopen(url) as response:
-        with tarfile.open(fileobj=response, mode="r|xz") as archive:
-            for member in archive:
-                if not member.name.startswith(prefix):
-                    continue
-                name = member.name[len(prefix):]
-                path = PurePosixPath(name)
-                if path.is_absolute() or ".." in path.parts:
-                    raise ValueError(f"unsafe archive path: {name}")
-                selected = name.startswith(prefixes) or include_regex.fullmatch(name)
-                required = name == "third_party/boringssl/src/crypto/fuzzer_mode.cc"
-                if not selected or (exclude_regex.fullmatch(name) and not required):
-                    continue
-                member = copy.copy(member)
-                member.name = name
-                if member.islnk() and member.linkname.startswith(prefix):
-                    member.linkname = member.linkname[len(prefix):]
-                archive.extract(member, args.output, filter="data")
-                count += 1
+    # GNU tar handles selection and decompression, as in the upstream importer.
+    # curl's progress meter goes to stderr; both process failures are checked.
+    patterns = [prefix + pattern.removeprefix("^") for pattern in includes]
+    print(f"Staging {url} into {args.output.resolve()}", flush=True)
+    with subprocess.Popen(
+        ["curl", "--fail", "--location", "--show-error", url],
+        stdout=subprocess.PIPE,
+    ) as download:
+        try:
+            extraction = subprocess.run(
+                ["tar", "--extract", "--xz", "--file=-",
+                 "--directory", str(args.output.resolve()),
+                 "--strip-components=1", "--wildcards", "--wildcards-match-slash",
+                 "--exclude-from", str(exclude_file), "--", *patterns],
+                stdin=download.stdout,
+            )
+            download.stdout.close()
+            download_status = download.wait()
+        except BaseException:
+            download.terminate()
+            raise
+    if extraction.returncode or download_status:
+        raise RuntimeError(
+            f"Staging failed: curl={download_status}, tar={extraction.returncode}; "
+            "the incomplete directory has no completion marker"
+        )
     metadata = {
         "version": args.version,
         "url": url,
-        "members": count,
-        "include_sha256": hashlib.sha256((root / "tools/include.txt").read_bytes()).hexdigest(),
-        "exclude_sha256": hashlib.sha256((root / "tools/exclude.txt").read_bytes()).hexdigest(),
+        "extractor": "curl | GNU tar --xz",
+        "include_sha256": hashlib.sha256(include_file.read_bytes()).hexdigest(),
+        "exclude_sha256": hashlib.sha256(exclude_file.read_bytes()).hexdigest(),
     }
     (args.output / "upstream-stage.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(json.dumps(metadata), flush=True)

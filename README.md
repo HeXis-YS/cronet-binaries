@@ -24,7 +24,7 @@ C ABI, without a Java-facing API.
 
 ### Upgrade Chromium
 
-Requires Python 3.12+, Git, network access, and enough disk space for both the
+Requires Python 3.12+, curl, GNU tar with xz support, Git, network access, and enough disk space for both the
 staged and installed sources. From the repository root, choose a release and a
 new staging directory outside `src`:
 
@@ -36,6 +36,9 @@ python3 tools/install-upstream.py STAGE_DIRECTORY
 
 Wait for staging to finish before applying patches. A patch conflict stops the
 upgrade and must be resolved for that release before installation. The ordered
+staging entry uses `curl | tar` for streaming download and extraction, prints
+curl progress, and writes its completion marker only if both commands succeed.
+An incomplete stage must not be installed. The ordered
 patches in `tools/patches/series` retain NaiveProxy authorship and include the
 Xray isolation/authority adapters. Installation updates `CHROMIUM_VERSION`,
 preserves local build scripts and the stream adapter, and does not rewrite Git
