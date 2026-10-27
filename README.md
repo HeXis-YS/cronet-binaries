@@ -2,6 +2,13 @@
 
 ## Xray native transport branch
 
+The `Build Cronet` GitHub Actions workflow prepares and patches the selected
+Chromium release once, then builds Linux, Windows, and Android artifacts with
+production ThinLTO. Run it with `workflow_dispatch`, or push to `main`. Source
+preparation failures stop the matrix; each job uploads its logs, revision,
+patch series and GN arguments. The upstream-source migration is validated by CI;
+no successful build of that new baseline has been established locally.
+
 This branch builds a shared library for Xray's HTTP/2 and HTTP/3 bidirectional
 streams on Linux, Windows, and Android. Its C ABI is
 `src/components/xray_native/include/xray_engine.h` plus
