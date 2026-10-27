@@ -1,0 +1,87 @@
+name: Build Cronet (Linux)
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cronet-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: src
+    env:
+      EXTRA_FLAGS: 'target_cpu="x64" target_os="linux"'
+      JOBS: 2
+      THIN_LTO: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and patch Chromium
+        working-directory: .
+        run: |
+          set -euo pipefail
+          mkdir -p ci-logs
+          bash tools/prepare-source.sh "$(cat CHROMIUM_VERSION)" "$RUNNER_TEMP/chromium-stage" 2>&1 | tee ci-logs/source.log
+          # Replace the old baseline before restoring toolchain caches.
+          rm -rf src
+          mv "$RUNNER_TEMP/chromium-stage" src
+      - name: Install build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config bubblewrap
+          python3 -m pip install requests
+      - name: Install Ninja
+        if: runner.os == 'Windows'
+        run: python3 -m pip install ninja
+      - name: Cache toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/third_party/llvm-build
+            src/third_party/android_toolchain
+            src/gn
+            src/third_party/rust-toolchain
+            src/out/sysroot-build
+          key: cronet-linux-x64-${{ hashFiles('CHROMIUM_VERSION', 'src/get-clang.sh', 'src/tools/rust/update_rust.py') }}
+      - name: Install matching toolchains
+        run: |
+          set -euo pipefail
+          ./get-clang.sh 2>&1 | tee ../ci-logs/toolchains.log
+      - name: Configure native library
+        run: |
+          set -euo pipefail
+          ./build.sh configure 2>&1 | tee ../ci-logs/configure.log
+      - name: Build and bundle
+        run: |
+          set -euo pipefail
+          ./build.sh 2>&1 | tee ../ci-logs/build.log
+      - name: Collect build conditions
+        if: always()
+        working-directory: .
+        run: |
+          mkdir -p ci-logs
+          git rev-parse HEAD > ci-logs/revision.txt
+          cp CHROMIUM_VERSION ci-logs/
+          cp tools/patches/series ci-logs/patch-series.txt
+          if [ -f src/out/Release/args.gn ]; then cp src/out/Release/args.gn ci-logs/; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-linux-x64
+          path: ci-logs/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cronet-linux-x64
+          path: src/out/Release/cronet/
+          if-no-files-found: error

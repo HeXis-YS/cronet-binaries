@@ -1,4 +1,4 @@
-name: Build Cronet
+name: Build Cronet (Android)
 on:
   workflow_dispatch:
   push:
@@ -15,20 +15,13 @@ concurrency:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {runner: ubuntu-24.04, os: linux, cpu: x64}
-          - {runner: windows-2025, os: win, cpu: x64}
-          - {runner: ubuntu-24.04, os: android, cpu: arm64}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
         working-directory: src
     env:
-      EXTRA_FLAGS: 'target_cpu="${{ matrix.cpu }}" target_os="${{ matrix.os }}"'
+      EXTRA_FLAGS: 'target_cpu="arm64" target_os="android"'
       JOBS: 2
       THIN_LTO: 'true'
     steps:
@@ -60,7 +53,7 @@ jobs:
             src/gn
             src/third_party/rust-toolchain
             src/out/sysroot-build
-          key: cronet-${{ runner.os }}-${{ matrix.os }}-${{ matrix.cpu }}-${{ hashFiles('CHROMIUM_VERSION', 'src/get-clang.sh', 'src/tools/rust/update_rust.py') }}
+          key: cronet-android-arm64-${{ hashFiles('CHROMIUM_VERSION', 'src/get-clang.sh', 'src/tools/rust/update_rust.py') }}
       - name: Install matching toolchains
         run: |
           set -euo pipefail
@@ -85,10 +78,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: logs-${{ matrix.os }}-${{ matrix.cpu }}
+          name: logs-android-arm64
           path: ci-logs/
       - uses: actions/upload-artifact@v4
         with:
-          name: cronet-${{ matrix.os }}-${{ matrix.cpu }}
+          name: cronet-android-arm64
           path: src/out/Release/cronet/
           if-no-files-found: error
