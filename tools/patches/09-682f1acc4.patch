@@ -17,7 +17,7 @@ index 82e4222b8..4cf0124dd 100644
 +++ b/src/build/config/gclient_args.gni
 @@ -1,6 +1,6 @@
  # Generated from 'DEPS'
--android_ndk_version = "2@30.0.16138531"
+-android_ndk_version = "2@30.0.16248370"
 -build_with_chromium = true
 +android_ndk_version = "24"
 +build_with_chromium = false

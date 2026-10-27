@@ -4,22 +4,25 @@ Date: Sat, 27 Jul 2024 10:18:11 +0800
 Subject: [PATCH] android: third_party/jni_zero: Remove JNI functions
 
 ---
- src/third_party/jni_zero/BUILD.gn    | 55 ++--------------------------
- src/third_party/jni_zero/jni_zero.cc | 50 -------------------------
+ src/third_party/jni_zero/BUILD.gn    | 58 +++--------------------------
+ src/third_party/jni_zero/jni_zero.cc | 96 +++++------------------------
  src/third_party/jni_zero/jni_zero.h  |  2 +-
- 3 files changed, 4 insertions(+), 103 deletions(-)
+ 3 files changed, 13 insertions(+), 143 deletions(-)
 
 diff --git a/src/third_party/jni_zero/BUILD.gn b/src/third_party/jni_zero/BUILD.gn
 index 8ff5d1fdd..4fe10a851 100644
 --- a/src/third_party/jni_zero/BUILD.gn
 +++ b/src/third_party/jni_zero/BUILD.gn
-@@ -18,49 +18,6 @@ config("jni_zero_chromium_defines") {
+@@ -18,52 +18,6 @@ config("jni_zero_chromium_defines") {
    }
  }
  
 -generate_jni("generate_jni") {
 -  sources = [
 -    "java/src/org/jni_zero/CommonApis.java",
+-    "java/src/org/jni_zero/JniPtrImpl.java",
+-    "java/src/org/jni_zero/JniRawPtrImpl.java",
+-    "java/src/org/jni_zero/JniUniquePtrImpl.java",
 -    "java/src/org/jni_zero/JniZero.java",
 -  ]
 -  visibility = [
@@ -94,10 +97,13 @@ diff --git a/src/third_party/jni_zero/jni_zero.cc b/src/third_party/jni_zero/jni
 index c72fbcab0..d84a75aa1 100644
 --- a/src/third_party/jni_zero/jni_zero.cc
 +++ b/src/third_party/jni_zero/jni_zero.cc
-@@ -11,11 +11,9 @@
+@@ -11,14 +11,9 @@
  #include <cassert>
  #include <type_traits>
  
+-#include "third_party/jni_zero/generate_jni/JniPtrImpl_jni.h"
+-#include "third_party/jni_zero/generate_jni/JniRawPtrImpl_jni.h"
+-#include "third_party/jni_zero/generate_jni/JniUniquePtrImpl_jni.h"
 -#include "third_party/jni_zero/generate_jni/JniZero_jni.h"
  #include "third_party/jni_zero/jni_methods.h"
  #include "third_party/jni_zero/jni_zero_internal.h"
@@ -127,7 +133,7 @@ index c72fbcab0..d84a75aa1 100644
  }  // namespace
  
  void JNI_JniZero_SetJniClassLoader(
-@@ -136,38 +122,6 @@ void InitVM(JavaVM* vm) {
+@@ -136,39 +122,6 @@ void InitVM(JavaVM* vm) {
      return;
    }
    g_jvm = vm;
@@ -139,7 +145,8 @@ index c72fbcab0..d84a75aa1 100644
 -  // Mark as used when multiplexing not enabled.
 -  (void)&Java_JniZero_crashIfMultiplexingMisaligned;
 -#endif
--  ScopedJavaLocalRef<JArray<jobject>> globals = JniZeroJni::init(env);
+-  ScopedJavaLocalRef<JArray<jobject>> globals =
+-      JniZeroJni::init(env, internal::g_raw_ptr_release_fn != nullptr);
 -  jobject empty_list = env->GetObjectArrayElement(globals.obj(), 0);
 -  jobject empty_map = env->GetObjectArrayElement(globals.obj(), 1);
 -  jobject jni_class_loader = env->GetObjectArrayElement(globals.obj(), 2);
@@ -177,6 +184,66 @@ index c72fbcab0..d84a75aa1 100644
  }
  
  ScopedJavaLocalRef<jclass> GetClass(JNIEnv* env, const char* class_name) {
+@@ -387,50 +387,26 @@ ScopedJavaLocalRef<jobject> CreateJavaJniPtr(JNIEnv* env, jlong ptr) {
+-  if (!ptr) {
+-    return nullptr;
+-  }
+-  return Java_JniPtrImpl_Constructor(env, ptr);
++  JNI_ZERO_CHECK(!ptr);
++  return nullptr;
+ }
+ 
+ ScopedJavaLocalRef<jobject> CreateJavaJniUniquePtr(JNIEnv* env,
+                                                    jlong ptr,
+                                                    jlong deleter) {
+-  if (!ptr) {
+-    return nullptr;
+-  }
+-  return Java_JniUniquePtrImpl_Constructor(env, ptr, deleter);
++  JNI_ZERO_CHECK(!ptr);
++  return nullptr;
+ }
+ 
+ ScopedJavaLocalRef<jobject> CreateJavaJniRawPtr(JNIEnv* env, jlong ptr) {
+-  if (!ptr) {
+-    return nullptr;
+-  }
+-  if (internal::g_raw_ptr_wrap_fn) {
+-    internal::g_raw_ptr_wrap_fn(static_cast<uintptr_t>(ptr));
+-  }
+-  return Java_JniRawPtrImpl_Constructor(env, ptr);
++  JNI_ZERO_CHECK(!ptr);
++  return nullptr;
+ }
+ 
+ void ReleaseJavaJniPtr(JNIEnv* env, const JavaRef<jobject>& obj) {
+-  if (obj.is_null()) {
+-    return;
+-  }
+-  // Called straight after the Java method returns, so an exception may still be
+-  // pending. Generated calls treat a pending exception as fatal, so stash it.
+-  ScopedJavaLocalRef<jthrowable> pending;
+-  if (env->ExceptionCheck()) {
+-    pending = AdoptRef(env, env->ExceptionOccurred());
+-    env->ExceptionClear();
+-  }
+-  Java_JniPtrImpl_release(env, obj);
+-  if (pending) {
+-    env->Throw(pending.obj());
+-  }
++  JNI_ZERO_CHECK(obj.is_null());
+ }
+ 
+ jlong GetJavaJniPtrRawValue(JNIEnv* env, const JavaRef<jobject>& obj) {
+-  if (obj.is_null()) {
+-    return 0;
+-  }
+-  return Java_JniZero_getNativePtr(env, obj);
++  JNI_ZERO_CHECK(obj.is_null());
++  return 0;
+ }
+ 
+ }  // namespace internal
 diff --git a/src/third_party/jni_zero/jni_zero.h b/src/third_party/jni_zero/jni_zero.h
 index fd355a584..394afb09b 100644
 --- a/src/third_party/jni_zero/jni_zero.h

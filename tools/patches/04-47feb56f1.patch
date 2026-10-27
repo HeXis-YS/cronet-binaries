@@ -8,7 +8,7 @@ diff --git a/src/base/BUILD.gn b/src/base/BUILD.gn
 index d09d4b7a1..afb9ac7de 100644
 --- a/src/base/BUILD.gn
 +++ b/src/base/BUILD.gn
-@@ -1217,113 +1217,44 @@ component("base") {
+@@ -1243,117 +1243,48 @@ component("base") {
    # Android.
    if (is_android) {
      sources += [
@@ -55,8 +55,6 @@ index d09d4b7a1..afb9ac7de 100644
 -      "android/java_handler_thread.h",
 -      "android/java_runtime.cc",
 -      "android/java_runtime.h",
--      "android/locale_utils.cc",
--      "android/locale_utils.h",
 -      "android/meminfo_dump_provider.cc",
 -      "android/meminfo_dump_provider.h",
 -      "android/memory_pressure_listener_android.cc",
@@ -80,6 +78,10 @@ index d09d4b7a1..afb9ac7de 100644
 -      "android/scoped_service_binding_batch.h",
 -      "android/screen_state_receiver.cc",
 -      "android/screen_state_receiver.h",
+       "android/scudo_features.cc",
+       "android/scudo_features.h",
+       "android/scudo_purge_coordinator.cc",
+       "android/scudo_purge_coordinator.h",
 -      "android/self_compaction_manager.cc",
 -      "android/self_compaction_manager.h",
 -      "android/shared_preferences/shared_preferences_manager.cc",
@@ -106,6 +108,8 @@ index d09d4b7a1..afb9ac7de 100644
        "files/scoped_file_android.cc",
 -      "memory/platform_shared_memory_mapper_android.cc",
 -      "memory/platform_shared_memory_region_android.cc",
+-      "memory_coordinator/memory_consumer_android.cc",
+-      "memory_coordinator/memory_consumer_android.h",
        "message_loop/message_pump_android.cc",
        "message_loop/message_pump_android.h",
 -      "os_compat_android.cc",
@@ -786,7 +790,7 @@ index 3eb02377b..41ac802e3 100644
 -  checker.set_is_after_input_yield(false);
  }
  
- void MessagePumpAndroid::ScheduleDelayedWork(
+ // Records an approximation of the top of the stack ("pseudo stack top") for
 diff --git a/src/base/system/sys_info_android.cc b/src/base/system/sys_info_android.cc
 index 95846b0e7..444547481 100644
 --- a/src/base/system/sys_info_android.cc
