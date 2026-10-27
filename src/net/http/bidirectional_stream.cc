@@ -206,14 +206,10 @@ void BidirectionalStream::StartRequest() {
   HttpRequestInfo http_request_info;
   http_request_info.url = request_info_->url;
   http_request_info.method = request_info_->method;
-  if (auto isolation = request_info_->extra_headers.GetHeader("-network-isolation-key")) {
-    SchemefulSite site{GURL(*isolation)};
-    CHECK(!site.opaque());
-    http_request_info.network_isolation_key = NetworkIsolationKey(site, site);
-    http_request_info.network_anonymization_key =
-        NetworkAnonymizationKey::CreateSameSite(site);
-    request_info_->extra_headers.RemoveHeader("-network-isolation-key");
-  }
+  http_request_info.network_isolation_key = request_info_->network_isolation_key;
+  http_request_info.network_anonymization_key =
+      request_info_->network_anonymization_key;
+  http_request_info.authority = request_info_->authority;
   http_request_info.extra_headers = request_info_->extra_headers;
   http_request_info.socket_tag = request_info_->socket_tag;
   http_request_info.target_network = request_info_->target_network;

@@ -1,4 +1,4 @@
-#include "components/grpc_support/include/xray_engine.h"
+#include "components/xray_native/include/xray_engine.h"
 
 #include <algorithm>
 #include <memory>

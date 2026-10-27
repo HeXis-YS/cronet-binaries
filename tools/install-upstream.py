@@ -2,7 +2,7 @@
 """Install a completed, patched stage without rewriting repository history.
 
 Run stage-upstream.py and apply-upstream-patches.py first. Local build scripts,
-the grpc_support adapter, and untracked toolchain/build caches are preserved.
+the Xray native adapter, and untracked toolchain/build caches are preserved.
 """
 
 import argparse
@@ -28,7 +28,7 @@ def main():
     files.pop(Path("upstream-stage.json"))
 
     def local(path):
-        return path.parts[:2] == ("components", "grpc_support") or (
+        return path == Path("BUILD.gn") or path.parts[:2] == ("components", "xray_native") or (
             len(path.parts) == 1 and path.suffix == ".sh"
         )
 

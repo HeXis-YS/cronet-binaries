@@ -210,10 +210,8 @@ void CreateSpdyHeadersFromHttpRequest(const HttpRequestInfo& info,
     headers->insert({spdy::kHttp2PathHeader, info.url.PathForRequest()});
   }
 
-  // The URL controls the TLS name; this private header supplies XHTTP's
-  // independent HTTP authority and is never transmitted to the peer.
-  if (auto authority = request_headers.GetHeader("-xray-authority")) {
-    (*headers)[spdy::kHttp2AuthorityHeader] = *authority;
+  if (!info.authority.empty()) {
+    (*headers)[spdy::kHttp2AuthorityHeader] = info.authority;
   }
 
   HttpRequestHeaders::Iterator it(request_headers);
@@ -221,7 +219,7 @@ void CreateSpdyHeadersFromHttpRequest(const HttpRequestInfo& info,
     std::string name = base::ToLowerASCII(it.name());
     if (name.empty() || name[0] == ':' || name == "connection" ||
         name == "proxy-connection" || name == "transfer-encoding" ||
-        name == "host" || name == "-xray-authority") {
+        name == "host") {
       continue;
     }
     AddUniqueSpdyHeader(name, it.value(), headers);

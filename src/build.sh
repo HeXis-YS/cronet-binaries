@@ -55,5 +55,5 @@ if [ "${2:-}" ]; then
   ninja -C "$out" -j "${JOBS:-2}" "$2"
   exit
 fi
-ninja -C "$out" -j "${JOBS:-2}" components/grpc_support:cronet
+ninja -C "$out" -j "${JOBS:-2}" components/xray_native:cronet
 ./bundle-binaries.sh "$out"

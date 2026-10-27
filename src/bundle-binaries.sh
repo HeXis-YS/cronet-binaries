@@ -11,6 +11,6 @@ case "$target_os" in
 esac
 mkdir -p "$out/cronet"
 cp "$out/$library" "$out/cronet/"
-cp components/grpc_support/include/bidirectional_stream_c.h "$out/cronet/"
-cp components/grpc_support/include/xray_engine.h "$out/cronet/"
+cp components/xray_native/include/xray_stream.h "$out/cronet/"
+cp components/xray_native/include/xray_engine.h "$out/cronet/"
 cp ../CHROMIUM_VERSION "$out/cronet/"

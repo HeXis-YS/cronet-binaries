@@ -4,10 +4,14 @@
 
 This branch builds a shared library for Xray's HTTP/2 and HTTP/3 bidirectional
 streams on Linux, Windows, and Android. Its C ABI is
-`src/components/grpc_support/include/xray_engine.h` plus
-`bidirectional_stream_c.h`; it does not provide the full Cronet engine C API.
+`src/components/xray_native/include/xray_engine.h` plus
+`xray_stream.h`; it does not provide the full Cronet engine C API.
 The engine requires both ordinary CA/hostname validation and a leaf SPKI SHA-256
 pin. Xray supplies fixed isolation groups; Chromium manages their connections.
+The stream bridge directly implements Chromium's bidirectional-stream delegate;
+it has no gRPC dependency. Its six `xray_stream_*` operations cover creation,
+start, read, write, cancellation, and destruction. One read and one write may be
+in flight, and a single terminal callback follows transport teardown.
 
 The XHTTP build omits ICU. Supply ASCII hostnames or punycode for international
 domain names. Certificate validation uses the Chrome root store with platform
@@ -33,6 +37,9 @@ patches in `tools/patches/series` retain NaiveProxy authorship and include the
 Xray isolation/authority adapters. Installation updates `CHROMIUM_VERSION`,
 preserves local build scripts and the stream adapter, and does not rewrite Git
 history. The old `import-upstream.sh` rewrites history and is not this workflow.
+The local `src/BUILD.gn` entry point and `components/xray_native` are preserved
+across upgrades. The stream ABI is internal: deploy hray-core and its matching
+native library together.
 
 ### Build
 

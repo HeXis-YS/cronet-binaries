@@ -1,0 +1,27 @@
+source_set("headers") {
+  public = [
+    "include/xray_stream.h",
+    "include/xray_engine.h",
+  ]
+}
+
+source_set("native") {
+  sources = [
+    "stream.cc",
+    "include/xray_stream.h",
+    "include/xray_engine.h",
+    "engine.cc",
+  ]
+
+  deps = [
+    ":headers",
+    "//base",
+    "//net",
+    "//url",
+  ]
+}
+
+shared_library("cronet") {
+  output_name = "cronet"
+  deps = [ ":native" ]
+}

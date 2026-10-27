@@ -23,7 +23,6 @@
 ^chrome/build/*.txt
 ^chrome/version.gni
 ^components/cronet
-^components/grpc_support
 ^components/prefs
 ^components/version_info
 ^crypto
