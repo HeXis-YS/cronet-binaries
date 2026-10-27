@@ -9,6 +9,12 @@ streams on Linux, Windows, and Android. Its C ABI is
 The engine requires both ordinary CA/hostname validation and a leaf SPKI SHA-256
 pin. Xray supplies fixed isolation groups; Chromium manages their connections.
 
+The XHTTP build omits ICU. Supply ASCII hostnames or punycode for international
+domain names. Certificate validation uses the Chrome root store with platform
+system roots; support for separately installed user or enterprise CAs is outside
+the delivery requirements. Android is consumed by hray-core through the native
+C ABI, without a Java-facing API.
+
 ### Upgrade Chromium
 
 Requires Python 3.12+, Git, network access, and enough disk space for both the

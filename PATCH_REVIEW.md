@@ -7,6 +7,8 @@ Linux 库仍在首次完整构建；Windows、Android 尚无构建或运行结�
 边界：最终消费者是 hray-core，Android 也由 Rust 核心调用 C ABI，不提供 Java/JNI
 消费接口。Chromium 内部对 JNI 的依赖仍需处理。Windows、Linux、Android、CA+pin、
 原生连接池及固定隔离分组必须保留。生产 LTO 有价值，12、31 按用户决定暂时保留。
+用户后续确认：XHTTP场景继续裁剪ICU；支持系统CA加pin即可，不要求额外安装的
+用户/企业CA。后者是支持范围，不要求主动排除操作系统信任库中已有的证书。
 
 ## 逐项结论
 
@@ -26,12 +28,12 @@ Linux 库仍在首次完整构建；Windows、Android 尚无构建或运行结�
 | 10 | 官方构建清除日期宏 | 非必要运行功能；可复现构建有价值但尚非明确验收，建议恢复上游或采用现成配置。 |
 | 11 | 禁止显式链接Clang builtins | 条件项；与02耦合，需三平台链接证据再判断。 |
 | 12 | ThinLTO最大优化 | 按用户要求暂时保留；当前build.sh关闭LTO，生产配置尚待落实，不能宣称生产优化已启用。 |
-| 13 | ICU移除与dummy替代 | 有功能损失。IDNToASCII直接false，字符集转换也直接false；Unicode域名支持未经授权不应被静默缩减。需比较上游替代或保留ICU。 |
+| 13 | ICU移除与dummy替代 | 保留。用户接受XHTTP场景裁剪ICU；IDNToASCII和字符集转换直接false，当前入口使用ASCII域名或预先转换的punycode，不增加替代IDNA实现。 |
 | 14 | 移除ICU的32位时间处理 | 与13耦合。32位Android明确使用time64_t及mktime64/gmtime64_r，不存在此前推测的32位SysTime问题；风险限于实际使用窄SysTime的平台。不能据此要求Android恢复ICU，也不能据此证明整个ICU移除安全。 |
 | 15 | 删除未知CPU的#error | 对当前x86/x64/arm/arm64无用途；建议删除。 |
 | 16 | libc++/abi无异常与RTTI裁剪 | 可选优化，不是协议要求；应与17成组比较收益与维护成本。 |
 | 17 | Windows无异常标准库修复 | 仅16保留时条件需要；尚无Windows编译证据。 |
-| 18 | 自行读取Unix/Android CA文件 | CA来源能力有用，实现未定。加载静态文件不等于Android平台信任语义，需比较Chromium信任库与纯原生限制。 |
+| 18 | 自行读取Unix/Android CA文件 | 保留系统CA文件接入方向。用户不要求额外安装的CA，无需为此恢复Android Java用户根接口；系统根目录及三平台实际覆盖仍需核对。 |
 | 19 | builtin verifier选择 | CA验证实现方向可用，但源文件列表改动引出40；应收缩到需要的平台选择。 |
 | 20 | PKCS#7 AIA扩展 | 非当前需求；建议恢复上游行为。移除意味着少一种补链格式，不是禁用CA验证。 |
 | 21 | 放宽连接池上限检查 | 当前引擎设置2048/2040直接依赖它；需核对代理链上限是否与直连XHTTP路径相关，固定分组并不自动证明所有上限修改必要。 |
@@ -84,7 +86,8 @@ DNS裁剪仍须覆盖AIA等证书网络请求，不能只看主XHTTP连接。
 与TrustStoreUnix合并。因此Chrome根库仍在，SSL_CERT_FILE/SSL_CERT_DIR只影响
 附加文件来源，并不替换全部信任根。Android平台用户根的上游路径
 `net/android/network_library.cc:42–49`调用Java；当前文件加载实现不能宣称保留了
-用户/企业根、禁用根及平台更新的全部语义。是否需要这些语义尚无用户决定。
+用户/企业根、禁用根及平台更新的全部语义。用户已确认不要求额外安装的CA，
+因此不为用户/企业根增加JNI接入；系统CA来源的实际覆盖仍属于交付要求。
 
 首次完整构建在system_trust_store.o暴露配置迁移遗漏：Chromium 156的
 `crypto/features.gni`独立声明use_nss_client_certs和use_nss_server_certs，
@@ -133,13 +136,12 @@ DNS裁剪仍须覆盖AIA等证书网络请求，不能只看主XHTTP连接。
 
 1. 先修正新版NSS构建开关并完成Linux链接。该项是既有文件信任库方案的配置修复，
    不新增CA策略。Windows与Android必须分别编译，不能由Linux结果替代。
-2. 对13优先比较恢复上游ICU路径，而不是新增自制IDNA或以ASCII限制代替现有域名能力。
-   保留ICU会增加冷构建内容，这是实际取舍；其余文件名/字符集dummy是否可裁剪另按调用链判断。
-   14随最终ICU选择处理，不单独为Android时间引入替代实现。
+2. 按用户决定保留13的ICU裁剪，不恢复ICU或新增自制IDNA；明确当前域名入口需要ASCII或punycode。
+   14作为配套保留，不单独为Android时间引入替代实现。
 3. 对03–05保留无JVM目标，去除伪造平台信息的实现；先处理SDK版本和实际可达网络调用。
    没有公开JNI消费者不意味着内部平台调用可以无条件返回成功或默认值。
-4. 对18–19先保留Chrome根库加文件附加根的现有方向，明确Android用户/企业CA与
-   平台策略是否属于验收，再决定是否需要额外平台接入。pin仍是附加条件，不能替代CA验证。
+4. 对18–19保留Chrome根库加系统文件根的现有方向，不增加用户/企业CA支持。
+   核对三平台系统根来源；pin仍是附加条件，不能替代CA验证。
 5. 对grpc_support比较直接Delegate，保留单次读写、异步销毁和唯一终止通知；
    将隔离key传递收敛到显式请求字段。authority的局部接入点需单独确定，不能借重写扩大影响面。
 6. 15、20、22、23是已识别的优先移除候选；28以实际Windows SDK环境判断。
