@@ -15,6 +15,7 @@ flags="$flags
   is_component_build=false
   is_clang=true
   is_cronet_build=true
+  build_with_chromium=true
   chrome_pgo_phase=0
   use_thin_lto=${THIN_LTO:-true}
   thin_lto_enable_optimizations=true

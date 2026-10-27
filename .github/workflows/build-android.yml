@@ -1,8 +1,6 @@
 name: Build Cronet (Android)
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
   release:
     types: [published]
 
