@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "base/functional/bind.h"
+#include "base/compiler_specific.h"
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
@@ -75,8 +76,9 @@ HeadersArray::HeadersArray(const quiche::HttpHeaderBlock& header_block) {
   headers = new bidirectional_stream_header[count];
   size_t i = 0;
   for (const auto& it : headers_strings_) {
-    headers[i].key = it.first.c_str();
-    headers[i].value = it.second.c_str();
+    // The array above has exactly headers_strings_.size() entries.
+    UNSAFE_BUFFERS(headers[i]).key = it.first.c_str();
+    UNSAFE_BUFFERS(headers[i]).value = it.second.c_str();
     ++i;
   }
 }
@@ -267,8 +269,9 @@ int bidirectional_stream_start(bidirectional_stream* stream,
   net::HttpRequestHeaders request_headers;
   if (headers) {
     for (size_t i = 0; i < headers->count; ++i) {
-      std::string name(headers->headers[i].key);
-      std::string value(headers->headers[i].value);
+      // The C caller supplies count entries, valid until Start returns.
+      std::string name(UNSAFE_BUFFERS(headers->headers[i]).key);
+      std::string value(UNSAFE_BUFFERS(headers->headers[i]).value);
       if (!net::HttpUtil::IsValidHeaderName(name) ||
           !net::HttpUtil::IsValidHeaderValue(value)) {
         DLOG(ERROR) << "Invalid Header " << name << "=" << value;

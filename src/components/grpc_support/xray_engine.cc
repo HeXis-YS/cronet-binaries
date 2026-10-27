@@ -192,7 +192,7 @@ stream_engine* xray_cronet_engine_create(const char* server_name,
              bool http3, base::WaitableEvent* initialized) {
             context->Initialize(std::move(name), std::move(address), port, pin, http3);
             initialized->Signal();
-          }, context, origin.host(), std::string(address), port, pin, http3,
+          }, context, std::string(origin.host()), std::string(address), port, pin, http3,
           &initialized));
   initialized.Wait();
   auto* engine = new stream_engine;
