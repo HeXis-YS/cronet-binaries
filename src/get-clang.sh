@@ -39,6 +39,10 @@ fi
 # for upstream Rust components. The updater checks the installed version.
 $PYTHON tools/rust/update_rust.py
 
+if [ "$target_os" = win ] && [ "$host_os" = linux ]; then
+  $PYTHON build/vs_toolchain.py update --force
+fi
+
 if [ "$target_os" = android -a ! -f third_party/llvm-build/Release+Asserts/.android-runtime ]; then
   clang_path="clang-android-runtime-library-$CLANG_REVISION.tar.xz"
   curl --fail "https://commondatastorage.googleapis.com/chromium-browser-clang/$WITH_CLANG/$clang_path" |

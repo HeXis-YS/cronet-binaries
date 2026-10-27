@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: windows-2025
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
@@ -36,14 +36,10 @@ jobs:
           rm -rf src
           mv "$RUNNER_TEMP/chromium-stage" src
       - name: Install build dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build pkg-config bubblewrap
+          sudo apt-get install -y ninja-build pkg-config bubblewrap ciopfs
           python3 -m pip install requests
-      - name: Install Ninja
-        if: runner.os == 'Windows'
-        run: python3 -m pip install ninja
       - name: Cache toolchains
         uses: actions/cache@v4
         with:
@@ -52,6 +48,8 @@ jobs:
             src/third_party/android_toolchain
             src/gn
             src/third_party/rust-toolchain
+            src/third_party/depot_tools/win_toolchain
+            src/build/win_toolchain.json
             src/out/sysroot-build
           key: cronet-win-x64-${{ hashFiles('CHROMIUM_VERSION', 'src/get-clang.sh', 'src/tools/rust/update_rust.py') }}
       - name: Install matching toolchains

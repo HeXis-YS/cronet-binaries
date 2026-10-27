@@ -36,14 +36,10 @@ jobs:
           rm -rf src
           mv "$RUNNER_TEMP/chromium-stage" src
       - name: Install build dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build pkg-config bubblewrap
           python3 -m pip install requests
-      - name: Install Ninja
-        if: runner.os == 'Windows'
-        run: python3 -m pip install ninja
       - name: Cache toolchains
         uses: actions/cache@v4
         with:
