@@ -15,11 +15,10 @@ git config core.safecrlf false
 git -c advice.detachedHead=false checkout $root
 rm -rf src
 git checkout "$branch" -- tools
-sed -i "s/^\^/$name\//" tools/include.txt
 if [ -f "/tmp/$tarball" ]; then
-  cat "/tmp/$tarball" | tar xJf - --wildcards --wildcards-match-slash -T tools/include.txt -X tools/exclude.txt
+  tar xJf "/tmp/$tarball"
 else
-  curl "$url" -o- | tar xJf - --wildcards --wildcards-match-slash -T tools/include.txt -X tools/exclude.txt
+  curl "$url" -o- | tar xJf -
 fi
 mv "$name" src
 git rm --quiet --force -r tools

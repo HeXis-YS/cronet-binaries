@@ -14,37 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prepare:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Stage and patch Chromium
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p ci-logs
-          python3 tools/stage-upstream.py "$(cat CHROMIUM_VERSION)" "$RUNNER_TEMP/chromium-stage" 2>&1 | tee ci-logs/stage.log
-          python3 tools/apply-upstream-patches.py "$RUNNER_TEMP/chromium-stage" 2>&1 | tee ci-logs/patches.log
-          tar -C "$RUNNER_TEMP/chromium-stage" -cf "$RUNNER_TEMP/chromium-source.tar" .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: chromium-source
-          path: ${{ runner.temp }}/chromium-source.tar
-          compression-level: 0
-          retention-days: 1
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: source-preparation-logs
-          path: ci-logs/
-
   build:
-    needs: prepare
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -67,18 +37,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@v4
-        with:
-          name: chromium-source
-          path: ${{ runner.temp }}/chromium-source
-      - name: Install prepared source
+      - name: Download and patch Chromium
         working-directory: .
         run: |
           set -euo pipefail
-          mkdir -p ci-logs "$RUNNER_TEMP/chromium-stage"
-          tar -xf "$RUNNER_TEMP/chromium-source/chromium-source.tar" -C "$RUNNER_TEMP/chromium-stage"
-          python3 tools/install-upstream.py "$RUNNER_TEMP/chromium-stage" 2>&1 | tee ci-logs/install.log
-          rm -rf "$RUNNER_TEMP/chromium-stage" "$RUNNER_TEMP/chromium-source"
+          mkdir -p ci-logs
+          bash tools/prepare-source.sh "$(cat CHROMIUM_VERSION)" "$RUNNER_TEMP/chromium-stage" 2>&1 | tee ci-logs/source.log
+          # Replace the old baseline before restoring toolchain caches.
+          rm -rf src
+          mv "$RUNNER_TEMP/chromium-stage" src
       - name: Install build dependencies
         if: runner.os == 'Linux'
         run: |

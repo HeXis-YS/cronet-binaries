@@ -23,7 +23,7 @@ in flight, and a single terminal callback follows transport teardown.
 The new baseline retains upstream ICU and Rust implementations to reduce patch
 maintenance. Source migration and GN validation are in progress; the previously
 installed source tree still contains the older trimming patches. Complete the
-staging, patching, and installation steps below before using the new build flags.
+source preparation below before using the new build flags.
 Certificate validation uses the Chrome root store with platform
 system roots; support for separately installed user or enterprise CAs is outside
 the delivery requirements. Android is consumed by hray-core through the native
@@ -31,26 +31,25 @@ C ABI, without a Java-facing API.
 
 ### Upgrade Chromium
 
-Requires Python 3.12+, curl, GNU tar with xz support, Git, network access, and enough disk space for both the
-staged and installed sources. From the repository root, choose a release and a
-new staging directory outside `src`:
+Requires Bash, curl, tar with xz support, Git, network access, and enough disk
+space for the complete release. From the repository root, choose a release and
+a new output directory outside `src`:
 
 ```sh
-python3 tools/stage-upstream.py VERSION STAGE_DIRECTORY
-python3 tools/apply-upstream-patches.py STAGE_DIRECTORY
-python3 tools/install-upstream.py STAGE_DIRECTORY
+bash tools/prepare-source.sh VERSION OUTPUT_DIRECTORY
 ```
 
-Wait for staging to finish before applying patches. A patch conflict stops the
-upgrade and must be resolved for that release before installation. The
-staging entry uses `curl | tar` for streaming download and extraction, prints
-curl progress, and writes its completion marker only if both commands succeed.
-An incomplete stage must not be installed. The ordered
-patches in `tools/patches/series` retain NaiveProxy authorship and include the
-Xray isolation/authority adapters. Installation updates `CHROMIUM_VERSION`,
-preserves local build scripts and the stream adapter, and does not rewrite Git
-history. The old `import-upstream.sh` rewrites history and is not this workflow.
-The local `components/xray_native` is preserved across upgrades. GN selects it
+The script streams the complete release through `curl | tar`, applies
+`tools/patches/series` in order, and copies the local build scripts and native
+adapter into the output. Any failed command stops preparation; use the output
+only after the script succeeds. Build from that directory using the commands
+below. Existing `src` files and toolchain caches are left untouched. When
+upgrading the pinned release, update `CHROMIUM_VERSION` explicitly.
+Each CI matrix job prepares its own source tree and moves it into `src` before
+restoring toolchain caches; no source artifact is repackaged or exchanged.
+The patches retain NaiveProxy authorship and include the Xray isolation/authority
+adapters. The old `import-upstream.sh` rewrites history and is not this workflow.
+GN selects `components/xray_native`
 with `--root-target` and `--root-pattern`; upstream build descriptions and source
 files remain intact. The stream ABI is internal: deploy hray-core and its matching
 native library together. Patch categories and the migration status are recorded

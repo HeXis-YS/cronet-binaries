@@ -19,8 +19,8 @@
 | 精简GN启动文件 | 30 | 从候选series移除。使用上游.gn与--script-executable=python3，不再删除circular include检查。 |
 
 候选series为14项，原补丁文件暂保留到新基线验证完成；不能将候选数量当作最终结果。
-暂存入口为tools/stage-upstream.py，新增保留所有GN/GNI描述及ICU/Rust依赖；
-升级仍执行apply-upstream-patches.py及install-upstream.py。本地src/BUILD.gn不再特殊保留，
+源码准备入口为tools/prepare-source.sh，完整解包发布源码、依次应用补丁并复制本地适配文件；
+各CI矩阵任务独立准备源码。本地src/BUILD.gn不再特殊保留，
 根目标通过GN命令选择。get-clang.sh改用上游Rust updater取得匹配工具链。
 生产LTO仍保留，build.sh的THIN_LTO可显式调整，不以删除全局补丁为由删除优化要求。
 
