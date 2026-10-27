@@ -79,12 +79,18 @@ Linux 库仍在首次完整构建；Windows、Android 尚无构建或运行结�
 当前引擎以host mapping连接给定地址，但另建的证书抓取context没有这条映射，
 DNS裁剪仍须覆盖AIA等证书网络请求，不能只看主XHTTP连接。
 
-18并未把CA信任缩减为几个文件目录。`net/cert/cert_verify_proc.cc:416–425`
+在关闭NSS服务端证书支持的预期配置下，18并未把CA信任缩减为几个文件目录。`net/cert/cert_verify_proc.cc:416–425`
 创建TrustStoreChrome，再交给`internal/system_trust_store.cc:495–498`，
 与TrustStoreUnix合并。因此Chrome根库仍在，SSL_CERT_FILE/SSL_CERT_DIR只影响
 附加文件来源，并不替换全部信任根。Android平台用户根的上游路径
 `net/android/network_library.cc:42–49`调用Java；当前文件加载实现不能宣称保留了
 用户/企业根、禁用根及平台更新的全部语义。是否需要这些语义尚无用户决定。
+
+首次完整构建在system_trust_store.o暴露配置迁移遗漏：Chromium 156的
+`crypto/features.gni`独立声明use_nss_client_certs和use_nss_server_certs，
+仅关闭旧use_nss_certs时，这两个值在Linux仍为true。构建因缺少NSS头文件cert.h失败，
+此时实际选择的是NSS分支，尚未到达上述文件信任库。build.sh现明确关闭两个开关，
+使实现与原有无需NSS、使用文件附加根的构建意图一致；修正后的完整构建仍待完成。
 
 13的IDN损失在当前入口可达：`components/grpc_support/xray_engine.cc:177`
 直接用传入server_name构造GURL，Rust的`src/xhttp/cronet.rs`只转换CString，
@@ -120,6 +126,24 @@ DNS裁剪仍须覆盖AIA等证书网络请求，不能只看主XHTTP连接。
   不是CONNECT代理隧道。README顶部虽标明旧说明仅属原v119分发，仍不应据此判断当前能力。
 - 12存在但src/build.sh固定use_thin_lto=false/is_cfi=false；生产LTO尚未配置完成。
 - src/base/time/time_exploded_posix.cc注释仍说32位使用ICU，而14将该调用包在#if 0中。
+
+## 收敛顺序
+
+以下是实施建议，不将尚无跨平台证据的条件项直接删除：
+
+1. 先修正新版NSS构建开关并完成Linux链接。该项是既有文件信任库方案的配置修复，
+   不新增CA策略。Windows与Android必须分别编译，不能由Linux结果替代。
+2. 对13优先比较恢复上游ICU路径，而不是新增自制IDNA或以ASCII限制代替现有域名能力。
+   保留ICU会增加冷构建内容，这是实际取舍；其余文件名/字符集dummy是否可裁剪另按调用链判断。
+   14随最终ICU选择处理，不单独为Android时间引入替代实现。
+3. 对03–05保留无JVM目标，去除伪造平台信息的实现；先处理SDK版本和实际可达网络调用。
+   没有公开JNI消费者不意味着内部平台调用可以无条件返回成功或默认值。
+4. 对18–19先保留Chrome根库加文件附加根的现有方向，明确Android用户/企业CA与
+   平台策略是否属于验收，再决定是否需要额外平台接入。pin仍是附加条件，不能替代CA验证。
+5. 对grpc_support比较直接Delegate，保留单次读写、异步销毁和唯一终止通知；
+   将隔离key传递收敛到显式请求字段。authority的局部接入点需单独确定，不能借重写扩大影响面。
+6. 15、20、22、23是已识别的优先移除候选；28以实际Windows SDK环境判断。
+   构建裁剪01、06、24–25、30、32–40在功能取舍明确后合并整理，12、31继续保留。
 
 ## 证据与限制
 

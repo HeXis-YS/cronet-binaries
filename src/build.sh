@@ -39,6 +39,8 @@ flags="$flags
   enable_device_bound_sessions=false
   enable_disk_cache_sql_backend=false
   use_nss_certs=false
+  use_nss_client_certs=false
+  use_nss_server_certs=false
 "
 if [ "${WITH_SYSROOT:-}" ]; then
   flags="$flags target_sysroot=\"//$WITH_SYSROOT\""
