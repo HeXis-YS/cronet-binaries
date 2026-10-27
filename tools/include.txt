@@ -46,7 +46,7 @@
 ^third_party/depot_tools/subprocess2.py
 ^third_party/googletest/BUILD.gn
 ^third_party/googletest/src/googletest/include/gtest/gtest_prod.h
-^third_party/icu/config.gni
+^third_party/icu
 ^third_party/jni_zero/jni_zero.gni
 ^third_party/libc++
 ^third_party/libc++abi
@@ -101,3 +101,8 @@
 ^tools/generate_shim_headers
 ^tools/metrics
 ^tools/ubsan
+^third_party/rust
+^tools/rust
+^testing
+^*.gn
+^*.gni

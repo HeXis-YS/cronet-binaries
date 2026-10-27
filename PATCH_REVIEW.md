@@ -1,5 +1,31 @@
 # Chromium native transport patch review
 
+## 当前方向：最少上游修改
+
+用户进一步确认：优先控制升级维护成本。ICU等裁剪只影响构建成本和体积，
+不作为必须维护的能力；恢复上游实现优先于维护替代代码。
+当前正在独立暂存目录验证新基线，尚未完成安装或GN配置验证，构建保持停止。
+下面旧审查保留为前一阶段记录；与此节冲突的“保留裁剪”决定已被覆盖。
+
+| 类别 | 原编号 | 新基线处理 |
+|---|---|---|
+| 必要嵌入改造 | 03–07 | 保留无JVM Android接入；不把这些stub与构建裁剪混为一类。 |
+| 必要信任与连接语义 | 18、21、26、27 | 保留系统根接入、池上限及显式隔离/authority字段；21的proxy-chain部分仍需核对。 |
+| 工具链/独立构建兼容 | 08、09、25、28、29 | 暂列条件项；保留不代表永久必需，应由对应平台的实际失败决定。 |
+| 测试/目标裁剪 | 01、32–39 | 从候选series移除。保留上游GN文件，使用--root-target与--root-pattern限制到本地库依赖闭包。 |
+| 替代实现及体积优化 | 02、13、14、16、17、41 | 从候选series移除。恢复Chromium Rust、ICU、libc++及protoc原实现；不维护自制替代代码。 |
+| 全局编译配置修改 | 10、11、12、31 | 从候选series移除。保留默认日期宏和builtins逻辑；生产LTO优化放在本地共享库目标，不再改全局默认config。 |
+| verifier默认值 | 19 | 从候选series移除。用chrome_root_store_only/optional及NSS参数选择builtin verifier；验证上游源文件选择是否足够。 |
+| 精简GN启动文件 | 30 | 从候选series移除。使用上游.gn与--script-executable=python3，不再删除circular include检查。 |
+
+候选series为14项，原补丁文件暂保留到新基线验证完成；不能将候选数量当作最终结果。
+暂存入口为tools/stage-upstream.py，新增保留所有GN/GNI描述及ICU/Rust依赖；
+升级仍执行apply-upstream-patches.py及install-upstream.py。本地src/BUILD.gn不再特殊保留，
+根目标通过GN命令选择。get-clang.sh改用上游Rust updater取得匹配工具链。
+生产LTO仍保留，build.sh的THIN_LTO可显式调整，不以删除全局补丁为由删除优化要求。
+
+## 前一阶段审查记录
+
 审查及重构日期：2026-10-27。下表保留原41项编号，当前series剩36个补丁。
 用户已要求先停止构建、裁剪补丁和接口，重构完成后重启。旧grpc_support适配层已移除，
 改用components/xray_native直接连接Chromium Delegate；Windows、Android尚无构建或运行结论。

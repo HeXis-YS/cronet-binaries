@@ -13,8 +13,11 @@ it has no gRPC dependency. Its six `xray_stream_*` operations cover creation,
 start, read, write, cancellation, and destruction. One read and one write may be
 in flight, and a single terminal callback follows transport teardown.
 
-The XHTTP build omits ICU. Supply ASCII hostnames or punycode for international
-domain names. Certificate validation uses the Chrome root store with platform
+The new baseline retains upstream ICU and Rust implementations to reduce patch
+maintenance. Source migration and GN validation are in progress; the previously
+installed source tree still contains the older trimming patches. Complete the
+staging, patching, and installation steps below before using the new build flags.
+Certificate validation uses the Chrome root store with platform
 system roots; support for separately installed user or enterprise CAs is outside
 the delivery requirements. Android is consumed by hray-core through the native
 C ABI, without a Java-facing API.
@@ -37,9 +40,11 @@ patches in `tools/patches/series` retain NaiveProxy authorship and include the
 Xray isolation/authority adapters. Installation updates `CHROMIUM_VERSION`,
 preserves local build scripts and the stream adapter, and does not rewrite Git
 history. The old `import-upstream.sh` rewrites history and is not this workflow.
-The local `src/BUILD.gn` entry point and `components/xray_native` are preserved
-across upgrades. The stream ABI is internal: deploy hray-core and its matching
-native library together.
+The local `components/xray_native` is preserved across upgrades. GN selects it
+with `--root-target` and `--root-pattern`; upstream build descriptions and source
+files remain intact. The stream ABI is internal: deploy hray-core and its matching
+native library together. Patch categories and the migration status are recorded
+in [PATCH_REVIEW.md](PATCH_REVIEW.md).
 
 ### Build
 
@@ -52,6 +57,11 @@ From `src`, run:
 ./build.sh
 ```
 
+`get-clang.sh` also runs Chromium's Rust toolchain updater. `./build.sh configure`
+generates the library dependency graph without compiling. Production ThinLTO is
+enabled by default and its link optimization is configured in the local library
+target; use `THIN_LTO=false` explicitly for a build without LTO.
+
 Set `EXTRA_FLAGS='target_cpu="arm64" target_os="android"'` for Android or choose
 `linux`/`win` and a supported CPU from `.github/workflows/build.yml`. Run both
 commands with the same flags. `JOBS` controls Ninja parallelism (default 2).
@@ -60,9 +70,8 @@ Set Xray's `XRAY_CRONET_LIBRARY` to the absolute library path.
 For an interface build failure, `./build.sh release NINJA_TARGET` builds only
 that target and its prerequisites without packaging a library.
 
-The host `protoc` builds only C++ and Python generators. Python output is used
-by Chromium's current proto build actions; Java generation is unused by this
-native library, including Android builds, and is removed by patch 41.
+The new baseline leaves `protoc` generator selection at upstream defaults;
+removing unused generators would add another patch to maintain.
 
 The upstream project description below describes the original v119 distribution;
 its full Cronet API and release automation do not describe this branch's output.

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build the Xray bidirectional-stream library. Run get-clang.sh first.
 # EXTRA_FLAGS selects target_cpu/target_os as in NaiveProxy.
+# ./build.sh configure only generates the target graph, without compiling.
 set -e
 cd "$(dirname "$0")"
 . ./get-sysroot.sh
@@ -15,7 +16,8 @@ flags="$flags
   is_clang=true
   is_cronet_build=true
   chrome_pgo_phase=0
-  use_thin_lto=false
+  use_thin_lto=${THIN_LTO:-true}
+  thin_lto_enable_optimizations=true
   is_cfi=false
   use_sysroot=false
   use_allocator_shim=false
@@ -28,7 +30,11 @@ flags="$flags
   use_ozone=false
   use_gio=false
   use_glib=false
-  use_platform_icu_alternatives=true
+  use_platform_icu_alternatives=false
+  enable_rust=true
+  enable_chromium_prelude=true
+  chrome_root_store_optional=false
+  chrome_root_store_only=true
   is_perfetto_embedder=true
   disable_file_support=true
   enable_websockets=false
@@ -49,7 +55,14 @@ if [ "$target_os" = android ]; then
   flags="$flags is_desktop_android=true default_min_sdk_version=24"
 fi
 export DEPOT_TOOLS_WIN_TOOLCHAIN=0
-./gn/out/gn gen "$out" --args="$flags ${EXTRA_FLAGS:-}"
+./gn/out/gn gen "$out" \
+  --root-target=//components/xray_native:cronet \
+  --root-pattern=//components/xray_native:cronet \
+  --script-executable=python3 \
+  --args="$flags ${EXTRA_FLAGS:-}"
+if [ "${1:-}" = configure ]; then
+  exit
+fi
 if [ "${2:-}" ]; then
   # Compile a specific target or object when resolving an interface failure.
   ninja -C "$out" -j "${JOBS:-2}" "$2"

@@ -28,7 +28,7 @@ def main():
     files.pop(Path("upstream-stage.json"))
 
     def local(path):
-        return path == Path("BUILD.gn") or path.parts[:2] == ("components", "xray_native") or (
+        return path.parts[:2] == ("components", "xray_native") or (
             len(path.parts) == 1 and path.suffix == ".sh"
         )
 

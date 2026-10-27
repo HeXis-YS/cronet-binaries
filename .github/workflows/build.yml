@@ -49,8 +49,9 @@ jobs:
             src/third_party/llvm-build
             src/third_party/android_toolchain
             src/gn
+            src/third_party/rust-toolchain
             src/out/sysroot-build
-          key: cronet-${{ runner.os }}-${{ matrix.os }}-${{ matrix.cpu }}-${{ hashFiles('CHROMIUM_VERSION', 'src/get-clang.sh') }}
+          key: cronet-${{ runner.os }}-${{ matrix.os }}-${{ matrix.cpu }}-${{ hashFiles('CHROMIUM_VERSION', 'src/get-clang.sh', 'src/tools/rust/update_rust.py') }}
       - run: ./get-clang.sh
       - run: ./build.sh
       - uses: actions/upload-artifact@v4

@@ -35,6 +35,10 @@ if [ "$installed_revision" != "$CLANG_REVISION" ] || [ ! -f third_party/llvm-bui
   rm -f third_party/llvm-build/Release+Asserts/.android-runtime
 fi
 
+# Use Chromium's matching Rust package instead of maintaining C++ replacements
+# for upstream Rust components. The updater checks the installed version.
+$PYTHON tools/rust/update_rust.py
+
 if [ "$target_os" = android -a ! -f third_party/llvm-build/Release+Asserts/.android-runtime ]; then
   clang_path="clang-android-runtime-library-$CLANG_REVISION.tar.xz"
   curl --fail "https://commondatastorage.googleapis.com/chromium-browser-clang/$WITH_CLANG/$clang_path" |
