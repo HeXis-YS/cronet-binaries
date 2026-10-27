@@ -51,13 +51,8 @@ jobs:
       matrix:
         include:
           - {runner: ubuntu-24.04, os: linux, cpu: x64}
-          - {runner: ubuntu-24.04, os: linux, cpu: arm64}
           - {runner: windows-2025, os: win, cpu: x64}
-          - {runner: windows-2025, os: win, cpu: arm64}
           - {runner: ubuntu-24.04, os: android, cpu: arm64}
-          - {runner: ubuntu-24.04, os: android, cpu: arm}
-          - {runner: ubuntu-24.04, os: android, cpu: x64}
-          - {runner: ubuntu-24.04, os: android, cpu: x86}
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
