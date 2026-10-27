@@ -52,7 +52,7 @@ if [ "${WITH_SYSROOT:-}" ]; then
   flags="$flags target_sysroot=\"//$WITH_SYSROOT\""
 fi
 if [ "$target_os" = android ]; then
-  flags="$flags is_desktop_android=true default_min_sdk_version=24"
+  flags="$flags is_desktop_android=true checkout_android=true default_min_sdk_version=24"
 fi
 export DEPOT_TOOLS_WIN_TOOLCHAIN=0
 ./gn/out/gn gen "$out" \
