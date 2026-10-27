@@ -15,7 +15,6 @@ concurrency:
 
 jobs:
   build:
-    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -34,9 +33,6 @@ jobs:
       THIN_LTO: 'true'
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - name: Download and patch Chromium
         working-directory: .
         run: |
