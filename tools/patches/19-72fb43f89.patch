@@ -4,11 +4,6 @@ Date: Sun, 10 Dec 2023 19:12:48 +0800
 Subject: [PATCH] net/cert: Use builtin verifier on Android and Linux
 
 ---
- src/net/BUILD.gn                   | 2 +-
- src/net/cert/ev_root_ca_metadata.h | 2 +-
- src/net/features.gni               | 4 ++--
- 3 files changed, 4 insertions(+), 4 deletions(-)
-
 diff --git a/src/net/BUILD.gn b/src/net/BUILD.gn
 index 6bb9bd2e2..708c700d4 100644
 --- a/src/net/BUILD.gn
@@ -21,14 +16,6 @@ index 6bb9bd2e2..708c700d4 100644
        "proxy_resolution/proxy_config_service_android.h",
        "ssl/ech_mode_getter_android.cc",
        "ssl/ech_mode_getter_android.h",
-@@ -1394,6 +1393,7 @@ component("net") {
-       "base/network_interfaces_linux.cc",
-       "base/network_interfaces_linux.h",
-       "base/platform_mime_util_linux.cc",
-+      "cert/test_root_certs_builtin.cc",
-     ]
-   }
- 
 diff --git a/src/net/cert/ev_root_ca_metadata.h b/src/net/cert/ev_root_ca_metadata.h
 index 9c029289d..53c3ec91d 100644
 --- a/src/net/cert/ev_root_ca_metadata.h

@@ -4,57 +4,72 @@ Date: Wed, 18 Nov 2020 22:51:53 +0800
 Subject: [PATCH] base: Don't fix Y2038 problem with icu
 
 ---
- src/base/BUILD.gn                    | 2 +-
- src/base/time/time.h                 | 2 ++
- src/base/time/time_exploded_posix.cc | 2 +-
- 3 files changed, 4 insertions(+), 2 deletions(-)
-
-diff --git a/src/base/BUILD.gn b/src/base/BUILD.gn
-index 9e8e05529..5b4579f40 100644
 --- a/src/base/BUILD.gn
 +++ b/src/base/BUILD.gn
-@@ -2355,7 +2355,7 @@ component("base") {
-     # headers which allows representing time as int64, which makes this entire
-     # problem moot. Hence, why `!is_cronet_build` flag has been added.
-     # See crbug.com/431972096#comment10 for more information.
+@@ -2344,27 +2344,7 @@
+       "time/time_now_posix.cc",
+     ]
+
+-    # TODO(b/167763382) Find an alternate solution for Chromecast devices, since
+-    # adding the icui18n and icuuc deps significantly increases the binary size.
+-    # This dependency was added to deal with Y2038 problem where time_t is
+-    # represented via int32. However, Android builds specifically have time64
+-    # headers which allows representing time as int64, which makes this entire
+-    # problem moot. Hence, why `!is_cronet_build` flag has been added.
+-    # See crbug.com/431972096#comment10 for more information.
 -    if (!is_castos && !is_cast_android && !is_cronet_build) {
-+    if (false) {
-       sources += [ "time/time_exploded_icu.cc" ]
- 
-       # The ICU dependency is only needed on systems with a 32-bit time_t.
-diff --git a/src/base/time/time.h b/src/base/time/time.h
-index 8365d8964..4816fb733 100644
+-      sources += [ "time/time_exploded_icu.cc" ]
+-
+-      # The ICU dependency is only needed on systems with a 32-bit time_t.
+-      # However, that cannot be determined from build variables, like
+-      # |current_cpu|, since some 32-bit systems have a 64-bit time_t (and vice
+-      # versa). Thus, the dependency is taken here for all POSIX platforms and
+-      # the compiler+linker should be able to easily detect when the ICU
+-      # routines will not be called and delete them in the final linking.
+-      deps += [
+-        "//third_party/icu:icui18n",
+-        "//third_party/icu:icuuc",
+-      ]
+-    }
++
+   }
+
+   if (is_posix) {
 --- a/src/base/time/time.h
 +++ b/src/base/time/time.h
-@@ -846,6 +846,7 @@ class BASE_EXPORT Time : public time_internal::TimeBase<Time> {
- 
-   // Some platforms use the ICU library to provide To/FromExploded, when their
-   // native library implementations are insufficient in some way.
-+#if 0
-   static void ExplodeUsingIcu(int64_t millis_since_unix_epoch,
-                               bool is_local,
-                               Exploded* exploded);
-@@ -853,6 +854,7 @@ class BASE_EXPORT Time : public time_internal::TimeBase<Time> {
-       bool is_local,
-       const Exploded& exploded,
-       int64_t* millis_since_unix_epoch);
-+#endif
- 
+@@ -844,16 +844,6 @@
+                                          const Exploded& exploded,
+                                          Time* time);
+
+-  // Some platforms use the ICU library to provide To/FromExploded, when their
+-  // native library implementations are insufficient in some way.
+-  static void ExplodeUsingIcu(int64_t millis_since_unix_epoch,
+-                              bool is_local,
+-                              Exploded* exploded);
+-  [[nodiscard]] static bool FromExplodedUsingIcu(
+-      bool is_local,
+-      const Exploded& exploded,
+-      int64_t* millis_since_unix_epoch);
+-
    // Rounds down the time to the nearest day in either local time
    // |is_local = true| or UTC |is_local = false|.
-diff --git a/src/base/time/time_exploded_posix.cc b/src/base/time/time_exploded_posix.cc
-index 073b27e40..4aa65fb13 100644
+   Time Midnight(bool is_local) const;
 --- a/src/base/time/time_exploded_posix.cc
 +++ b/src/base/time/time_exploded_posix.cc
-@@ -130,7 +130,7 @@ void Time::Explode(bool is_local, Exploded* exploded) const {
-   if (sizeof(SysTime) < 8) {
- // TODO(b/167763382) Find an alternate solution for Chromecast devices, since
- // adding the icui18n dep significantly increases the binary size.
+@@ -125,16 +125,6 @@
+ void Time::Explode(bool is_local, Exploded* exploded) const {
+   const int64_t millis_since_unix_epoch =
+       ToRoundedDownMillisecondsSinceUnixEpoch();
+-
+-  // For systems with a Y2038 problem, use ICU as the Explode() implementation.
+-  if (sizeof(SysTime) < 8) {
+-// TODO(b/167763382) Find an alternate solution for Chromecast devices, since
+-// adding the icui18n dep significantly increases the binary size.
 -#if !BUILDFLAG(IS_CASTOS) && !BUILDFLAG(IS_CAST_ANDROID)
-+#if 0
-     ExplodeUsingIcu(millis_since_unix_epoch, is_local, exploded);
-     return;
- #endif  // !BUILDFLAG(IS_CASTOS) && !BUILDFLAG(IS_CAST_ANDROID)
--- 
-2.53.0
+-    ExplodeUsingIcu(millis_since_unix_epoch, is_local, exploded);
+-    return;
+-#endif  // !BUILDFLAG(IS_CASTOS) && !BUILDFLAG(IS_CAST_ANDROID)
+-  }
 
+   // Split the |millis_since_unix_epoch| into separate seconds and millisecond
+   // components because the platform calendar-explode operates at one-second

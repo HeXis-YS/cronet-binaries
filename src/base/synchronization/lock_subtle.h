@@ -74,6 +74,7 @@ static inline void YieldProcessor() {
   // require additional software implementation.
   NOTREACHED();
 #else
+#error "Unsupported architecture for YieldProcessor()"
 #endif  // ARCH
 }
 

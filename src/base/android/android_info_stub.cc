@@ -5,6 +5,9 @@
 #include "base/android/android_info.h"
 
 #include <string>
+#include <sys/system_properties.h>
+
+#include "base/strings/string_number_conversions.h"
 
 static constexpr std::string empty;
 
@@ -45,7 +48,15 @@ const std::string& android_build_fp() {
 }
 
 int sdk_int() {
-  return 0;
+  // Platform feature gates need the actual API level even without a JVM.
+  static const int sdk = [] {
+    char value[PROP_VALUE_MAX] = {};
+    __system_property_get("ro.build.version.sdk", value);
+    int version = 0;
+    base::StringToInt(value, &version);
+    return version;
+  }();
+  return sdk;
 }
 
 bool is_debug_android() {

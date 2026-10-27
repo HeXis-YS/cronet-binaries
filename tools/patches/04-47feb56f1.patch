@@ -4,33 +4,6 @@ Date: Sun, 16 May 2021 10:10:30 +0800
 Subject: [PATCH] android: base: Add Android stubs
 
 ---
- src/base/BUILD.gn                             | 104 ++---------------
- src/base/android/android_info_stub.cc         |  79 +++++++++++++
- src/base/android/apk_info_stub.cc             |  59 ++++++++++
- .../application_status_listener_stub.cc       |  35 ++++++
- src/base/android/build_info_stub.cc           |  73 ++++++++++++
- src/base/android/content_uri_utils_stub.cc    |  77 +++++++++++++
- src/base/android/device_info_stub.cc          |  61 ++++++++++
- src/base/android/input_hint_checker.h         |   2 +-
- src/base/android/jni_android_stub.cc          |  97 ++++++++++++++++
- src/base/android/sys_utils_stub.cc            |  16 +++
- src/base/android/virtual_document_path.cc     |  40 +------
- src/base/files/file_util_android.cc           |  16 +--
- src/base/message_loop/message_pump_android.cc |   7 --
- src/base/system/sys_info_android.cc           |  28 -----
- .../threading/platform_thread_android_stub.cc | 106 ++++++++++++++++++
- src/base/uuid.h                               |   9 +-
- 16 files changed, 625 insertions(+), 184 deletions(-)
- create mode 100644 src/base/android/android_info_stub.cc
- create mode 100644 src/base/android/apk_info_stub.cc
- create mode 100644 src/base/android/application_status_listener_stub.cc
- create mode 100644 src/base/android/build_info_stub.cc
- create mode 100644 src/base/android/content_uri_utils_stub.cc
- create mode 100644 src/base/android/device_info_stub.cc
- create mode 100644 src/base/android/jni_android_stub.cc
- create mode 100644 src/base/android/sys_utils_stub.cc
- create mode 100644 src/base/threading/platform_thread_android_stub.cc
-
 diff --git a/src/base/BUILD.gn b/src/base/BUILD.gn
 index d09d4b7a1..afb9ac7de 100644
 --- a/src/base/BUILD.gn
@@ -193,10 +166,9 @@ index d09d4b7a1..afb9ac7de 100644
    # Chromeos.
 diff --git a/src/base/android/android_info_stub.cc b/src/base/android/android_info_stub.cc
 new file mode 100644
-index 000000000..3e3200edb
 --- /dev/null
 +++ b/src/base/android/android_info_stub.cc
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,90 @@
 +// Copyright 2025 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -204,6 +176,9 @@ index 000000000..3e3200edb
 +#include "base/android/android_info.h"
 +
 +#include <string>
++#include <sys/system_properties.h>
++
++#include "base/strings/string_number_conversions.h"
 +
 +static constexpr std::string empty;
 +
@@ -244,7 +219,15 @@ index 000000000..3e3200edb
 +}
 +
 +int sdk_int() {
-+  return 0;
++  // Platform feature gates need the actual API level even without a JVM.
++  static const int sdk = [] {
++    char value[PROP_VALUE_MAX] = {};
++    __system_property_get("ro.build.version.sdk", value);
++    int version = 0;
++    base::StringToInt(value, &version);
++    return version;
++  }();
++  return sdk;
 +}
 +
 +bool is_debug_android() {
@@ -378,85 +361,6 @@ index 000000000..c57e73053
 +// static
 +bool ApplicationStatusListener::HasVisibleActivities() {
 +  return false;
-+}
-+
-+}  // namespace android
-+}  // namespace base
-diff --git a/src/base/android/build_info_stub.cc b/src/base/android/build_info_stub.cc
-new file mode 100644
-index 000000000..3780b8464
---- /dev/null
-+++ b/src/base/android/build_info_stub.cc
-@@ -0,0 +1,73 @@
-+// Copyright (c) 2012 The Chromium Authors. All rights reserved.
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in the LICENSE file.
-+
-+#include <cstdlib>
-+
-+#include "base/android/build_info.h"
-+#include "base/notreached.h"
-+
-+int __system_property_get(const char* name, char* value);
-+
-+namespace {
-+int GetSdkInt() {
-+  constexpr int kPropNameMax = 32;
-+  char prop_info[kPropNameMax];
-+  __system_property_get("ro.build.version.sdk", prop_info);
-+  return std::atoi(prop_info);
-+}
-+}  // namespace
-+
-+namespace base {
-+namespace android {
-+
-+struct BuildInfoSingletonTraits {
-+  static BuildInfo* New() { return new BuildInfo(); }
-+
-+  static void Delete(BuildInfo* x) {
-+    // We're leaking this type, see kRegisterAtExit.
-+    NOTREACHED();
-+  }
-+
-+  static const bool kRegisterAtExit = false;
-+};
-+
-+BuildInfo::BuildInfo()
-+    : brand_(""),
-+      device_(""),
-+      android_build_id_(""),
-+      manufacturer_(""),
-+      model_(""),
-+      sdk_int_(GetSdkInt()),
-+      build_type_(""),
-+      board_(""),
-+      host_package_name_(""),
-+      host_version_code_(""),
-+      host_package_label_(""),
-+      package_name_(""),
-+      package_version_code_(""),
-+      package_version_name_(""),
-+      android_build_fp_(""),
-+      installer_package_name_(""),
-+      abi_name_(""),
-+      resources_version_(""),
-+      target_sdk_version_(0),
-+      is_debug_android_(false),
-+      is_tv_(false),
-+      version_incremental_(""),
-+      hardware_(""),
-+      is_automotive_(false),
-+      codename_(""),
-+      vulkan_deqp_level_(0),
-+      is_foldable_(false),
-+      soc_manufacturer_(""),
-+      is_debug_app_(false),
-+      is_desktop_(false) {}
-+
-+// static
-+BuildInfo* BuildInfo::GetInstance() {
-+  return Singleton<BuildInfo, BuildInfoSingletonTraits>::get();
 +}
 +
 +}  // namespace android

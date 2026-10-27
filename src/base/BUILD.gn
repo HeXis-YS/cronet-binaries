@@ -2344,27 +2344,7 @@ component("base") {
       "time/time_now_posix.cc",
     ]
 
-    # TODO(b/167763382) Find an alternate solution for Chromecast devices, since
-    # adding the icui18n and icuuc deps significantly increases the binary size.
-    # This dependency was added to deal with Y2038 problem where time_t is
-    # represented via int32. However, Android builds specifically have time64
-    # headers which allows representing time as int64, which makes this entire
-    # problem moot. Hence, why `!is_cronet_build` flag has been added.
-    # See crbug.com/431972096#comment10 for more information.
-    if (false) {
-      sources += [ "time/time_exploded_icu.cc" ]
 
-      # The ICU dependency is only needed on systems with a 32-bit time_t.
-      # However, that cannot be determined from build variables, like
-      # |current_cpu|, since some 32-bit systems have a 64-bit time_t (and vice
-      # versa). Thus, the dependency is taken here for all POSIX platforms and
-      # the compiler+linker should be able to easily detect when the ICU
-      # routines will not be called and delete them in the final linking.
-      deps += [
-        "//third_party/icu:icui18n",
-        "//third_party/icu:icuuc",
-      ]
-    }
   }
 
   if (is_posix) {

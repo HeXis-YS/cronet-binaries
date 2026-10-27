@@ -12,15 +12,11 @@
 12-e42e9f8d3.patch
 13-3741d04fd.patch
 14-c6026a38e.patch
-15-3435ba304.patch
 16-b8d81e7eb.patch
 17-955d991c7.patch
 18-64d2befbc.patch
 19-72fb43f89.patch
-20-cc0162e4f.patch
 21-c61ed0046.patch
-22-5b02919a5.patch
-23-0898b860c.patch
 24-1a9f41b09.patch
 25-b7f87e9e2.patch
 26-xhttp-isolation.patch
@@ -37,5 +33,4 @@
 37-perfetto-filtering-tests.patch
 38-perfetto-protovm-tests.patch
 39-unused-build-targets.patch
-40-root-certs-source.patch
 41-protoc-without-java.patch
