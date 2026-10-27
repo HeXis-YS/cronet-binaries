@@ -19,21 +19,17 @@ namespace quiche {
 
 // Maximum value that can be properly encoded using RFC 9000 62-bit Variable
 // Length Integer encoding.
-enum : uint64_t {
-  kVarInt62MaxValue = UINT64_C(0x3fffffffffffffff),
-};
+inline constexpr uint64_t kVarInt62MaxValue = UINT64_C(0x3fffffffffffffff);
 
 // RFC 9000 62-bit Variable Length Integer encoding masks
 // If a uint64_t anded with a mask is not 0 then the value is encoded
 // using that length (or is too big, in the case of kVarInt62ErrorMask).
 // Values must be checked in order (error, 8-, 4-, and then 2- bytes)
 // and if none are non-0, the value is encoded in 1 byte.
-enum : uint64_t {
-  kVarInt62ErrorMask = UINT64_C(0xc000000000000000),
-  kVarInt62Mask8Bytes = UINT64_C(0x3fffffffc0000000),
-  kVarInt62Mask4Bytes = UINT64_C(0x000000003fffc000),
-  kVarInt62Mask2Bytes = UINT64_C(0x0000000000003fc0),
-};
+inline constexpr uint64_t kVarInt62ErrorMask = UINT64_C(0xc000000000000000);
+inline constexpr uint64_t kVarInt62Mask8Bytes = UINT64_C(0x3fffffffc0000000);
+inline constexpr uint64_t kVarInt62Mask4Bytes = UINT64_C(0x000000003fffc000);
+inline constexpr uint64_t kVarInt62Mask2Bytes = UINT64_C(0x0000000000003fc0);
 
 // This class provides facilities for packing binary data.
 //
@@ -89,19 +85,26 @@ class QUICHE_EXPORT QuicheDataWriter {
 
   // Write a 62-bit unsigned integer using RFC 9000 Variable Length Integer
   // encoding. Returns false if the value is out of range or if there is no room
-  // in the buffer.
+  // in the buffer. Requires that the endianness is NETWORK_BYTE_ORDER.
   bool WriteVarInt62(uint64_t value);
+
+  // Writes a 64-bit unsigned integer encoded using the MOQT varint syntax.
+  bool WriteMoqVarInt(uint64_t value);
 
   // Same as WriteVarInt62(uint64_t), but forces an encoding size to write to.
   // This is not as optimized as WriteVarInt62(uint64_t). Returns false if the
   // value does not fit in the specified write_length or if there is no room in
-  // the buffer.
+  // the buffer. Requires that the endianness is NETWORK_BYTE_ORDER.
   bool WriteVarInt62WithForcedLength(
       uint64_t value, QuicheVariableLengthIntegerLength write_length);
 
-  // Writes a string piece as a consecutive length/content pair. The
-  // length uses RFC 9000 Variable Length Integer encoding.
+  // Writes a string piece as a consecutive length/content pair. The length uses
+  // RFC 9000 Variable Length Integer encoding. Requires that the endianness is
+  // NETWORK_BYTE_ORDER.
   bool WriteStringPieceVarInt62(const absl::string_view& string_piece);
+
+  // Same as above but with MOQ-style varints.
+  bool WriteStringPieceMoqVarInt(absl::string_view string_piece);
 
   // Utility function to return the number of bytes needed to encode
   // the given value using IETF VarInt62 encoding. Returns the number
@@ -137,8 +140,6 @@ class QUICHE_EXPORT QuicheDataWriter {
   }
 
  private:
-  // TODO(fkastenholz, b/73004262) change buffer_, et al, to be uint8_t, not
-  // char.
   char* buffer_;
   size_t capacity_;  // Allocation size of payload (or -1 if buffer is const).
   size_t length_;    // Current length of the buffer.

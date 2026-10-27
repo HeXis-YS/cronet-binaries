@@ -6,18 +6,19 @@
 #define NET_DNS_MAPPED_HOST_RESOLVER_H_
 
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <vector>
 
-#include "base/strings/string_piece.h"
 #include "base/values.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/host_mapping_rules.h"
 #include "net/base/net_export.h"
 #include "net/base/network_anonymization_key.h"
+#include "net/base/network_handle.h"
 #include "net/dns/dns_config.h"
 #include "net/dns/host_resolver.h"
 #include "net/log/net_log_with_source.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/scheme_host_port.h"
 
 namespace net {
@@ -45,12 +46,12 @@ class NET_EXPORT MappedHostResolver : public HostResolver {
   // to be resolved with ERR_NAME_NOT_RESOLVED.
   //
   // Returns true if the rule was successfully parsed and added.
-  bool AddRuleFromString(base::StringPiece rule_string) {
+  bool AddRuleFromString(std::string_view rule_string) {
     return rules_.AddRuleFromString(rule_string);
   }
 
   // Takes a comma separated list of rules, and assigns them to this resolver.
-  void SetRulesFromString(base::StringPiece rules_string) {
+  void SetRulesFromString(std::string_view rules_string) {
     rules_.SetRulesFromString(rules_string);
   }
 
@@ -58,18 +59,26 @@ class NET_EXPORT MappedHostResolver : public HostResolver {
   std::unique_ptr<ResolveHostRequest> CreateRequest(
       url::SchemeHostPort host,
       NetworkAnonymizationKey network_anonymization_key,
+      handles::NetworkHandle target_network,
       NetLogWithSource net_log,
-      absl::optional<ResolveHostParameters> optional_parameters) override;
+      std::optional<ResolveHostParameters> optional_parameters) override;
   std::unique_ptr<ResolveHostRequest> CreateRequest(
       const HostPortPair& host,
       const NetworkAnonymizationKey& network_anonymization_key,
+      handles::NetworkHandle target_network,
       const NetLogWithSource& net_log,
-      const absl::optional<ResolveHostParameters>& optional_parameters)
-      override;
+      const std::optional<ResolveHostParameters>& optional_parameters) override;
+  std::unique_ptr<ServiceEndpointRequest> CreateServiceEndpointRequest(
+      Host host,
+      NetworkAnonymizationKey network_anonymization_key,
+      handles::NetworkHandle target_network,
+      NetLogWithSource net_log,
+      ResolveHostParameters parameters) override;
   std::unique_ptr<ProbeRequest> CreateDohProbeRequest() override;
   HostCache* GetHostCache() override;
-  base::Value::Dict GetDnsConfigAsValue() const override;
+  base::DictValue GetDnsConfigAsValue() const override;
   void SetRequestContext(URLRequestContext* request_context) override;
+  bool IsHappyEyeballsV3Enabled() const override;
   HostResolverManager* GetManagerForTesting() override;
 
  private:

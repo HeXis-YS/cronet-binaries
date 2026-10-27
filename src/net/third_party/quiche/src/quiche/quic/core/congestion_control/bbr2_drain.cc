@@ -4,6 +4,9 @@
 
 #include "quiche/quic/core/congestion_control/bbr2_drain.h"
 
+#include <algorithm>
+#include <ostream>
+
 #include "quiche/quic/core/congestion_control/bbr2_sender.h"
 #include "quiche/quic/platform/api/quic_logging.h"
 
@@ -42,16 +45,10 @@ QuicByteCount Bbr2DrainMode::DrainTarget() const {
   return std::max<QuicByteCount>(bdp, sender_->GetMinimumCongestionWindow());
 }
 
-Bbr2DrainMode::DebugState Bbr2DrainMode::ExportDebugState() const {
-  DebugState s;
+Bbr2DebugState::Drain Bbr2DrainMode::ExportDebugState() const {
+  Bbr2DebugState::Drain s;
   s.drain_target = DrainTarget();
   return s;
-}
-
-std::ostream& operator<<(std::ostream& os,
-                         const Bbr2DrainMode::DebugState& state) {
-  os << "[DRAIN] drain_target: " << state.drain_target << "\n";
-  return os;
 }
 
 const Bbr2Params& Bbr2DrainMode::Params() const { return sender_->Params(); }

@@ -2,6 +2,7 @@
 .file 2 "inserted_by_delocate.c"
 .loc 2 1 0
 BORINGSSL_bcm_text_start:
+.LBORINGSSL_bcm_text_start_local_target:
 	# Most instructions and lines should pass unaltered. This is made up of
 	# copy-and-pasted bits of compiler output and likely does not actually
 	# run.
@@ -25,6 +26,7 @@ foo:
 	.loc 1 168 0 is_stmt 0 discriminator 1
 	cmpq	-8(%rbp), %rax
 	jmpq *%rax
+	notrack jmp *%rax
         movdqa  %xmm3,%xmm10
 	psrlq   $1,%xmm3
 	pxor    %xmm6,%xmm5
@@ -59,20 +61,11 @@ foo:
 .text
 .loc 2 2 0
 BORINGSSL_bcm_text_end:
-.type OPENSSL_ia32cap_get, @function
-.globl OPENSSL_ia32cap_get
-.LOPENSSL_ia32cap_get_local_target:
-OPENSSL_ia32cap_get:
-	leaq OPENSSL_ia32cap_P(%rip), %rax
-	ret
-.extern OPENSSL_ia32cap_P
-.type OPENSSL_ia32cap_addr_delta, @object
-.size OPENSSL_ia32cap_addr_delta, 8
-OPENSSL_ia32cap_addr_delta:
-.quad OPENSSL_ia32cap_P-OPENSSL_ia32cap_addr_delta
+.LBORINGSSL_bcm_text_end_local_target:
 .type BORINGSSL_bcm_text_hash, @object
 .size BORINGSSL_bcm_text_hash, 32
 BORINGSSL_bcm_text_hash:
+.LBORINGSSL_bcm_text_hash_local_target:
 .byte 0xae
 .byte 0x2c
 .byte 0xea

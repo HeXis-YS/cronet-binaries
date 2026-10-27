@@ -7,8 +7,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
+#include "openssl/ssl.h"
 #include "quiche/quic/core/crypto/proof_verifier.h"
 #include "quiche/quic/core/crypto/quic_crypto_client_config.h"
 #include "quiche/quic/core/proto/cached_network_parameters_proto.h"
@@ -17,6 +20,7 @@
 #include "quiche/quic/core/quic_crypto_stream.h"
 #include "quiche/quic/core/quic_server_id.h"
 #include "quiche/quic/core/quic_session.h"
+#include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_versions.h"
 #include "quiche/quic/platform/api/quic_export.h"
@@ -32,11 +36,14 @@ class TlsClientHandshaker;
 class QUICHE_EXPORT QuicCryptoClientStreamBase : public QuicCryptoStream {
  public:
   explicit QuicCryptoClientStreamBase(QuicSession* session);
+  QuicCryptoClientStreamBase(const QuicCryptoClientStreamBase&) = delete;
+  QuicCryptoClientStreamBase& operator=(const QuicCryptoClientStreamBase&) =
+      delete;
 
   ~QuicCryptoClientStreamBase() override {}
 
-  // Performs a crypto handshake with the server. Returns true if the connection
-  // is still connected.
+  // Performs a crypto handshake with the server. Returns true if the
+  // connection is still connected.
   virtual bool CryptoConnect() = 0;
 
   // DEPRECATED: Use IsResumption, EarlyDataAccepted, and/or
@@ -50,9 +57,9 @@ class QUICHE_EXPORT QuicCryptoClientStreamBase : public QuicCryptoStream {
   // Whether TLS resumption was attempted by this client. IETF QUIC only.
   virtual bool ResumptionAttempted() const = 0;
 
-  // Returns true if the handshake performed was a resumption instead of a full
-  // handshake. Resumption only makes sense for TLS handshakes - there is no
-  // concept of resumption for QUIC crypto even though it supports a 0-RTT
+  // Returns true if the handshake performed was a resumption instead of a
+  // full handshake. Resumption only makes sense for TLS handshakes - there is
+  // no concept of resumption for QUIC crypto even though it supports a 0-RTT
   // handshake. This function only returns valid results once the handshake is
   // complete.
   virtual bool IsResumption() const = 0;
@@ -99,10 +106,17 @@ class QUICHE_EXPORT QuicCryptoClientStreamBase : public QuicCryptoStream {
       CachedNetworkParameters /*cached_network_params*/) override {
     QUICHE_DCHECK(false);
   }
+
+  // Returns the creation time of the session ticket used for resumption, if
+  // resumption was attempted.
+  virtual std::optional<QuicWallTime> GetSessionTicketCreationTime() const = 0;
 };
 
 class QUICHE_EXPORT QuicCryptoClientStream : public QuicCryptoClientStreamBase {
  public:
+  // Returns the creation time of the session ticket used for resumption, if
+  // resumption was attempted.
+  std::optional<QuicWallTime> GetSessionTicketCreationTime() const override;
   // kMaxClientHellos is the maximum number of times that we'll send a client
   // hello. The value 4 accounts for:
   //   * One failure due to an incorrect or missing source-address token.
@@ -157,6 +171,11 @@ class QUICHE_EXPORT QuicCryptoClientStream : public QuicCryptoClientStreamBase {
     // Returns the ssl_early_data_reason_t describing why 0-RTT was accepted or
     // rejected.
     virtual ssl_early_data_reason_t EarlyDataReason() const = 0;
+
+    // Returns the creation time of the session ticket used for resumption, if
+    // resumption was attempted.
+    virtual std::optional<QuicWallTime> GetSessionTicketCreationTime()
+        const = 0;
 
     // Returns true if the client received an inchoate REJ during the handshake,
     // extending the handshake by one round trip. This only applies for QUIC
@@ -235,6 +254,20 @@ class QUICHE_EXPORT QuicCryptoClientStream : public QuicCryptoClientStreamBase {
                                       absl::string_view context,
                                       size_t result_len,
                                       std::string* result) = 0;
+
+    // Returns true if the server indicated during the handshake that it
+    // provided a certificate which matched one of the client-advertised trust
+    // anchor IDs
+    // (https://tlswg.org/tls-trust-anchor-ids/draft-ietf-tls-trust-anchor-ids.html#name-overview).
+    virtual bool MatchedTrustAnchorIdForTesting() const = 0;
+
+    // Returns true if the server indicated during the handshake that it
+    // sent the requested amount of padding.
+    virtual bool ServerPaddingSentForTesting() const = 0;
+
+    // Returns the SSL compliance policy configured for the connection, if any.
+    virtual std::optional<ssl_compliance_policy_t>
+    SslCompliancePolicyForTesting() const = 0;
   };
 
   // ProofHandler is an interface that handles callbacks from the crypto
@@ -254,6 +287,14 @@ class QUICHE_EXPORT QuicCryptoClientStream : public QuicCryptoClientStreamBase {
     // will only be called for secure QUIC connections.
     virtual void OnProofVerifyDetailsAvailable(
         const ProofVerifyDetails& verify_details) = 0;
+
+    // Called when the server requests a client certificate. |cert_authorities|
+    // contains the DER-encoded requested CAs. Returns true if the handshake
+    // should be suspended to provide the certificate asynchronously.
+    virtual bool OnCertificateRequested(
+        const std::vector<std::string>& /*cert_authorities*/) {
+      return false;
+    }
   };
 
   QuicCryptoClientStream(const QuicServerId& server_id, QuicSession* session,
@@ -286,7 +327,7 @@ class QUICHE_EXPORT QuicCryptoClientStream : public QuicCryptoClientStreamBase {
   void OnPacketDecrypted(EncryptionLevel /*level*/) override {}
   void OnOneRttPacketAcknowledged() override;
   void OnHandshakePacketSent() override;
-  void OnConnectionClosed(QuicErrorCode error,
+  void OnConnectionClosed(const QuicConnectionCloseFrame& frame,
                           ConnectionCloseSource source) override;
   void OnHandshakeDoneReceived() override;
   void OnNewTokenReceived(absl::string_view token) override;
@@ -306,6 +347,10 @@ class QUICHE_EXPORT QuicCryptoClientStream : public QuicCryptoClientStreamBase {
   bool ExportKeyingMaterial(absl::string_view label, absl::string_view context,
                             size_t result_len, std::string* result) override;
   std::string chlo_hash() const;
+
+  bool MatchedTrustAnchorIdForTesting() const;
+  bool ServerPaddingSentForTesting() const;
+  std::optional<ssl_compliance_policy_t> SslCompliancePolicyForTesting() const;
 
  protected:
   void set_handshaker(std::unique_ptr<HandshakerInterface> handshaker) {

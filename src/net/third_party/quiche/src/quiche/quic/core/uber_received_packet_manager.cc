@@ -4,6 +4,8 @@
 
 #include "quiche/quic/core/uber_received_packet_manager.h"
 
+#include <algorithm>
+
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_utils.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
@@ -68,6 +70,16 @@ void UberReceivedPacketManager::DontWaitForPacketsBefore(
   received_packet_managers_[QuicUtils::GetPacketNumberSpace(
                                 decrypted_packet_level)]
       .DontWaitForPacketsBefore(least_unacked);
+}
+
+void UberReceivedPacketManager::OnImmediateAckFrame() {
+  if (!supports_multiple_packet_number_spaces_) {
+    QUIC_BUG(quic_bug_10495_4)
+        << "Received ImmediateAckFrame when multiple packet number spaces "
+           "is not supported";
+    return;
+  }
+  received_packet_managers_[APPLICATION_DATA].OnImmediateAckFrame();
 }
 
 void UberReceivedPacketManager::MaybeUpdateAckTimeout(
@@ -221,8 +233,7 @@ void UberReceivedPacketManager::set_max_ack_ranges(size_t max_ack_ranges) {
 
 void UberReceivedPacketManager::set_save_timestamps(bool save_timestamps) {
   for (auto& received_packet_manager : received_packet_managers_) {
-    received_packet_manager.set_save_timestamps(
-        save_timestamps, supports_multiple_packet_number_spaces_);
+    received_packet_manager.set_save_timestamps(save_timestamps);
   }
 }
 

@@ -268,7 +268,7 @@ static void AIO_IOPool_destroy(IOPoolCtx_t* ctx) {
 /* AIO_IOPool_acquireJob:
  * Returns an available io job to be used for a future io. */
 static IOJob_t* AIO_IOPool_acquireJob(IOPoolCtx_t* ctx) {
-    IOJob_t *job;
+    IOJob_t* job;
     assert(ctx->file != NULL || ctx->prefs->testMode);
     AIO_IOPool_lockJobsMutex(ctx);
     assert(ctx->availableJobsCount > 0);
@@ -453,8 +453,8 @@ static IOJob_t* AIO_ReadPool_findNextWaitingOffsetCompletedJob_locked(ReadPoolCt
 /* AIO_ReadPool_numReadsInFlight:
  * Returns the number of IO read jobs currently in flight. */
 static size_t AIO_ReadPool_numReadsInFlight(ReadPoolCtx_t* ctx) {
-    const size_t jobsHeld = (ctx->currentJobHeld==NULL ? 0 : 1);
-    return ctx->base.totalIoJobs - (ctx->base.availableJobsCount + ctx->completedJobsCount + jobsHeld);
+    const int jobsHeld = (ctx->currentJobHeld==NULL ? 0 : 1);
+    return (size_t)(ctx->base.totalIoJobs - (ctx->base.availableJobsCount + ctx->completedJobsCount + jobsHeld));
 }
 
 /* AIO_ReadPool_getNextCompletedJob:
@@ -514,8 +514,7 @@ static void AIO_ReadPool_enqueueRead(ReadPoolCtx_t* ctx) {
 }
 
 static void AIO_ReadPool_startReading(ReadPoolCtx_t* ctx) {
-    int i;
-    for (i = 0; i < ctx->base.availableJobsCount; i++) {
+    while(ctx->base.availableJobsCount) {
         AIO_ReadPool_enqueueRead(ctx);
     }
 }

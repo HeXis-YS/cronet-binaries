@@ -7,8 +7,10 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/containers/flat_map.h"
 #include "base/feature_list.h"
 #include "base/memory/raw_ptr.h"
@@ -16,14 +18,17 @@
 #include "base/metrics/field_trial.h"
 #include "base/metrics/field_trial_params.h"
 #include "base/types/pass_key.h"
-#include "third_party/abseil-cpp/absl/base/attributes.h"
+
+namespace base {
+struct RuntimeFieldTrialInfo;
+}  // namespace base
 
 namespace base::test {
 
 // A reference to a base::Feature and field trial params that should be force
 // enabled and overwritten for test purposes.
 struct FeatureRefAndParams {
-  FeatureRefAndParams(const Feature& feature ABSL_ATTRIBUTE_LIFETIME_BOUND,
+  FeatureRefAndParams(const Feature& feature LIFETIME_BOUND,
                       const FieldTrialParams& params);
 
   FeatureRefAndParams(const FeatureRefAndParams& other);
@@ -41,8 +46,7 @@ struct FeatureRefAndParams {
 class FeatureRef {
  public:
   // NOLINTNEXTLINE(google-explicit-constructor)
-  FeatureRef(const Feature& feature ABSL_ATTRIBUTE_LIFETIME_BOUND)
-      : feature_(feature) {}
+  FeatureRef(const Feature& feature LIFETIME_BOUND) : feature_(feature) {}
 
   const Feature& operator*() const { return *feature_; }
   const Feature* operator->() const { return &*feature_; }
@@ -88,11 +92,16 @@ class ScopedFeatureList final {
   // Constructs the instance in a non-initialized state.
   ScopedFeatureList();
 
-  // Shorthand for immediately initializing with InitAndEnableFeature().
+  // Shorthand for immediately initializing with `InitAndEnableFeature()`.
   explicit ScopedFeatureList(const Feature& enable_feature);
+  // Shorthand for immediately initializing with `InitWithFeatures()`.
+  explicit ScopedFeatureList(
+      const std::vector<FeatureRef>& enabled_features,
+      const std::vector<FeatureRef>& disabled_features = {});
 
   ScopedFeatureList(const ScopedFeatureList&) = delete;
   ScopedFeatureList& operator=(const ScopedFeatureList&) = delete;
+  ScopedFeatureList(ScopedFeatureList&&);
 
   ~ScopedFeatureList();
 
@@ -130,8 +139,8 @@ class ScopedFeatureList final {
   // with the given enabled and disabled features (comma-separated names).
   // Note: This creates a scoped global field trial list if there is not
   // currently one.
-  void InitFromCommandLine(const std::string& enable_features,
-                           const std::string& disable_features);
+  void InitFromCommandLine(std::string_view enable_features,
+                           std::string_view disable_features);
 
   // Initializes and registers a FeatureList instance based on the current
   // FeatureList and overridden with the given enabled and disabled features.
@@ -179,6 +188,45 @@ class ScopedFeatureList final {
   //                    `true` for force-enabled).
   void InitWithFeatureStates(const flat_map<FeatureRef, bool>& feature_states);
 
+  // Simulates a mid-session mutation of runtime-mutable features, the way the
+  // variations service does in production when a newly fetched seed changes
+  // the state of a runtime-mutable feature. This is meant for authors of
+  // runtime-mutable features to exercise their feature's behavior when its
+  // state flips while the process is running.
+  //
+  // `features_to_enable` and `features_to_disable` are applied as a single
+  // batch, mirroring production ordering:
+  //   1. All pre-mutation callbacks are run (features still report their old
+  //      state).
+  //   2. All feature states are mutated.
+  //   3. All post-mutation callbacks are run (features report their new state).
+  //
+  // CHECK-fails if any requested mutation cannot be applied, i.e. if:
+  //  - a feature is listed more than once, e.g. in both `features_to_enable`
+  //    and `features_to_disable`;
+  //  - the feature was not declared with BASE_RUNTIME_MUTABLE_FEATURE;
+  //  - the feature was not registered via
+  //    `FeatureList::EnableRuntimeMutability()` before the FeatureList was set
+  //    as the global instance (in tests, typically by building a FeatureList
+  //    manually and passing it to `InitWithFeatureList()`);
+  //  - the feature's state is pinned by a command-line override, which takes
+  //    precedence over runtime mutations;
+  //  - the requested state is not supported yet (only disabling features is
+  //    supported at the moment, so `features_to_enable` must be empty).
+  //
+  // Note: unlike production, this does not simulate the corresponding
+  // `base::RuntimeFieldTrialOverrides` update; only the feature state (and its
+  // associated runtime trial name) is mutated.
+  //
+  // TODO(crbug.com/536851701): Support specifying field trial params for the
+  // features being mutated, once runtime mutability supports params.
+  void MutateRuntimeMutableFeatures(
+      const std::vector<FeatureRef>& features_to_enable,
+      const std::vector<FeatureRef>& features_to_disable);
+
+  // Convenience wrapper around the above for mutating a single feature.
+  void MutateRuntimeMutableFeature(const Feature& feature, bool enabled);
+
  private:
   using PassKey = base::PassKey<ScopedFeatureList>;
 
@@ -216,6 +264,12 @@ class ScopedFeatureList final {
   raw_ptr<base::FieldTrialList> original_field_trial_list_ = nullptr;
   std::string original_params_;
   std::unique_ptr<base::FieldTrialList> field_trial_list_;
+
+  // Cache for RuntimeFieldTrialInfo objects created during simulated mutations.
+  // These objects must outlive the FeatureList (which holds raw_ptr references
+  // to them) and be destroyed after the FeatureList is cleared in Reset().
+  std::vector<std::unique_ptr<RuntimeFieldTrialInfo>>
+      runtime_field_trial_info_cache_;
 };
 
 }  // namespace base::test

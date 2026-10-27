@@ -5,6 +5,9 @@
 #include "quiche/quic/core/quic_version_manager.h"
 
 #include <algorithm>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "absl/base/macros.h"
 #include "quiche/quic/core/quic_versions.h"
@@ -36,7 +39,7 @@ const std::vector<std::string>& QuicVersionManager::GetSupportedAlpns() {
 }
 
 void QuicVersionManager::MaybeRefilterSupportedVersions() {
-  static_assert(SupportedVersions().size() == 5u,
+  static_assert(SupportedVersions().size() == 4u,
                 "Supported versions out of sync");
   if (enable_version_2_draft_08_ !=
           GetQuicReloadableFlag(quic_enable_version_rfcv2) ||
@@ -44,8 +47,6 @@ void QuicVersionManager::MaybeRefilterSupportedVersions() {
           GetQuicReloadableFlag(quic_disable_version_rfcv1) ||
       disable_version_draft_29_ !=
           GetQuicReloadableFlag(quic_disable_version_draft_29) ||
-      disable_version_q050_ !=
-          GetQuicReloadableFlag(quic_disable_version_q050) ||
       disable_version_q046_ !=
           GetQuicReloadableFlag(quic_disable_version_q046)) {
     enable_version_2_draft_08_ =
@@ -53,7 +54,6 @@ void QuicVersionManager::MaybeRefilterSupportedVersions() {
     disable_version_rfcv1_ = GetQuicReloadableFlag(quic_disable_version_rfcv1);
     disable_version_draft_29_ =
         GetQuicReloadableFlag(quic_disable_version_draft_29);
-    disable_version_q050_ = GetQuicReloadableFlag(quic_disable_version_q050);
     disable_version_q046_ = GetQuicReloadableFlag(quic_disable_version_q046);
 
     RefilterSupportedVersions();
@@ -73,7 +73,7 @@ void QuicVersionManager::RefilterSupportedVersions() {
                   transport_version) == filtered_transport_versions_.end()) {
       filtered_transport_versions_.push_back(transport_version);
     }
-    if (version.UsesHttp3()) {
+    if (version.IsIetfQuic()) {
       filtered_supported_versions_with_http3_.push_back(version);
     }
     if (std::find(filtered_supported_alpns_.begin(),

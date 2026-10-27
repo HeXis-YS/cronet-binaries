@@ -5,10 +5,45 @@
 """Config module for checking siso -config flags."""
 
 load("@builtin//struct.star", "module")
+load("./backend_config/backend.star", "backend")
 
 __KNOWN_CONFIG_OPTIONS = [
+    # Indicates that it is for Google Chromium/Chrome build using Google RBE
+    # as REAPI backend and all remote exeuctions are tested/maintained by
+    # Chrome build infra team.
+    "googlechrome",
+
     # Indicates that the build runs on a builder.
     "builder",
+
+    # Indicate that it runs on Cog (automatically set on Cog).
+    "cog",
+
+    # Enable remote as default rule.
+    "default-remote",
+
+    # Force disable additional remote on cog.
+    # TODO: b/333033551 - check performance with/without remote on cog.
+    "disable-remote-on-cog",
+
+    # TODO: b/308405411 - Enable this config for all builders.
+    "remote-devtools-frontend-typescript",
+
+    # TODO: b/370860664 - Enable remote link by default after supporting
+    # all platforms and target OSes.
+    # For developers, we can't simply enable remote link without bytes
+    # because developers need objects and tests locally for debugging
+    # and testing.
+    "remote-link",
+
+    # Unset timeout from rules to allow long remote steps.
+    # This is useful when remote actions are expected to take longer than
+    # the configured timeouts. e.g. remote linking for official builds.
+    "no-remote-timeout",
+
+    # Run javac commands locally. Needed to get hints about how to fix missing
+    # GN deps.
+    "no-remote-javac",
 ]
 
 def __check(ctx):
@@ -18,10 +53,29 @@ def __check(ctx):
                 print("unknown config: %s" % cfg)
 
 def __get(ctx, key):
+    onCog = ctx.fs.exists("../.citc")
+    disableRemoteOnCog = False
     if "config" in ctx.flags:
         for cfg in ctx.flags["config"].split(","):
             if cfg == key:
                 return True
+            if cfg == "disable-remote-on-cog":
+                disableRemoteOnCog = True
+            if cfg == "cog":
+                onCog = True
+    if hasattr(backend, "configs"):
+        if key in backend.configs(ctx):
+            return True
+    if onCog:
+        if disableRemoteOnCog:
+            return False
+
+        # on cog, .citc directory exist in parent directory of exec root.
+        # disable race strategy as "builder".
+        # enable "remote-*" on cog
+        # TODO: b/308405411 - enable "remote-devtools-frontend-typescript"
+        if key in ("builder", "cog", "remote-link"):
+            return True
     return False
 
 config = module(

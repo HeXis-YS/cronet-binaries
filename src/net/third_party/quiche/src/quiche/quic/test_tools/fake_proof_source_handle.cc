@@ -4,9 +4,25 @@
 
 #include "quiche/quic/test_tools/fake_proof_source_handle.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/base/nullability.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "openssl/base.h"
+#include "quiche/quic/core/crypto/proof_source.h"
 #include "quiche/quic/core/quic_connection_id.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
+#include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/common/platform/api/quiche_logging.h"
+#include "quiche/common/quiche_callbacks.h"
 
 namespace quic {
 namespace test {
@@ -21,7 +37,7 @@ struct ComputeSignatureResult {
 class ResultSavingSignatureCallback : public ProofSource::SignatureCallback {
  public:
   explicit ResultSavingSignatureCallback(
-      absl::optional<ComputeSignatureResult>* result)
+      std::optional<ComputeSignatureResult>* result)
       : result_(result) {
     QUICHE_DCHECK(!result_->has_value());
   }
@@ -32,15 +48,15 @@ class ResultSavingSignatureCallback : public ProofSource::SignatureCallback {
   }
 
  private:
-  absl::optional<ComputeSignatureResult>* result_;
+  std::optional<ComputeSignatureResult>* result_;
 };
 
 ComputeSignatureResult ComputeSignatureNow(
-    ProofSource* delegate, const QuicSocketAddress& server_address,
+    ProofSource& delegate, const QuicSocketAddress& server_address,
     const QuicSocketAddress& client_address, const std::string& hostname,
     uint16_t signature_algorithm, absl::string_view in) {
-  absl::optional<ComputeSignatureResult> result;
-  delegate->ComputeTlsSignature(
+  std::optional<ComputeSignatureResult> result;
+  delegate.ComputeTlsSignature(
       server_address, client_address, hostname, signature_algorithm, in,
       std::make_unique<ResultSavingSignatureCallback>(&result));
   QUICHE_CHECK(result.has_value())
@@ -51,14 +67,19 @@ ComputeSignatureResult ComputeSignatureNow(
 }  // namespace
 
 FakeProofSourceHandle::FakeProofSourceHandle(
-    ProofSource* delegate, ProofSourceHandleCallback* callback,
-    Action select_cert_action, Action compute_signature_action,
-    QuicDelayedSSLConfig dealyed_ssl_config)
+    ProofSource* absl_nonnull delegate,
+    ProofSourceHandleCallback* absl_nonnull callback, Action select_cert_action,
+    Action compute_signature_action, QuicDelayedSSLConfig delayed_ssl_config,
+    quiche::SingleUseCallback<void()> pending_callback)
     : delegate_(delegate),
       callback_(callback),
       select_cert_action_(select_cert_action),
       compute_signature_action_(compute_signature_action),
-      dealyed_ssl_config_(dealyed_ssl_config) {}
+      delayed_ssl_config_(delayed_ssl_config),
+      pending_callback_(std::move(pending_callback)) {
+  QUICHE_CHECK(delegate);
+  QUICHE_CHECK(callback);
+}
 
 void FakeProofSourceHandle::CloseHandle() {
   select_cert_op_.reset();
@@ -71,46 +92,50 @@ QuicAsyncStatus FakeProofSourceHandle::SelectCertificate(
     const QuicSocketAddress& client_address,
     const QuicConnectionId& original_connection_id,
     absl::string_view ssl_capabilities, const std::string& hostname,
-    absl::string_view client_hello, const std::string& alpn,
-    absl::optional<std::string> alps,
+    const SSL_CLIENT_HELLO& /*client_hello*/, const std::string& alpn,
+    std::optional<std::string> alps,
     const std::vector<uint8_t>& quic_transport_params,
-    const absl::optional<std::vector<uint8_t>>& early_data_context,
-    const QuicSSLConfig& ssl_config) {
+    const std::optional<std::vector<uint8_t>>& early_data_context,
+    const QuicSSLConfig& ssl_config, bool disable_alps_explicit_codepoint) {
   if (select_cert_action_ != Action::FAIL_SYNC_DO_NOT_CHECK_CLOSED) {
     QUICHE_CHECK(!closed_);
   }
-  all_select_cert_args_.push_back(
-      SelectCertArgs(server_address, client_address, original_connection_id,
-                     ssl_capabilities, hostname, client_hello, alpn, alps,
-                     quic_transport_params, early_data_context, ssl_config));
+  all_select_cert_args_.push_back(SelectCertArgs(
+      server_address, client_address, original_connection_id, ssl_capabilities,
+      hostname, alpn, alps, quic_transport_params, early_data_context,
+      ssl_config, disable_alps_explicit_codepoint));
 
   if (select_cert_action_ == Action::DELEGATE_ASYNC ||
       select_cert_action_ == Action::FAIL_ASYNC) {
     select_cert_op_.emplace(delegate_, callback_, select_cert_action_,
-                            all_select_cert_args_.back(), dealyed_ssl_config_);
+                            all_select_cert_args_.back(), delayed_ssl_config_);
+    if (pending_callback_ != nullptr) {
+      std::move(pending_callback_)();
+      pending_callback_ = nullptr;
+    }
     return QUIC_PENDING;
   } else if (select_cert_action_ == Action::FAIL_SYNC ||
              select_cert_action_ == Action::FAIL_SYNC_DO_NOT_CHECK_CLOSED) {
     callback()->OnSelectCertificateDone(
         /*ok=*/false,
-        /*is_sync=*/true, nullptr, /*handshake_hints=*/absl::string_view(),
+        /*is_sync=*/true,
+        ProofSourceHandleCallback::LocalSSLConfig{nullptr, delayed_ssl_config_},
         /*ticket_encryption_key=*/absl::string_view(),
-        /*cert_matched_sni=*/false, dealyed_ssl_config_);
+        /*cert_matched_sni=*/false);
     return QUIC_FAILURE;
   }
 
   QUICHE_DCHECK(select_cert_action_ == Action::DELEGATE_SYNC);
-  bool cert_matched_sni;
-  quiche::QuicheReferenceCountedPointer<ProofSource::Chain> chain =
-      delegate_->GetCertChain(server_address, client_address, hostname,
-                              &cert_matched_sni);
 
-  bool ok = chain && !chain->certs.empty();
+  ProofSource::CertChainsResult chains_result =
+      delegate_->GetCertChains(server_address, client_address, hostname);
+  const bool ok = !chains_result.chains.empty();
   callback_->OnSelectCertificateDone(
-      ok, /*is_sync=*/true, chain.get(),
-      /*handshake_hints=*/absl::string_view(),
+      ok, /*is_sync=*/true,
+      ProofSourceHandleCallback::LocalSSLConfig(
+          absl::MakeConstSpan(chains_result.chains), delayed_ssl_config_),
       /*ticket_encryption_key=*/absl::string_view(),
-      /*cert_matched_sni=*/cert_matched_sni, dealyed_ssl_config_);
+      /*cert_matched_sni=*/chains_result.chains_match_sni);
   return ok ? QUIC_SUCCESS : QUIC_FAILURE;
 }
 
@@ -142,7 +167,7 @@ QuicAsyncStatus FakeProofSourceHandle::ComputeSignature(
 
   QUICHE_DCHECK(compute_signature_action_ == Action::DELEGATE_SYNC);
   ComputeSignatureResult result =
-      ComputeSignatureNow(delegate_, server_address, client_address, hostname,
+      ComputeSignatureNow(*delegate_, server_address, client_address, hostname,
                           signature_algorithm, in);
   callback_->OnComputeSignatureDone(
       result.ok, /*is_sync=*/true, result.signature, std::move(result.details));
@@ -177,30 +202,30 @@ int FakeProofSourceHandle::NumPendingOperations() const {
 
 FakeProofSourceHandle::SelectCertOperation::SelectCertOperation(
     ProofSource* delegate, ProofSourceHandleCallback* callback, Action action,
-    SelectCertArgs args, QuicDelayedSSLConfig dealyed_ssl_config)
+    SelectCertArgs args, QuicDelayedSSLConfig delayed_ssl_config)
     : PendingOperation(delegate, callback, action),
       args_(std::move(args)),
-      dealyed_ssl_config_(dealyed_ssl_config) {}
+      delayed_ssl_config_(delayed_ssl_config) {}
 
 void FakeProofSourceHandle::SelectCertOperation::Run() {
   if (action_ == Action::FAIL_ASYNC) {
     callback_->OnSelectCertificateDone(
         /*ok=*/false,
-        /*is_sync=*/false, nullptr,
-        /*handshake_hints=*/absl::string_view(),
+        /*is_sync=*/false,
+        ProofSourceHandleCallback::LocalSSLConfig(
+            /*chains=*/{}, delayed_ssl_config_),
         /*ticket_encryption_key=*/absl::string_view(),
-        /*cert_matched_sni=*/false, dealyed_ssl_config_);
+        /*cert_matched_sni=*/false);
   } else if (action_ == Action::DELEGATE_ASYNC) {
-    bool cert_matched_sni;
-    quiche::QuicheReferenceCountedPointer<ProofSource::Chain> chain =
-        delegate_->GetCertChain(args_.server_address, args_.client_address,
-                                args_.hostname, &cert_matched_sni);
-    bool ok = chain && !chain->certs.empty();
+    ProofSource::CertChainsResult chains_result = delegate_->GetCertChains(
+        args_.server_address, args_.client_address, args_.hostname);
+    const bool ok = !chains_result.chains.empty();
     callback_->OnSelectCertificateDone(
-        ok, /*is_sync=*/false, chain.get(),
-        /*handshake_hints=*/absl::string_view(),
+        ok, /*is_sync=*/false,
+        ProofSourceHandleCallback::LocalSSLConfig(
+            absl::MakeConstSpan(chains_result.chains), delayed_ssl_config_),
         /*ticket_encryption_key=*/absl::string_view(),
-        /*cert_matched_sni=*/cert_matched_sni, dealyed_ssl_config_);
+        /*cert_matched_sni=*/chains_result.chains_match_sni);
   } else {
     QUIC_BUG(quic_bug_10139_1)
         << "Unexpected action: " << static_cast<int>(action_);
@@ -219,7 +244,7 @@ void FakeProofSourceHandle::ComputeSignatureOperation::Run() {
         /*signature=*/"", /*details=*/nullptr);
   } else if (action_ == Action::DELEGATE_ASYNC) {
     ComputeSignatureResult result = ComputeSignatureNow(
-        delegate_, args_.server_address, args_.client_address, args_.hostname,
+        *delegate_, args_.server_address, args_.client_address, args_.hostname,
         args_.signature_algorithm, args_.in);
     callback_->OnComputeSignatureDone(result.ok, /*is_sync=*/false,
                                       result.signature,

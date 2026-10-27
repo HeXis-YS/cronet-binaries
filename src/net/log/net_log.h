@@ -7,14 +7,17 @@
 
 #include <stdint.h>
 
+#include <atomic>
+#include <concepts>
 #include <string>
 #include <vector>
 
-#include "base/atomicops.h"
 #include "base/compiler_specific.h"
+#include "base/functional/function_ref.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ref.h"
 #include "base/synchronization/lock.h"
+#include "base/thread_annotations.h"
 #include "base/time/time.h"
 #include "base/types/pass_key.h"
 #include "base/values.h"
@@ -163,7 +166,7 @@ class NET_EXPORT NetLog {
                                               const NetLogSource& source,
                                               NetLogEventPhase phase,
                                               base::TimeTicks time,
-                                              base::Value::Dict params);
+                                              base::DictValue params);
 
    private:
     // Friend NetLog so that AddCaptureModeObserver/RemoveCaptureModeObserver
@@ -203,31 +206,19 @@ class NET_EXPORT NetLog {
   void AddEntry(NetLogEventType type,
                 const NetLogSource& source,
                 NetLogEventPhase phase);
-
-  // NetLog parameter generators (lambdas) come in two flavors -- those that
-  // take no arguments, and those that take a single NetLogCaptureMode. This
-  // code allows differentiating between the two.
-  template <typename T, typename = void>
-  struct ExpectsCaptureMode : std::false_type {};
-  template <typename T>
-  struct ExpectsCaptureMode<T,
-                            decltype(void(std::declval<T>()(
-                                NetLogCaptureMode::kDefault)))>
-      : std::true_type {};
-
   // Adds an entry for the given source, phase, and type, whose parameters are
   // obtained by invoking |get_params()| with no arguments.
   //
   // See "Materializing parameters" for details.
   template <typename ParametersCallback>
-  inline typename std::enable_if<!ExpectsCaptureMode<ParametersCallback>::value,
-                                 void>::type
-  AddEntry(NetLogEventType type,
-           const NetLogSource& source,
-           NetLogEventPhase phase,
-           const ParametersCallback& get_params) {
-    if (LIKELY(!IsCapturing()))
+    requires(!std::invocable<ParametersCallback, NetLogCaptureMode>)
+  inline void AddEntry(NetLogEventType type,
+                       const NetLogSource& source,
+                       NetLogEventPhase phase,
+                       const ParametersCallback& get_params) {
+    if (!IsCapturing()) [[likely]] {
       return;
+    }
 
     AddEntryWithMaterializedParams(type, source, phase, get_params());
   }
@@ -237,31 +228,16 @@ class NET_EXPORT NetLog {
   //
   // See "Materializing parameters" for details.
   template <typename ParametersCallback>
-  inline typename std::enable_if<ExpectsCaptureMode<ParametersCallback>::value,
-                                 void>::type
-  AddEntry(NetLogEventType type,
-           const NetLogSource& source,
-           NetLogEventPhase phase,
-           const ParametersCallback& get_params) {
-    if (LIKELY(!IsCapturing()))
+    requires(std::invocable<ParametersCallback, NetLogCaptureMode>)
+  inline void AddEntry(NetLogEventType type,
+                       const NetLogSource& source,
+                       NetLogEventPhase phase,
+                       const ParametersCallback& get_params) {
+    if (!IsCapturing()) [[likely]] {
       return;
+    }
 
-    // Indirect through virtual dispatch to reduce code bloat, as this is
-    // inlined in a number of places.
-    class GetParamsImpl : public GetParamsInterface {
-     public:
-      explicit GetParamsImpl(const ParametersCallback& get_params)
-          : get_params_(get_params) {}
-      base::Value::Dict GetParams(NetLogCaptureMode mode) const override {
-        return (*get_params_)(mode);
-      }
-
-     private:
-      const raw_ref<const ParametersCallback> get_params_;
-    };
-
-    GetParamsImpl wrapper(get_params);
-    AddEntryInternal(type, source, phase, &wrapper);
+    AddEntryInternal(type, source, phase, get_params);
   }
 
   // Emits a global event to the log stream, with its own unique source ID.
@@ -278,8 +254,8 @@ class NET_EXPORT NetLog {
   }
 
   void AddGlobalEntryWithStringParams(NetLogEventType type,
-                                      base::StringPiece name,
-                                      base::StringPiece value);
+                                      std::string_view name,
+                                      std::string_view value);
 
   // Returns a unique ID which can be used as a source ID.  All returned IDs
   // will be unique and not equal to 0.
@@ -330,7 +306,7 @@ class NET_EXPORT NetLog {
 
   // Same as above but takes a base::Time. Should not be used if precise
   // timestamps are desired, but is suitable for e.g. expiration times.
-  static std::string TimeToString(const base::Time& time);
+  static std::string TimeToString(base::Time time);
 
   // Returns a dictionary that maps event type symbolic names to their enum
   // values.
@@ -347,22 +323,17 @@ class NET_EXPORT NetLog {
   static const char* EventPhaseToString(NetLogEventPhase event_phase);
 
  private:
-  class GetParamsInterface {
-   public:
-    virtual base::Value::Dict GetParams(NetLogCaptureMode mode) const = 0;
-    virtual ~GetParamsInterface() = default;
-  };
-
   // Helper for implementing AddEntry() that indirects parameter getting through
   // virtual dispatch.
-  void AddEntryInternal(NetLogEventType type,
-                        const NetLogSource& source,
-                        NetLogEventPhase phase,
-                        const GetParamsInterface* get_params);
+  NOINLINE void AddEntryInternal(
+      NetLogEventType type,
+      const NetLogSource& source,
+      NetLogEventPhase phase,
+      base::FunctionRef<base::DictValue(NetLogCaptureMode)> get_params);
 
   // Returns the set of all capture modes being observed.
   NetLogCaptureModeSet GetObserverCaptureModes() const {
-    return base::subtle::NoBarrier_Load(&observer_capture_modes_);
+    return observer_capture_modes_.load(std::memory_order_relaxed);
   }
 
   // Adds an entry using already materialized parameters, when it is already
@@ -374,7 +345,7 @@ class NET_EXPORT NetLog {
   void AddEntryWithMaterializedParams(NetLogEventType type,
                                       const NetLogSource& source,
                                       NetLogEventPhase phase,
-                                      base::Value::Dict params);
+                                      base::DictValue params);
 
   // Adds an entry at a certain time, using already materialized parameters,
   // when it is already known that the log is capturing (goes straight to
@@ -383,40 +354,40 @@ class NET_EXPORT NetLog {
                                             const NetLogSource& source,
                                             NetLogEventPhase phase,
                                             base::TimeTicks time,
-                                            base::Value::Dict params);
+                                            base::DictValue params);
 
   // Called whenever an observer is added or removed, to update
-  // |observer_capture_modes_|. Must have acquired |lock_| prior to calling.
-  void UpdateObserverCaptureModes();
+  // |observer_capture_modes_|.
+  void UpdateObserverCaptureModes() EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  // Returns true if |observer| is watching this NetLog. Must
-  // be called while |lock_| is already held.
-  bool HasObserver(ThreadSafeObserver* observer);
-  bool HasCaptureModeObserver(ThreadSafeCaptureModeObserver* observer);
+  // Returns true if |observer| is watching this NetLog.
+  bool HasObserver(ThreadSafeObserver* observer)
+      EXCLUSIVE_LOCKS_REQUIRED(lock_);
+  bool HasCaptureModeObserver(ThreadSafeCaptureModeObserver* observer)
+      EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
-  // |lock_| protects access to |observers_|.
   base::Lock lock_;
 
   // Last assigned source ID.  Incremented to get the next one.
-  base::subtle::Atomic32 last_id_ = 0;
+  std::atomic<int32_t> last_id_ = {};
 
   // Holds the set of all capture modes that observers are watching the log at.
   //
   // Is 0 when there are no observers. Stored as an Atomic32 so it can be
   // accessed and updated more efficiently.
-  base::subtle::Atomic32 observer_capture_modes_ = 0;
+  std::atomic<NetLogCaptureModeSet> observer_capture_modes_ = {};
 
   // |observers_| is a list of observers, ordered by when they were added.
   // Pointers contained in |observers_| are non-owned, and must
   // remain valid.
   //
-  // |lock_| must be acquired whenever reading or writing to this.
-  //
   // In practice |observers_| will be very small (<5) so O(n)
   // operations on it are fine.
-  std::vector<ThreadSafeObserver*> observers_;
+  std::vector<raw_ptr<ThreadSafeObserver, VectorExperimental>> observers_
+      GUARDED_BY(lock_);
 
-  std::vector<ThreadSafeCaptureModeObserver*> capture_mode_observers_;
+  std::vector<raw_ptr<ThreadSafeCaptureModeObserver, VectorExperimental>>
+      capture_mode_observers_ GUARDED_BY(lock_);
 };
 
 }  // namespace net

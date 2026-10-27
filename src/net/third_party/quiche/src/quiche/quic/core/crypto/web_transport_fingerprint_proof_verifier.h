@@ -5,13 +5,19 @@
 #ifndef QUICHE_QUIC_CORE_CRYPTO_WEB_TRANSPORT_FINGERPRINT_PROOF_VERIFIER_H_
 #define QUICHE_QUIC_CORE_CRYPTO_WEB_TRANSPORT_FINGERPRINT_PROOF_VERIFIER_H_
 
+#include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/crypto/certificate_view.h"
 #include "quiche/quic/core/crypto/proof_verifier.h"
 #include "quiche/quic/core/quic_clock.h"
-#include "quiche/quic/platform/api/quic_export.h"
+#include "quiche/quic/core/quic_time.h"
+#include "quiche/quic/core/quic_types.h"
+#include "quiche/quic/core/quic_versions.h"
+#include "quiche/common/platform/api/quiche_export.h"
 
 namespace quic {
 
@@ -68,13 +74,21 @@ class QUICHE_EXPORT WebTransportFingerprintProofVerifier
 
   class QUICHE_EXPORT Details : public ProofVerifyDetails {
    public:
+    explicit Details(Status status, absl::string_view cert,
+                     const CertificateView& parsed_cert);
+    // Used in failure states where a parsed certificate may not be available.
     explicit Details(Status status) : status_(status) {}
+
     Status status() const { return status_; }
+    absl::string_view cert() const { return cert_; }
+    absl::string_view spki_sha256_hash() const { return spki_sha256_hash_; }
 
     ProofVerifyDetails* Clone() const override;
 
    private:
     const Status status_;
+    const std::string cert_;
+    const std::string spki_sha256_hash_;
   };
 
   // |clock| is used to check if the certificate has expired.  It is not owned
@@ -100,10 +114,10 @@ class QUICHE_EXPORT WebTransportFingerprintProofVerifier
       std::unique_ptr<ProofVerifierCallback> callback) override;
   QuicAsyncStatus VerifyCertChain(
       const std::string& hostname, const uint16_t port,
-      const std::vector<std::string>& certs, const std::string& ocsp_response,
-      const std::string& cert_sct, const ProofVerifyContext* context,
-      std::string* error_details, std::unique_ptr<ProofVerifyDetails>* details,
-      uint8_t* out_alert,
+      const std::vector<absl::string_view>& certs,
+      const std::string& ocsp_response, const std::string& cert_sct,
+      const ProofVerifyContext* context, std::string* error_details,
+      std::unique_ptr<ProofVerifyDetails>* details, uint8_t* out_alert,
       std::unique_ptr<ProofVerifierCallback> callback) override;
   std::unique_ptr<ProofVerifyContext> CreateDefaultContext() override;
 

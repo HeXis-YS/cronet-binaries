@@ -21,7 +21,7 @@ would be a sandbox escape.
 
 This document attempts to describe these baseline OS dependencies and long-lived
 internal resources. These dependencies may change over time, but we aim to
-[work with sandboxed consumers](/BREAKING-CHANGES.md) when they do. However,
+[work with sandboxed consumers](./BREAKING-CHANGES.md) when they do. However,
 each sandbox imposes different constraints, so, above all, sandboxed consumers
 must have ample test coverage to detect issues as they arise.
 
@@ -71,9 +71,8 @@ enabled partway through this lifetime and changes whether `getrandom` works,
 BoringSSL may abort the process. Sandboxes are recommended to allow
 `getrandom`.
 
-Note even deterministic algorithms may require OS entropy. For example,
-RSASSA-PKCS1-v1_5 is deterministic, but BoringSSL draws entropy to implement
-RSA blinding.
+Note even deterministic algorithms may require OS entropy, e.g. for blinding
+techniques.
 
 Entropy gathering additionally has some initialization dependencies described in
 the following section.

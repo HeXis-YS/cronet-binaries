@@ -17,7 +17,8 @@ const size_t kNonceSize = 12;
 }  // namespace
 
 Aes128Gcm12Decrypter::Aes128Gcm12Decrypter()
-    : AesBaseDecrypter(EVP_aead_aes_128_gcm, kKeySize, kAuthTagSize, kNonceSize,
+    : AesBaseDecrypter(EVP_aead_aes_128_gcm(), kKeySize, kAuthTagSize,
+                       kNonceSize,
                        /* use_ietf_nonce_construction */ false) {
   static_assert(kKeySize <= kMaxKeySize, "key size too big");
   static_assert(kNonceSize <= kMaxNonceSize, "nonce size too big");
@@ -26,7 +27,7 @@ Aes128Gcm12Decrypter::Aes128Gcm12Decrypter()
 Aes128Gcm12Decrypter::~Aes128Gcm12Decrypter() {}
 
 uint32_t Aes128Gcm12Decrypter::cipher_id() const {
-  return TLS1_CK_AES_128_GCM_SHA256;
+  return TLS1_3_CK_AES_128_GCM_SHA256;
 }
 
 }  // namespace quic

@@ -17,15 +17,15 @@
 #  pragma GCC system_header
 #endif
 
-_LIBCPP_BEGIN_NAMESPACE_STD
-
 #if _LIBCPP_STD_VER >= 20
+
+_LIBCPP_BEGIN_NAMESPACE_STD
 
 // [concept.invocable]
 
 template <class _Fn, class... _Args>
 concept invocable = requires(_Fn&& __fn, _Args&&... __args) {
-  _VSTD::invoke(_VSTD::forward<_Fn>(__fn), _VSTD::forward<_Args>(__args)...); // not required to be equality preserving
+  std::invoke(std::forward<_Fn>(__fn), std::forward<_Args>(__args)...); // not required to be equality preserving
 };
 
 // [concept.regular.invocable]
@@ -33,8 +33,8 @@ concept invocable = requires(_Fn&& __fn, _Args&&... __args) {
 template <class _Fn, class... _Args>
 concept regular_invocable = invocable<_Fn, _Args...>;
 
-#endif // _LIBCPP_STD_VER >= 20
-
 _LIBCPP_END_NAMESPACE_STD
+
+#endif // _LIBCPP_STD_VER >= 20
 
 #endif // _LIBCPP___CONCEPTS_INVOCABLE_H

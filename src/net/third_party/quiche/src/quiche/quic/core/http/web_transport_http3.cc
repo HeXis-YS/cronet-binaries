@@ -6,10 +6,15 @@
 
 #include <limits>
 #include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
-
+#include "absl/algorithm/container.h"
+#include "absl/base/casts.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
-#include "absl/types/optional.h"
 #include "quiche/quic/core/http/quic_spdy_session.h"
 #include "quiche/quic/core/http/quic_spdy_stream.h"
 #include "quiche/quic/core/quic_data_reader.h"
@@ -21,8 +26,10 @@
 #include "quiche/quic/core/quic_versions.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
 #include "quiche/common/capsule.h"
+#include "quiche/common/http/http_header_block.h"
 #include "quiche/common/platform/api/quiche_logging.h"
 #include "quiche/web_transport/web_transport.h"
+#include "quiche/web_transport/web_transport_headers.h"
 
 #define ENDPOINT \
   (session_->perspective() == Perspective::IS_SERVER ? "Server: " : "Client: ")
@@ -161,7 +168,8 @@ void WebTransportHttp3::CloseSessionWithFinOnlyForTests() {
   connect_stream_->WriteOrBufferBody("", /*fin=*/true);
 }
 
-void WebTransportHttp3::HeadersReceived(const spdy::Http2HeaderBlock& headers) {
+void WebTransportHttp3::HeadersReceived(
+    const quiche::HttpHeaderBlock& headers) {
   if (session_->perspective() == Perspective::IS_CLIENT) {
     int status_code;
     if (!QuicSpdyStream::ParseHeaderStatusCode(headers, &status_code)) {
@@ -180,6 +188,7 @@ void WebTransportHttp3::HeadersReceived(const spdy::Http2HeaderBlock& headers) {
       rejection_reason_ = WebTransportHttp3RejectionReason::kWrongStatusCode;
       return;
     }
+    MaybeSetSubprotocolFromResponseHeaders(headers);
   }
 
   QUIC_DVLOG(1) << ENDPOINT << "WebTransport session " << id_ << " ready.";
@@ -213,7 +222,7 @@ WebTransportStream* WebTransportHttp3::AcceptIncomingUnidirectionalStream() {
       // receieved and the time the client has polled for them.
       continue;
     }
-    return static_cast<WebTransportHttp3UnidirectionalStream*>(stream)
+    return absl::down_cast<WebTransportHttp3UnidirectionalStream*>(stream)
         ->interface();
   }
   return nullptr;
@@ -255,16 +264,16 @@ webtransport::Stream* WebTransportHttp3::GetStreamById(
   const bool bidi = QuicUtils::IsBidirectionalStreamId(
       id, ParsedQuicVersion::RFCv1());  // Assume IETF QUIC for WebTransport
   if (bidi) {
-    return static_cast<QuicSpdyStream*>(stream)->web_transport_stream();
+    return absl::down_cast<QuicSpdyStream*>(stream)->web_transport_stream();
   } else {
-    return static_cast<WebTransportHttp3UnidirectionalStream*>(stream)
+    return absl::down_cast<WebTransportHttp3UnidirectionalStream*>(stream)
         ->interface();
   }
 }
 
 webtransport::DatagramStatus WebTransportHttp3::SendOrQueueDatagram(
     absl::string_view datagram) {
-  return MessageStatusToWebTransportStatus(
+  return DatagramStatusToWebTransportStatus(
       connect_stream_->SendHttp3Datagram(datagram));
 }
 
@@ -309,10 +318,10 @@ void WebTransportHttp3::OnGoAwayReceived() {
 void WebTransportHttp3::OnDrainSessionReceived() { OnGoAwayReceived(); }
 
 WebTransportHttp3UnidirectionalStream::WebTransportHttp3UnidirectionalStream(
-    PendingStream* pending, QuicSpdySession* session)
+    PendingStream& pending, QuicSpdySession* session)
     : QuicStream(pending, session, /*is_static=*/false),
       session_(session),
-      adapter_(session, this, sequencer()),
+      adapter_(session, this, sequencer(), std::nullopt),
       needs_to_send_preamble_(false) {
   sequencer()->set_level_triggered(true);
 }
@@ -321,7 +330,7 @@ WebTransportHttp3UnidirectionalStream::WebTransportHttp3UnidirectionalStream(
     QuicStreamId id, QuicSpdySession* session, WebTransportSessionId session_id)
     : QuicStream(id, session, /*is_static=*/false, WRITE_UNIDIRECTIONAL),
       session_(session),
-      adapter_(session, this, sequencer()),
+      adapter_(session, this, sequencer(), session_id),
       session_id_(session_id),
       needs_to_send_preamble_(true) {}
 
@@ -372,8 +381,9 @@ bool WebTransportHttp3UnidirectionalStream::ReadSessionId() {
   }
   sequencer()->MarkConsumed(session_id_length);
   session_id_ = session_id;
+  adapter_.SetSessionId(session_id);
   session_->AssociateIncomingWebTransportStreamWithSession(session_id, id());
-  return true;
+  return !reading_stopped();
 }
 
 void WebTransportHttp3UnidirectionalStream::OnDataAvailable() {
@@ -436,16 +446,16 @@ constexpr uint64_t kWebTransportMappedErrorCodeLast = 0x52e5ac983162;
 constexpr WebTransportStreamError kDefaultWebTransportError = 0;
 }  // namespace
 
-absl::optional<WebTransportStreamError> Http3ErrorToWebTransport(
+std::optional<WebTransportStreamError> Http3ErrorToWebTransport(
     uint64_t http3_error_code) {
   // Ensure the code is within the valid range.
   if (http3_error_code < kWebTransportMappedErrorCodeFirst ||
       http3_error_code > kWebTransportMappedErrorCodeLast) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   // Exclude GREASE codepoints.
   if ((http3_error_code - 0x21) % 0x1f == 0) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   uint64_t shifted = http3_error_code - kWebTransportMappedErrorCodeFirst;
@@ -457,7 +467,7 @@ absl::optional<WebTransportStreamError> Http3ErrorToWebTransport(
 
 WebTransportStreamError Http3ErrorToWebTransportOrDefault(
     uint64_t http3_error_code) {
-  absl::optional<WebTransportStreamError> result =
+  std::optional<WebTransportStreamError> result =
       Http3ErrorToWebTransport(http3_error_code);
   return result.has_value() ? *result : kDefaultWebTransportError;
 }
@@ -466,6 +476,34 @@ uint64_t WebTransportErrorToHttp3(
     WebTransportStreamError webtransport_error_code) {
   return kWebTransportMappedErrorCodeFirst + webtransport_error_code +
          webtransport_error_code / 0x1e;
+}
+
+void WebTransportHttp3::MaybeSetSubprotocolFromResponseHeaders(
+    const quiche::HttpHeaderBlock& headers) {
+  auto subprotocol_it = headers.find(webtransport::kSubprotocolResponseHeader);
+  if (subprotocol_it == headers.end()) {
+    return;
+  }
+
+  absl::StatusOr<std::string> subprotocol =
+      webtransport::ParseSubprotocolResponseHeader(subprotocol_it->second);
+  if (!subprotocol.ok()) {
+    QUIC_DVLOG(1) << ENDPOINT
+                  << "WebTransport server has malformed WT-Protocol "
+                     "header, ignoring.";
+    return;
+  }
+
+  if (session_->perspective() == Perspective::IS_CLIENT &&
+      !absl::c_linear_search(subprotocols_offered_, *subprotocol)) {
+    QUIC_DVLOG(1) << ENDPOINT
+                  << "WebTransport server has offered a subprotocol value \""
+                  << *subprotocol
+                  << "\", which was not one of the ones offered, ignoring.";
+    return;
+  }
+
+  subprotocol_selected_ = *std::move(subprotocol);
 }
 
 }  // namespace quic

@@ -8,50 +8,46 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <set>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "base/check_op.h"
 #include "base/functional/bind.h"
 #include "base/metrics/field_trial.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/numerics/safe_conversions.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/time/default_tick_clock.h"
+#include "base/time/time.h"
+#include "base/trace_event/trace_event.h"
 #include "base/types/optional_util.h"
 #include "base/value_iterators.h"
 #include "net/base/address_family.h"
 #include "net/base/ip_endpoint.h"
+#include "net/base/network_anonymization_key.h"
+#include "net/base/network_handle.h"
 #include "net/base/trace_constants.h"
-#include "net/base/tracing.h"
+#include "net/base/url_util.h"
 #include "net/dns/host_resolver.h"
 #include "net/dns/host_resolver_internal_result.h"
 #include "net/dns/https_record_rdata.h"
 #include "net/dns/public/dns_protocol.h"
 #include "net/dns/public/host_resolver_source.h"
 #include "net/log/net_log.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
 #include "url/scheme_host_port.h"
 
 namespace net {
 
 namespace {
-
-#define CACHE_HISTOGRAM_TIME(name, time) \
-  UMA_HISTOGRAM_LONG_TIMES("DNS.HostCache." name, time)
-
-#define CACHE_HISTOGRAM_COUNT(name, count) \
-  UMA_HISTOGRAM_COUNTS_1000("DNS.HostCache." name, count)
-
-#define CACHE_HISTOGRAM_ENUM(name, value, max) \
-  UMA_HISTOGRAM_ENUMERATION("DNS.HostCache." name, value, max)
 
 // String constants for dictionary keys.
 const char kSchemeKey[] = "scheme";
@@ -70,6 +66,7 @@ const char kNetErrorKey[] = "net_error";
 const char kIpEndpointsKey[] = "ip_endpoints";
 const char kEndpointAddressKey[] = "endpoint_address";
 const char kEndpointPortKey[] = "endpoint_port";
+const char kInterfaceNameKey[] = "interface_name";
 const char kEndpointMetadatasKey[] = "endpoint_metadatas";
 const char kEndpointMetadataWeightKey[] = "endpoint_metadata_weight";
 const char kEndpointMetadataValueKey[] = "endpoint_metadata_value";
@@ -79,70 +76,86 @@ const char kTextRecordsKey[] = "text_records";
 const char kHostnameResultsKey[] = "hostname_results";
 const char kHostPortsKey[] = "host_ports";
 const char kCanonicalNamesKey[] = "canonical_names";
+const char kTargetNetworkKey[] = "target_network";
 
 base::Value IpEndpointToValue(const IPEndPoint& endpoint) {
-  base::Value::Dict dictionary;
+  base::DictValue dictionary;
   dictionary.Set(kEndpointAddressKey, endpoint.ToStringWithoutPort());
   dictionary.Set(kEndpointPortKey, endpoint.port());
+  if (endpoint.scope_id().has_value()) {
+    base::Value interface_name =
+        IPEndPoint::ScopeIdToInterfaceNameValue(endpoint.scope_id());
+    if (!interface_name.is_none()) {
+      dictionary.Set(kInterfaceNameKey, std::move(interface_name));
+    }
+  }
   return base::Value(std::move(dictionary));
 }
 
-absl::optional<IPEndPoint> IpEndpointFromValue(const base::Value& value) {
+std::optional<IPEndPoint> IpEndpointFromValue(const base::Value& value) {
   if (!value.is_dict())
-    return absl::nullopt;
+    return std::nullopt;
 
-  const base::Value::Dict& dict = value.GetDict();
+  const base::DictValue& dict = value.GetDict();
   const std::string* ip_str = dict.FindString(kEndpointAddressKey);
-  absl::optional<int> port = dict.FindInt(kEndpointPortKey);
+  std::optional<int> port = dict.FindInt(kEndpointPortKey);
 
   if (!ip_str || !port ||
       !base::IsValueInRangeForNumericType<uint16_t>(port.value())) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   IPAddress ip;
   if (!ip.AssignFromIPLiteral(*ip_str))
-    return absl::nullopt;
+    return std::nullopt;
 
-  return IPEndPoint(ip, base::checked_cast<uint16_t>(port.value()));
+  std::optional<uint32_t> scope_id =
+      IPEndPoint::ScopeIdFromInterfaceName(dict.Find(kInterfaceNameKey));
+  if (scope_id.has_value()) {
+    if (scope_id.value() == 0 || !(ip.IsIPv6() && ip.IsLinkLocal()) ||
+        !base::IsValueInRangeForNumericType<uint32_t>(scope_id.value())) {
+      return std::nullopt;
+    }
+  }
+
+  return IPEndPoint(ip, base::checked_cast<uint16_t>(port.value()), scope_id);
 }
 
 base::Value EndpointMetadataPairToValue(
     const std::pair<HttpsRecordPriority, ConnectionEndpointMetadata>& pair) {
-  base::Value::Dict dictionary;
+  base::DictValue dictionary;
   dictionary.Set(kEndpointMetadataWeightKey, pair.first);
   dictionary.Set(kEndpointMetadataValueKey, pair.second.ToValue());
   return base::Value(std::move(dictionary));
 }
 
-absl::optional<std::pair<HttpsRecordPriority, ConnectionEndpointMetadata>>
+std::optional<std::pair<HttpsRecordPriority, ConnectionEndpointMetadata>>
 EndpointMetadataPairFromValue(const base::Value& value) {
   if (!value.is_dict())
-    return absl::nullopt;
+    return std::nullopt;
 
-  const base::Value::Dict& dict = value.GetDict();
-  absl::optional<int> priority = dict.FindInt(kEndpointMetadataWeightKey);
+  const base::DictValue& dict = value.GetDict();
+  std::optional<int> priority = dict.FindInt(kEndpointMetadataWeightKey);
   const base::Value* metadata_value = dict.Find(kEndpointMetadataValueKey);
 
   if (!priority || !base::IsValueInRangeForNumericType<HttpsRecordPriority>(
                        priority.value())) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   if (!metadata_value)
-    return absl::nullopt;
-  absl::optional<ConnectionEndpointMetadata> metadata =
+    return std::nullopt;
+  std::optional<ConnectionEndpointMetadata> metadata =
       ConnectionEndpointMetadata::FromValue(*metadata_value);
   if (!metadata)
-    return absl::nullopt;
+    return std::nullopt;
 
-  return std::make_pair(
-      base::checked_cast<HttpsRecordPriority>(priority.value()),
-      std::move(metadata).value());
+  return std::pair(base::checked_cast<HttpsRecordPriority>(priority.value()),
+                   std::move(metadata).value());
 }
 
 bool IPEndPointsFromLegacyAddressListValue(
-    const base::Value::List& value,
+    const base::ListValue& value,
     std::vector<IPEndPoint>& ip_endpoints) {
   DCHECK(ip_endpoints.empty());
   for (const auto& it : value) {
@@ -168,7 +181,7 @@ void MergeContainers(T& target, const T& source) {
 
 // Used to reject empty and IP literal (whether or not surrounded by brackets)
 // hostnames.
-bool IsValidHostname(base::StringPiece hostname) {
+bool IsValidHostname(std::string_view hostname) {
   if (hostname.empty())
     return false;
 
@@ -182,25 +195,34 @@ bool IsValidHostname(base::StringPiece hostname) {
 }
 
 const std::string& GetHostname(
-    const absl::variant<url::SchemeHostPort, std::string>& host) {
+    const std::variant<url::SchemeHostPort, std::string>& host) {
   const std::string* hostname;
-  if (absl::holds_alternative<url::SchemeHostPort>(host)) {
-    hostname = &absl::get<url::SchemeHostPort>(host).host();
+  if (std::holds_alternative<url::SchemeHostPort>(host)) {
+    hostname = &std::get<url::SchemeHostPort>(host).host();
   } else {
-    DCHECK(absl::holds_alternative<std::string>(host));
-    hostname = &absl::get<std::string>(host);
+    DCHECK(std::holds_alternative<std::string>(host));
+    hostname = &std::get<std::string>(host);
   }
 
   DCHECK(IsValidHostname(*hostname));
   return *hostname;
 }
 
-absl::optional<DnsQueryType> GetDnsQueryType(int dns_query_type) {
+std::optional<DnsQueryType> GetDnsQueryType(int dns_query_type) {
   for (const auto& type : kDnsQueryTypes) {
     if (base::strict_cast<int>(type.first) == dns_query_type)
       return type.first;
   }
-  return absl::nullopt;
+  return std::nullopt;
+}
+
+const std::string GetHistogramName(std::string_view histogram_name,
+                                   const HostCache::Key& key) {
+  constexpr std::string_view kHistogramPrefix = "Net.DNS.HostCache.";
+
+  return base::StrCat(
+      {kHistogramPrefix, histogram_name,
+       IsGoogleHostWithAlpnH3(GetHostname(key.host)) ? ".GoogleHost" : ""});
 }
 
 }  // namespace
@@ -213,36 +235,22 @@ enum HostCache::SetOutcome : int {
   MAX_SET_OUTCOME
 };
 
-// Used in histograms; do not modify existing values.
-enum HostCache::LookupOutcome : int {
-  LOOKUP_MISS_ABSENT = 0,
-  LOOKUP_MISS_STALE = 1,
-  LOOKUP_HIT_VALID = 2,
-  LOOKUP_HIT_STALE = 3,
-  MAX_LOOKUP_OUTCOME
-};
-
-// Used in histograms; do not modify existing values.
-enum HostCache::EraseReason : int {
-  ERASE_EVICT = 0,
-  ERASE_CLEAR = 1,
-  ERASE_DESTRUCT = 2,
-  MAX_ERASE_REASON
-};
-
-HostCache::Key::Key(absl::variant<url::SchemeHostPort, std::string> host,
+HostCache::Key::Key(std::variant<url::SchemeHostPort, std::string> host,
                     DnsQueryType dns_query_type,
                     HostResolverFlags host_resolver_flags,
                     HostResolverSource host_resolver_source,
-                    const NetworkAnonymizationKey& network_anonymization_key)
+                    const NetworkAnonymizationKey& network_anonymization_key,
+                    handles::NetworkHandle target_network)
     : host(std::move(host)),
       dns_query_type(dns_query_type),
       host_resolver_flags(host_resolver_flags),
       host_resolver_source(host_resolver_source),
-      network_anonymization_key(network_anonymization_key) {
+      network_anonymization_key(network_anonymization_key),
+      target_network(target_network) {
   DCHECK(IsValidHostname(GetHostname(this->host)));
-  if (absl::holds_alternative<url::SchemeHostPort>(this->host))
-    DCHECK(absl::get<url::SchemeHostPort>(this->host).IsValid());
+  if (std::holds_alternative<url::SchemeHostPort>(this->host)) {
+    DCHECK(std::get<url::SchemeHostPort>(this->host).IsValid());
+  }
 }
 
 HostCache::Key::Key() = default;
@@ -253,7 +261,7 @@ HostCache::Key::~Key() = default;
 
 HostCache::Entry::Entry(int error,
                         Source source,
-                        absl::optional<base::TimeDelta> ttl)
+                        std::optional<base::TimeDelta> ttl)
     : error_(error), source_(source), ttl_(ttl.value_or(kUnknownTtl)) {
   // If |ttl| has a value, must not be negative.
   DCHECK_GE(ttl.value_or(base::TimeDelta()), base::TimeDelta());
@@ -269,32 +277,19 @@ HostCache::Entry::Entry(int error,
 }
 
 HostCache::Entry::Entry(
-    std::set<std::unique_ptr<HostResolverInternalResult>> results,
+    const std::set<std::unique_ptr<HostResolverInternalResult>>& results,
     base::Time now,
     base::TimeTicks now_ticks,
     Source empty_source) {
-  std::unique_ptr<HostResolverInternalResult> data_result;
-  std::unique_ptr<HostResolverInternalResult> metadata_result;
-  std::unique_ptr<HostResolverInternalResult> error_result;
-  std::vector<std::unique_ptr<HostResolverInternalResult>> alias_results;
+  std::vector<const HostResolverInternalResult*> data_results;
+  const HostResolverInternalResult* metadata_result = nullptr;
+  std::vector<const HostResolverInternalResult*> error_results;
+  std::vector<const HostResolverInternalResult*> alias_results;
 
-  absl::optional<base::TimeDelta> smallest_ttl;
-  absl::optional<Source> source;
-  for (auto it = results.cbegin(); it != results.cend();) {
-    // Increment iterator now to allow extracting `result` (std::set::extract()
-    // is guaranteed to not invalidate any iterators except those pointing to
-    // the extracted value).
-    const std::unique_ptr<HostResolverInternalResult>& result = *it++;
-
-    if (result->expiration().has_value()) {
-      smallest_ttl = std::min(smallest_ttl.value_or(base::TimeDelta::Max()),
-                              result->expiration().value() - now_ticks);
-    }
-    if (result->timed_expiration().has_value()) {
-      smallest_ttl = std::min(smallest_ttl.value_or(base::TimeDelta::Max()),
-                              result->timed_expiration().value() - now);
-    }
-
+  std::optional<base::TimeDelta> smallest_ttl =
+      TtlFromInternalResults(results, now, now_ticks);
+  std::optional<Source> source;
+  for (const std::unique_ptr<HostResolverInternalResult>& result : results) {
     Source result_source;
     switch (result->source()) {
       case HostResolverInternalResult::Source::kDns:
@@ -310,19 +305,26 @@ HostCache::Entry::Entry(
 
     switch (result->type()) {
       case HostResolverInternalResult::Type::kData:
-        DCHECK(!data_result);  // Expect at most one data result.
-        data_result = std::move(results.extract(result).value());
+        if (!result->AsData().endpoints().empty() &&
+            result->AsData().endpoints().front().GetFamily() ==
+                ADDRESS_FAMILY_IPV6) {
+          // If a data result contains IPv6 addresses, put it at the front to
+          // ensure we generally keep IPv6 addresses sorted before IPv4
+          // addresses.
+          data_results.insert(data_results.begin(), result.get());
+        } else {
+          data_results.push_back(result.get());
+        }
         break;
       case HostResolverInternalResult::Type::kMetadata:
         DCHECK(!metadata_result);  // Expect at most one metadata result.
-        metadata_result = std::move(results.extract(result).value());
+        metadata_result = result.get();
         break;
       case HostResolverInternalResult::Type::kError:
-        DCHECK(!error_result);  // Expect at most one error result.
-        error_result = std::move(results.extract(result).value());
+        error_results.push_back(result.get());
         break;
       case HostResolverInternalResult::Type::kAlias:
-        alias_results.push_back(std::move(results.extract(result).value()));
+        alias_results.push_back(result.get());
         break;
     }
 
@@ -334,49 +336,70 @@ HostCache::Entry::Entry(
   ttl_ = smallest_ttl.value_or(kUnknownTtl);
   source_ = source.value_or(empty_source);
 
-  if (error_result) {
-    DCHECK(!data_result);
-    DCHECK(!metadata_result);
+  if (!data_results.empty() || metadata_result) {
+    error_ = OK;
 
-    error_ = error_result->AsError().error();
+    // Any errors should be an ignorable ERR_NAME_NOT_RESOLVED from a single
+    // transaction.
+    CHECK(std::ranges::all_of(
+        error_results, [](const HostResolverInternalResult* error_result) {
+          return error_result->query_type() != DnsQueryType::UNSPECIFIED &&
+                 error_result->AsError().error() == ERR_NAME_NOT_RESOLVED;
+        }));
+  } else if (!error_results.empty()) {
+    error_ = ERR_NAME_NOT_RESOLVED;
+    bool any_error_cacheable = false;
+    for (const HostResolverInternalResult* error_result : error_results) {
+      if (error_result->expiration().has_value() ||
+          error_result->timed_expiration().has_value()) {
+        any_error_cacheable = true;
+      }
 
-    // For error results, should not create entry with a TTL unless it is a
-    // cacheable error.
-    if (!error_result->expiration().has_value() &&
-        !error_result->timed_expiration().has_value()) {
+      if (error_result->AsError().error() != ERR_NAME_NOT_RESOLVED ||
+          error_result->query_type() == DnsQueryType::UNSPECIFIED) {
+        // If not just a single-transaction ERR_NAME_NOT_RESOLVED, the error is
+        // an actual failure. Expected to then be the only error result.
+        CHECK_EQ(error_results.size(), 1u);
+
+        error_ = error_result->AsError().error();
+      }
+    }
+
+    // Must get at least one TTL from an error result, not e.g. alias results,
+    // for an error to overall be cacheable.
+    if (!any_error_cacheable) {
       ttl_ = kUnknownTtl;
     }
-  } else if (!data_result && !metadata_result) {
+  } else {
     // Only alias results (or completely empty results). Never cacheable due to
     // being equivalent to an error result without TTL.
     error_ = ERR_NAME_NOT_RESOLVED;
     ttl_ = kUnknownTtl;
-  } else {
-    error_ = OK;
   }
 
-  if (data_result) {
-    DCHECK(!error_result);
-    DCHECK(!data_result->AsData().endpoints().empty() ||
-           !data_result->AsData().strings().empty() ||
-           !data_result->AsData().hosts().empty());
-    // Data results should always be cacheable.
-    DCHECK(data_result->expiration().has_value() ||
-           data_result->timed_expiration().has_value());
+  if (!data_results.empty()) {
+    for (const HostResolverInternalResult* data_result : data_results) {
+      DCHECK(!data_result->AsData().endpoints().empty() ||
+             !data_result->AsData().strings().empty() ||
+             !data_result->AsData().hosts().empty());
+      // Data results should always be cacheable.
+      DCHECK(data_result->expiration().has_value() ||
+             data_result->timed_expiration().has_value());
 
-    ip_endpoints_ = data_result->AsData().endpoints();
-    text_records_ = data_result->AsData().strings();
-    hostnames_ = data_result->AsData().hosts();
-    canonical_names_ = {data_result->domain_name()};
+      MergeLists(ip_endpoints_, data_result->AsData().endpoints());
+      MergeLists(text_records_, data_result->AsData().strings());
+      MergeLists(hostnames_, data_result->AsData().hosts());
+      canonical_names_.insert(data_result->domain_name());
+      aliases_.insert(data_result->domain_name());
+    }
 
-    for (const auto& alias_result : alias_results) {
+    for (const auto* alias_result : alias_results) {
       aliases_.insert(alias_result->domain_name());
       aliases_.insert(alias_result->AsAlias().alias_target());
     }
-    aliases_.insert(data_result->domain_name());
   }
+
   if (metadata_result) {
-    DCHECK(!error_result);
     // Metadata results should always be cacheable.
     DCHECK(metadata_result->expiration().has_value() ||
            metadata_result->timed_expiration().has_value());
@@ -385,9 +408,7 @@ HostCache::Entry::Entry(
 
     // Even if otherwise empty, having the metadata result object signifies
     // receiving a compatible HTTPS record.
-    https_record_compatibility_ = std::vector<bool>{true};
-
-    if (endpoint_metadatas_.empty()) {
+    if (data_results.empty() && endpoint_metadatas_.empty()) {
       error_ = ERR_NAME_NOT_RESOLVED;
     }
   }
@@ -412,8 +433,7 @@ std::vector<HostResolverEndpointResult> HostCache::Entry::GetEndpoints() const {
     // Currently Chrome uses HTTPS records only when A and AAAA records are at
     // the same canonical name and that matches the HTTPS target name.
     for (ConnectionEndpointMetadata& metadata : metadatas) {
-      if (canonical_names_.find(metadata.target_name) ==
-          canonical_names_.end()) {
+      if (!canonical_names_.contains(metadata.target_name)) {
         continue;
       }
       endpoints.emplace_back();
@@ -443,11 +463,11 @@ std::vector<ConnectionEndpointMetadata> HostCache::Entry::GetMetadatas() const {
   return metadatas;
 }
 
-absl::optional<base::TimeDelta> HostCache::Entry::GetOptionalTtl() const {
+std::optional<base::TimeDelta> HostCache::Entry::GetOptionalTtl() const {
   if (has_ttl())
     return ttl();
   else
-    return absl::nullopt;
+    return std::nullopt;
 }
 
 // static
@@ -466,8 +486,6 @@ HostCache::Entry HostCache::Entry::MergeEntries(Entry front, Entry back) {
   MergeContainers(front.aliases_, back.aliases_);
   MergeLists(front.text_records_, back.text_records());
   MergeLists(front.hostnames_, back.hostnames());
-  MergeLists(front.https_record_compatibility_,
-             back.https_record_compatibility_);
   MergeContainers(front.canonical_names_, back.canonical_names_);
 
   // Only expected to merge entries from same source.
@@ -494,17 +512,63 @@ HostCache::Entry HostCache::Entry::CopyWithDefaultPort(uint16_t port) const {
 
   for (IPEndPoint& endpoint : copy.ip_endpoints_) {
     if (endpoint.port() == 0) {
-      endpoint = IPEndPoint(endpoint.address(), port);
+      endpoint = endpoint.CopyWithPort(port);
     }
   }
 
   for (HostPortPair& hostname : copy.hostnames_) {
+    // Hostnames are mutable, unlike IPEndPoints, so can overwrite only the
+    // ports.
     if (hostname.port() == 0) {
-      hostname = HostPortPair(hostname.host(), port);
+      hostname.set_port(port);
     }
   }
 
   return copy;
+}
+
+std::vector<ServiceEndpoint> HostCache::Entry::ConvertToServiceEndpoints(
+    uint16_t port) const {
+  std::vector<ServiceEndpoint> endpoints;
+
+  std::vector<IPEndPoint> ipv4_endpoints;
+  std::vector<IPEndPoint> ipv6_endpoints;
+  for (const auto& ip_endpoint : ip_endpoints()) {
+    std::vector<IPEndPoint>& ip_endpoints =
+        ip_endpoint.address().IsIPv6() ? ipv6_endpoints : ipv4_endpoints;
+    if (ip_endpoint.port() == 0) {
+      ip_endpoints.push_back(ip_endpoint.CopyWithPort(port));
+    } else {
+      ip_endpoints.push_back(ip_endpoint);
+    }
+  }
+
+  // See HostCache::Entry::GetEndpoints.
+  if (!ipv4_endpoints.empty() || !ipv6_endpoints.empty()) {
+    for (const auto& metadata : GetMetadatas()) {
+      if (!canonical_names().contains(metadata.target_name)) {
+        continue;
+      }
+
+      ServiceEndpoint endpoint;
+      endpoint.ipv4_endpoints = ipv4_endpoints;
+      endpoint.ipv6_endpoints = ipv6_endpoints;
+      endpoint.metadata = metadata;
+      endpoints.emplace_back(std::move(endpoint));
+    }
+
+    // Append Non-SVCB endpoints at the end for fallback.
+    // TODO(crbug.com/41493696): Revisit how to handle non-SVCB endpoints once
+    // the connection layer starts using this API. Adding non-SVCB endpoints
+    // here might be inconsistent with intermediate results generated by
+    // DnsTaskResultsManager, which doesn't append non-SVCB endpoints.
+    ServiceEndpoint non_alternative_endpoint;
+    non_alternative_endpoint.ipv4_endpoints = ipv4_endpoints;
+    non_alternative_endpoint.ipv6_endpoints = ipv6_endpoints;
+    endpoints.emplace_back(std::move(non_alternative_endpoint));
+  }
+
+  return endpoints;
 }
 
 HostCache::Entry& HostCache::Entry::operator=(const Entry& entry) = default;
@@ -515,7 +579,7 @@ HostCache::Entry::Entry(int error,
                         std::vector<IPEndPoint> ip_endpoints,
                         std::set<std::string> aliases,
                         Source source,
-                        absl::optional<base::TimeDelta> ttl)
+                        std::optional<base::TimeDelta> ttl)
     : error_(error),
       ip_endpoints_(std::move(ip_endpoints)),
       aliases_(std::move(aliases)),
@@ -534,7 +598,6 @@ HostCache::Entry::Entry(const HostCache::Entry& entry,
       aliases_(entry.aliases()),
       text_records_(entry.text_records()),
       hostnames_(entry.hostnames()),
-      https_record_compatibility_(entry.https_record_compatibility_),
       source_(entry.source()),
       pinning_(entry.pinning()),
       canonical_names_(entry.canonical_names()),
@@ -550,7 +613,6 @@ HostCache::Entry::Entry(
     std::set<std::string> aliases,
     std::vector<std::string>&& text_records,
     std::vector<HostPortPair>&& hostnames,
-    std::vector<bool>&& https_record_compatibility,
     Source source,
     base::TimeTicks expires,
     int network_changes)
@@ -560,14 +622,9 @@ HostCache::Entry::Entry(
       aliases_(std::move(aliases)),
       text_records_(std::move(text_records)),
       hostnames_(std::move(hostnames)),
-      https_record_compatibility_(std::move(https_record_compatibility)),
       source_(source),
       expires_(expires),
       network_changes_(network_changes) {}
-
-void HostCache::Entry::PrepareForCacheInsertion() {
-  https_record_compatibility_.clear();
-}
 
 bool HostCache::Entry::IsStale(base::TimeTicks now, int network_changes) const {
   EntryStaleness stale;
@@ -596,8 +653,8 @@ base::Value HostCache::Entry::NetLogParams() const {
   return base::Value(GetAsValue(false /* include_staleness */));
 }
 
-base::Value::Dict HostCache::Entry::GetAsValue(bool include_staleness) const {
-  base::Value::Dict entry_dict;
+base::DictValue HostCache::Entry::GetAsValue(bool include_staleness) const {
+  base::DictValue entry_dict;
 
   if (include_staleness) {
     // The kExpirationKey value is using TimeTicks instead of Time used if
@@ -622,35 +679,35 @@ base::Value::Dict HostCache::Entry::GetAsValue(bool include_staleness) const {
   if (error() != OK) {
     entry_dict.Set(kNetErrorKey, error());
   } else {
-    base::Value::List ip_endpoints_list;
+    base::ListValue ip_endpoints_list;
     for (const IPEndPoint& ip_endpoint : ip_endpoints_) {
       ip_endpoints_list.Append(IpEndpointToValue(ip_endpoint));
     }
     entry_dict.Set(kIpEndpointsKey, std::move(ip_endpoints_list));
 
-    base::Value::List endpoint_metadatas_list;
+    base::ListValue endpoint_metadatas_list;
     for (const auto& endpoint_metadata_pair : endpoint_metadatas_) {
       endpoint_metadatas_list.Append(
           EndpointMetadataPairToValue(endpoint_metadata_pair));
     }
     entry_dict.Set(kEndpointMetadatasKey, std::move(endpoint_metadatas_list));
 
-    base::Value::List alias_list;
+    base::ListValue alias_list;
     for (const std::string& alias : aliases()) {
       alias_list.Append(alias);
     }
     entry_dict.Set(kAliasesKey, std::move(alias_list));
 
     // Append all resolved text records.
-    base::Value::List text_list_value;
+    base::ListValue text_list_value;
     for (const std::string& text_record : text_records()) {
       text_list_value.Append(text_record);
     }
     entry_dict.Set(kTextRecordsKey, std::move(text_list_value));
 
     // Append all the resolved hostnames.
-    base::Value::List hostnames_value;
-    base::Value::List host_ports_value;
+    base::ListValue hostnames_value;
+    base::ListValue host_ports_value;
     for (const HostPortPair& hostname : hostnames()) {
       hostnames_value.Append(hostname.host());
       host_ports_value.Append(hostname.port());
@@ -658,7 +715,7 @@ base::Value::Dict HostCache::Entry::GetAsValue(bool include_staleness) const {
     entry_dict.Set(kHostnameResultsKey, std::move(hostnames_value));
     entry_dict.Set(kHostPortsKey, std::move(host_ports_value));
 
-    base::Value::List canonical_names_list;
+    base::ListValue canonical_names_list;
     for (const std::string& canonical_name : canonical_names()) {
       canonical_names_list.Append(canonical_name);
     }
@@ -666,6 +723,25 @@ base::Value::Dict HostCache::Entry::GetAsValue(bool include_staleness) const {
   }
 
   return entry_dict;
+}
+
+// static
+std::optional<base::TimeDelta> HostCache::Entry::TtlFromInternalResults(
+    const std::set<std::unique_ptr<HostResolverInternalResult>>& results,
+    base::Time now,
+    base::TimeTicks now_ticks) {
+  std::optional<base::TimeDelta> smallest_ttl;
+  for (const std::unique_ptr<HostResolverInternalResult>& result : results) {
+    if (result->expiration().has_value()) {
+      smallest_ttl = std::min(smallest_ttl.value_or(base::TimeDelta::Max()),
+                              result->expiration().value() - now_ticks);
+    }
+    if (result->timed_expiration().has_value()) {
+      smallest_ttl = std::min(smallest_ttl.value_or(base::TimeDelta::Max()),
+                              result->timed_expiration().value() - now);
+    }
+  }
+  return smallest_ttl;
 }
 
 // static
@@ -678,23 +754,38 @@ HostCache::HostCache(size_t max_entries)
 
 HostCache::~HostCache() {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+  RecordEraseAll(EraseReason::kEraseDestruct, tick_clock_->NowTicks());
 }
 
-const std::pair<const HostCache::Key, HostCache::Entry>*
-HostCache::Lookup(const Key& key, base::TimeTicks now, bool ignore_secure) {
+const std::pair<const HostCache::Key, HostCache::Entry>* HostCache::Lookup(
+    const Key& key,
+    base::TimeTicks now,
+    bool ignore_secure,
+    bool record_metrics) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   if (caching_is_disabled())
     return nullptr;
 
   auto* result = LookupInternalIgnoringFields(key, now, ignore_secure);
-  if (!result)
+  if (!result) {
+    if (record_metrics) {
+      RecordLookup(LookupOutcome::kLookupMissAbsent, now, key, nullptr);
+    }
     return nullptr;
+  }
 
   auto* entry = &result->second;
-  if (entry->IsStale(now, network_changes_))
+  if (entry->IsStale(now, network_changes_)) {
+    if (record_metrics) {
+      RecordLookup(LookupOutcome::kLookupMissStale, now, result->first, entry);
+    }
     return nullptr;
+  }
 
   entry->CountHit(/* hit_is_stale= */ false);
+  if (record_metrics) {
+    RecordLookup(LookupOutcome::kLookupHitValid, now, result->first, entry);
+  }
   return result;
 }
 
@@ -702,18 +793,28 @@ const std::pair<const HostCache::Key, HostCache::Entry>* HostCache::LookupStale(
     const Key& key,
     base::TimeTicks now,
     HostCache::EntryStaleness* stale_out,
-    bool ignore_secure) {
+    bool ignore_secure,
+    bool record_metrics) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   if (caching_is_disabled())
     return nullptr;
 
   auto* result = LookupInternalIgnoringFields(key, now, ignore_secure);
-  if (!result)
+  if (!result) {
+    if (record_metrics) {
+      RecordLookup(LookupOutcome::kLookupMissAbsent, now, key, nullptr);
+    }
     return nullptr;
+  }
 
   auto* entry = &result->second;
   bool is_stale = entry->IsStale(now, network_changes_);
   entry->CountHit(/* hit_is_stale= */ is_stale);
+  if (record_metrics) {
+    RecordLookup(is_stale ? LookupOutcome::kLookupHitStale
+                          : LookupOutcome::kLookupHitValid,
+                 now, result->first, entry);
+  }
 
   if (stale_out)
     entry->GetStaleness(now, network_changes_, stale_out);
@@ -813,7 +914,6 @@ void HostCache::Set(const Key& key,
 
   Entry entry_for_cache(entry, now, ttl, network_changes_);
   entry_for_cache.set_pinning(entry.pinning().value_or(has_active_pin));
-  entry_for_cache.PrepareForCacheInsertion();
   AddEntry(key, std::move(entry_for_cache));
 
   if (delegate_ && result_changed)
@@ -821,7 +921,7 @@ void HostCache::Set(const Key& key,
 }
 
 const HostCache::Key* HostCache::GetMatchingKeyForTesting(
-    base::StringPiece hostname,
+    std::string_view hostname,
     HostCache::Entry::Source* source_out,
     HostCache::EntryStaleness* stale_out) const {
   for (const EntryMap::value_type& entry : entries_) {
@@ -858,6 +958,7 @@ void HostCache::set_persistence_delegate(PersistenceDelegate* delegate) {
 
 void HostCache::clear() {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+  RecordEraseAll(EraseReason::kEraseClear, tick_clock_->NowTicks());
 
   // Don't bother scheduling a write if there's nothing to clear.
   if (size() == 0)
@@ -878,10 +979,12 @@ void HostCache::ClearForHosts(
   }
 
   bool changed = false;
+  base::TimeTicks now = tick_clock_->NowTicks();
   for (auto it = entries_.begin(); it != entries_.end();) {
     auto next_it = std::next(it);
 
     if (host_filter.Run(GetHostname(it->first.host))) {
+      RecordErase(EraseReason::kEraseClear, now, it->first, it->second);
       entries_.erase(it);
       changed = true;
     }
@@ -893,7 +996,7 @@ void HostCache::ClearForHosts(
     delegate_->ScheduleWrite();
 }
 
-void HostCache::GetList(base::Value::List& entry_list,
+void HostCache::GetList(base::ListValue& entry_list,
                         bool include_staleness,
                         SerializationType serialization_type) const {
   entry_list.clear();
@@ -909,23 +1012,27 @@ void HostCache::GetList(base::Value::List& entry_list,
               &network_anonymization_key_value)) {
         continue;
       }
+      // Don't save entries associated with a specific network.
+      if (key.target_network != handles::kInvalidNetworkHandle) {
+        continue;
+      }
     } else {
-      // ToValue() fails for transient NIKs, since they should never be
+      // ToValue() fails for transient NAKs, since they should never be
       // serialized to disk in a restorable format, so use ToDebugString() when
       // serializing for debugging instead of for restoring from disk.
       network_anonymization_key_value =
           base::Value(key.network_anonymization_key.ToDebugString());
     }
 
-    base::Value::Dict entry_dict = entry.GetAsValue(include_staleness);
+    base::DictValue entry_dict = entry.GetAsValue(include_staleness);
 
-    const auto* host = absl::get_if<url::SchemeHostPort>(&key.host);
+    const auto* host = std::get_if<url::SchemeHostPort>(&key.host);
     if (host) {
       entry_dict.Set(kSchemeKey, host->scheme());
       entry_dict.Set(kHostnameKey, host->host());
       entry_dict.Set(kPortKey, host->port());
     } else {
-      entry_dict.Set(kHostnameKey, absl::get<std::string>(key.host));
+      entry_dict.Set(kHostnameKey, std::get<std::string>(key.host));
     }
 
     entry_dict.Set(kDnsQueryTypeKey,
@@ -937,11 +1044,16 @@ void HostCache::GetList(base::Value::List& entry_list,
                    std::move(network_anonymization_key_value));
     entry_dict.Set(kSecureKey, key.secure);
 
+    if (serialization_type == SerializationType::kDebug) {
+      entry_dict.Set(kTargetNetworkKey,
+                     base::NumberToString(key.target_network));
+    }
+
     entry_list.Append(std::move(entry_dict));
   }
 }
 
-bool HostCache::RestoreFromListValue(const base::Value::List& old_cache) {
+bool HostCache::RestoreFromListValue(const base::ListValue& old_cache) {
   // Reset the restore size to 0.
   restore_size_ = 0;
 
@@ -954,7 +1066,7 @@ bool HostCache::RestoreFromListValue(const base::Value::List& old_cache) {
     if (!entry.is_dict())
       return false;
 
-    const base::Value::Dict& entry_dict = entry.GetDict();
+    const base::DictValue& entry_dict = entry.GetDict();
     const std::string* hostname_ptr = entry_dict.FindString(kHostnameKey);
     if (!hostname_ptr || !IsValidHostname(*hostname_ptr)) {
       return false;
@@ -962,9 +1074,9 @@ bool HostCache::RestoreFromListValue(const base::Value::List& old_cache) {
 
     // Use presence of scheme to determine host type.
     const std::string* scheme_ptr = entry_dict.FindString(kSchemeKey);
-    absl::variant<url::SchemeHostPort, std::string> host;
+    std::variant<url::SchemeHostPort, std::string> host;
     if (scheme_ptr) {
-      absl::optional<int> port = entry_dict.FindInt(kPortKey);
+      std::optional<int> port = entry_dict.FindInt(kPortKey);
       if (!port || !base::IsValueInRangeForNumericType<uint16_t>(port.value()))
         return false;
 
@@ -978,17 +1090,17 @@ bool HostCache::RestoreFromListValue(const base::Value::List& old_cache) {
     }
 
     const std::string* expiration_ptr = entry_dict.FindString(kExpirationKey);
-    absl::optional<int> maybe_flags = entry_dict.FindInt(kFlagsKey);
+    std::optional<int> maybe_flags = entry_dict.FindInt(kFlagsKey);
     if (expiration_ptr == nullptr || !maybe_flags.has_value())
       return false;
     std::string expiration(*expiration_ptr);
     HostResolverFlags flags = maybe_flags.value();
 
-    absl::optional<int> maybe_dns_query_type =
+    std::optional<int> maybe_dns_query_type =
         entry_dict.FindInt(kDnsQueryTypeKey);
     if (!maybe_dns_query_type.has_value())
       return false;
-    absl::optional<DnsQueryType> dns_query_type =
+    std::optional<DnsQueryType> dns_query_type =
         GetDnsQueryType(maybe_dns_query_type.value());
     if (!dns_query_type.has_value())
       return false;
@@ -1010,16 +1122,16 @@ bool HostCache::RestoreFromListValue(const base::Value::List& old_cache) {
     bool secure = entry_dict.FindBool(kSecureKey).value_or(false);
 
     int error = OK;
-    const base::Value::List* ip_endpoints_list = nullptr;
-    const base::Value::List* endpoint_metadatas_list = nullptr;
-    const base::Value::List* aliases_list = nullptr;
-    const base::Value::List* legacy_addresses_list = nullptr;
-    const base::Value::List* text_records_list = nullptr;
-    const base::Value::List* hostname_records_list = nullptr;
-    const base::Value::List* host_ports_list = nullptr;
-    const base::Value::List* canonical_names_list = nullptr;
-    absl::optional<int> maybe_error = entry_dict.FindInt(kNetErrorKey);
-    absl::optional<bool> maybe_pinned = entry_dict.FindBool(kPinnedKey);
+    const base::ListValue* ip_endpoints_list = nullptr;
+    const base::ListValue* endpoint_metadatas_list = nullptr;
+    const base::ListValue* aliases_list = nullptr;
+    const base::ListValue* legacy_addresses_list = nullptr;
+    const base::ListValue* text_records_list = nullptr;
+    const base::ListValue* hostname_records_list = nullptr;
+    const base::ListValue* host_ports_list = nullptr;
+    const base::ListValue* canonical_names_list = nullptr;
+    std::optional<int> maybe_error = entry_dict.FindInt(kNetErrorKey);
+    std::optional<bool> maybe_pinned = entry_dict.FindBool(kPinnedKey);
     if (maybe_error.has_value()) {
       error = maybe_error.value();
     } else {
@@ -1048,12 +1160,22 @@ bool HostCache::RestoreFromListValue(const base::Value::List& old_cache) {
 
     std::vector<IPEndPoint> ip_endpoints;
     if (ip_endpoints_list) {
+      bool interface_unavailable = false;
       for (const base::Value& ip_endpoint_value : *ip_endpoints_list) {
-        absl::optional<IPEndPoint> ip_endpoint =
+        std::optional<IPEndPoint> ip_endpoint =
             IpEndpointFromValue(ip_endpoint_value);
-        if (!ip_endpoint)
+        if (!ip_endpoint) {
+          const base::DictValue* ep_dict = ip_endpoint_value.GetIfDict();
+          if (ep_dict && ep_dict->FindString(kInterfaceNameKey)) {
+            interface_unavailable = true;
+            break;
+          }
           return false;
+        }
         ip_endpoints.push_back(std::move(ip_endpoint).value());
+      }
+      if (interface_unavailable) {
+        continue;
       }
     }
 
@@ -1062,7 +1184,7 @@ bool HostCache::RestoreFromListValue(const base::Value::List& old_cache) {
     if (endpoint_metadatas_list) {
       for (const base::Value& endpoint_metadata_value :
            *endpoint_metadatas_list) {
-        absl::optional<
+        std::optional<
             std::pair<HttpsRecordPriority, ConnectionEndpointMetadata>>
             pair = EndpointMetadataPairFromValue(endpoint_metadata_value);
         if (!pair)
@@ -1131,12 +1253,9 @@ bool HostCache::RestoreFromListValue(const base::Value::List& old_cache) {
       }
     }
 
-    // We do not intend to serialize experimental results with the host cache.
-    std::vector<bool> experimental_results;
-
     Key key(std::move(host), dns_query_type.value(), flags,
             static_cast<HostResolverSource>(host_resolver_source),
-            network_anonymization_key);
+            network_anonymization_key, handles::kInvalidNetworkHandle);
     key.secure = secure;
 
     // If the key is already in the cache, assume it's more recent and don't
@@ -1146,8 +1265,8 @@ bool HostCache::RestoreFromListValue(const base::Value::List& old_cache) {
       Entry new_entry(error, std::move(ip_endpoints),
                       std::move(endpoint_metadatas), std::move(aliases),
                       std::move(text_records), std::move(hostname_records),
-                      std::move(experimental_results), Entry::SOURCE_UNKNOWN,
-                      expiration_time, network_changes_ - 1);
+                      Entry::SOURCE_UNKNOWN, expiration_time,
+                      network_changes_ - 1);
       new_entry.set_pinning(maybe_pinned.value_or(false));
       new_entry.set_canonical_names(std::move(canonical_names));
       AddEntry(key, std::move(new_entry));
@@ -1167,20 +1286,10 @@ size_t HostCache::max_entries() const {
   return max_entries_;
 }
 
-// static
-std::unique_ptr<HostCache> HostCache::CreateDefaultCache() {
-#if defined(ENABLE_BUILT_IN_DNS)
-  const size_t kDefaultMaxEntries = 1000;
-#else
-  const size_t kDefaultMaxEntries = 100;
-#endif
-  return std::make_unique<HostCache>(kDefaultMaxEntries);
-}
-
 bool HostCache::EvictOneEntry(base::TimeTicks now) {
   DCHECK_LT(0u, entries_.size());
 
-  absl::optional<net::HostCache::EntryMap::iterator> oldest_it;
+  std::optional<net::HostCache::EntryMap::iterator> oldest_it;
   for (auto it = entries_.begin(); it != entries_.end(); ++it) {
     const Entry& entry = it->second;
     if (HasActivePin(entry)) {
@@ -1201,6 +1310,8 @@ bool HostCache::EvictOneEntry(base::TimeTicks now) {
   }
 
   if (oldest_it) {
+    RecordErase(EraseReason::kEraseEvict, now, (*oldest_it)->first,
+                (*oldest_it)->second);
     entries_.erase(*oldest_it);
     return true;
   }
@@ -1210,6 +1321,48 @@ bool HostCache::EvictOneEntry(base::TimeTicks now) {
 bool HostCache::HasActivePin(const Entry& entry) {
   return entry.pinning().value_or(false) &&
          entry.network_changes() == network_changes();
+}
+
+void HostCache::RecordLookup(LookupOutcome outcome,
+                             base::TimeTicks now,
+                             const Key& key,
+                             const Entry* entry) {
+  base::UmaHistogramEnumeration(GetHistogramName("Lookup", key), outcome);
+  if (outcome == LookupOutcome::kLookupHitStale) {
+    CHECK_NE(entry, nullptr);
+    base::UmaHistogramLongTimes(GetHistogramName("LookupStale.ExpiredBy", key),
+                                now - entry->expires());
+    base::UmaHistogramCounts1000(
+        GetHistogramName("LookupStale.NetworkChanges", key),
+        network_changes_ - entry->network_changes());
+  }
+}
+
+void HostCache::RecordErase(EraseReason reason,
+                            base::TimeTicks now,
+                            const Key& key,
+                            const Entry& entry) {
+  HostCache::EntryStaleness stale;
+  entry.GetStaleness(now, network_changes_, &stale);
+  base::UmaHistogramEnumeration(GetHistogramName("Erase", key), reason);
+  if (stale.is_stale()) {
+    base::UmaHistogramLongTimes(GetHistogramName("EraseStale.ExpiredBy", key),
+                                stale.expired_by);
+    base::UmaHistogramCounts1000(
+        GetHistogramName("EraseStale.NetworkChanges", key),
+        stale.network_changes);
+    base::UmaHistogramCounts1000(GetHistogramName("EraseStale.StaleHits", key),
+                                 entry.stale_hits());
+  } else {
+    base::UmaHistogramLongTimes(GetHistogramName("EraseValid.ValidFor", key),
+                                -stale.expired_by);
+  }
+}
+
+void HostCache::RecordEraseAll(EraseReason reason, base::TimeTicks now) {
+  for (const auto& it : entries_) {
+    RecordErase(reason, now, it.first, it.second);
+  }
 }
 
 }  // namespace net

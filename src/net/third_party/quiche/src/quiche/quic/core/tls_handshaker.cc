@@ -4,14 +4,23 @@
 
 #include "quiche/quic/core/tls_handshaker.h"
 
-#include "absl/base/macros.h"
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "absl/types/span.h"
 #include "openssl/crypto.h"
 #include "openssl/ssl.h"
+#include "quiche/quic/core/crypto/crypto_utils.h"
+#include "quiche/quic/core/crypto/quic_decrypter.h"
 #include "quiche/quic/core/quic_crypto_stream.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
-#include "quiche/quic/platform/api/quic_stack_trace.h"
+#include "quiche/quic/platform/api/quic_flag_utils.h"
+#include "quiche/quic/platform/api/quic_flags.h"
 
 namespace quic {
 
@@ -144,27 +153,39 @@ void TlsHandshaker::AdvanceHandshake() {
     return;
   }
   int ssl_error = SSL_get_error(ssl(), rv);
+
+  if (GetQuicRestartFlag(quic_client_cert_support) &&
+      ssl_error == SSL_ERROR_WANT_X509_LOOKUP) {
+    QUIC_RESTART_FLAG_COUNT_N(quic_client_cert_support, 2, 2);
+    // Handshake is suspended until the client certificate is set.
+    return;
+  }
+
   if (ssl_error == expected_ssl_error_) {
     return;
   }
   if (ShouldCloseConnectionOnUnexpectedError(ssl_error) &&
       !is_connection_closed()) {
+    std::string ssl_error_stack = CryptoUtils::GetSSLErrorStack();
     QUIC_VLOG(1) << "SSL_do_handshake failed; SSL_get_error returns "
-                 << ssl_error;
-    ERR_print_errors_fp(stderr);
+                 << ssl_error << ", SSLErrorStack: " << ssl_error_stack;
     if (last_tls_alert_.has_value()) {
       std::string error_details =
           absl::StrCat("TLS handshake failure (",
                        EncryptionLevelToString(last_tls_alert_->level), ") ",
                        static_cast<int>(last_tls_alert_->desc), ": ",
-                       SSL_alert_desc_string_long(last_tls_alert_->desc));
+                       SSL_alert_desc_string_long(last_tls_alert_->desc),
+                       ". SSLErrorStack:", ssl_error_stack);
       QUIC_DLOG(ERROR) << error_details;
-      CloseConnection(TlsAlertToQuicErrorCode(last_tls_alert_->desc),
+      CloseConnection(TlsAlertToQuicErrorCode(last_tls_alert_->desc)
+                          .value_or(QUIC_HANDSHAKE_FAILED),
                       static_cast<QuicIetfTransportErrorCodes>(
                           CRYPTO_ERROR_FIRST + last_tls_alert_->desc),
                       error_details);
     } else {
-      CloseConnection(QUIC_HANDSHAKE_FAILED, "TLS handshake failed");
+      CloseConnection(QUIC_HANDSHAKE_FAILED,
+                      absl::StrCat("TLS handshake failed. SSLErrorStack:",
+                                   ssl_error_stack));
     }
   }
 }
@@ -172,7 +193,13 @@ void TlsHandshaker::AdvanceHandshake() {
 void TlsHandshaker::CloseConnection(QuicErrorCode error,
                                     const std::string& reason_phrase) {
   QUICHE_DCHECK(!reason_phrase.empty());
-  stream()->OnUnrecoverableError(error, reason_phrase);
+  if (extra_error_details_.empty()) {
+    stream()->OnUnrecoverableError(error, reason_phrase);
+  } else {
+    stream()->OnUnrecoverableError(
+        error,
+        absl::StrCat(reason_phrase, ". ExtraDetail:", extra_error_details_));
+  }
   is_connection_closed_ = true;
 }
 
@@ -180,7 +207,13 @@ void TlsHandshaker::CloseConnection(QuicErrorCode error,
                                     QuicIetfTransportErrorCodes ietf_error,
                                     const std::string& reason_phrase) {
   QUICHE_DCHECK(!reason_phrase.empty());
-  stream()->OnUnrecoverableError(error, ietf_error, reason_phrase);
+  if (extra_error_details_.empty()) {
+    stream()->OnUnrecoverableError(error, ietf_error, reason_phrase);
+  } else {
+    stream()->OnUnrecoverableError(
+        error, ietf_error,
+        absl::StrCat(reason_phrase, ". ExtraDetail:", extra_error_details_));
+  }
   is_connection_closed_ = true;
 }
 
@@ -194,6 +227,10 @@ bool TlsHandshaker::ShouldCloseConnectionOnUnexpectedError(int /*ssl_error*/) {
 }
 
 size_t TlsHandshaker::BufferSizeLimitForLevel(EncryptionLevel level) const {
+  if (level != ENCRYPTION_FORWARD_SECURE && !SSL_in_init(ssl())) {
+    // TODO(crbug.com/459517298): Remove this branch when BoringSSL is fixed.
+    return 0;
+  }
   return SSL_quic_max_handshake_flight_len(
       ssl(), TlsConnection::BoringEncryptionLevel(level));
 }
@@ -203,11 +240,7 @@ ssl_early_data_reason_t TlsHandshaker::EarlyDataReason() const {
 }
 
 const EVP_MD* TlsHandshaker::Prf(const SSL_CIPHER* cipher) {
-#if BORINGSSL_API_VERSION >= 23
   return SSL_CIPHER_get_handshake_digest(cipher);
-#else
-  return EVP_get_digestbynid(SSL_CIPHER_get_prf_nid(cipher));
-#endif
 }
 
 enum ssl_verify_result_t TlsHandshaker::VerifyCert(uint8_t* out_alert) {
@@ -223,12 +256,11 @@ enum ssl_verify_result_t TlsHandshaker::VerifyCert(uint8_t* out_alert) {
     *out_alert = SSL_AD_INTERNAL_ERROR;
     return ssl_verify_invalid;
   }
-  // TODO(nharper): Pass the CRYPTO_BUFFERs into the QUIC stack to avoid copies.
-  std::vector<std::string> certs;
+  std::vector<absl::string_view> certs;
   for (CRYPTO_BUFFER* cert : cert_chain) {
-    certs.push_back(
-        std::string(reinterpret_cast<const char*>(CRYPTO_BUFFER_data(cert)),
-                    CRYPTO_BUFFER_len(cert)));
+    certs.push_back(absl::string_view(
+        reinterpret_cast<const char*>(CRYPTO_BUFFER_data(cert)),
+        CRYPTO_BUFFER_len(cert)));
   }
   QUIC_DVLOG(1) << "VerifyCert: peer cert_chain length: " << certs.size();
 
@@ -266,13 +298,14 @@ void TlsHandshaker::SetWriteSecret(EncryptionLevel level,
   std::unique_ptr<QuicEncrypter> encrypter =
       QuicEncrypter::CreateFromCipherSuite(SSL_CIPHER_get_id(cipher));
   const EVP_MD* prf = Prf(cipher);
+  std::vector<uint8_t> header_protection_key;
   CryptoUtils::SetKeyAndIV(prf, write_secret,
                            handshaker_delegate_->parsed_version(),
                            encrypter.get());
-  std::vector<uint8_t> header_protection_key =
-      CryptoUtils::GenerateHeaderProtectionKey(
-          prf, write_secret, handshaker_delegate_->parsed_version(),
-          encrypter->GetKeySize());
+  header_protection_key.resize(encrypter->GetKeySize());
+  CryptoUtils::GenerateHeaderProtectionKey(
+      prf, write_secret, handshaker_delegate_->parsed_version(),
+      absl::Span<uint8_t>(header_protection_key));
   encrypter->SetHeaderProtectionKey(
       absl::string_view(reinterpret_cast<char*>(header_protection_key.data()),
                         header_protection_key.size()));
@@ -290,25 +323,22 @@ bool TlsHandshaker::SetReadSecret(EncryptionLevel level,
                                   absl::Span<const uint8_t> read_secret) {
   QUIC_DVLOG(1) << ENDPOINT << "SetReadSecret level=" << level
                 << ", connection_closed=" << is_connection_closed();
-  if (check_connected_before_set_read_secret_) {
-    if (is_connection_closed()) {
-      QUIC_RELOADABLE_FLAG_COUNT_N(quic_check_connected_before_set_read_secret,
-                                   1, 2);
-      return false;
-    }
-    QUIC_RELOADABLE_FLAG_COUNT_N(quic_check_connected_before_set_read_secret, 2,
-                                 2);
+
+  if (is_connection_closed()) {
+    return false;
   }
+
   std::unique_ptr<QuicDecrypter> decrypter =
       QuicDecrypter::CreateFromCipherSuite(SSL_CIPHER_get_id(cipher));
   const EVP_MD* prf = Prf(cipher);
+  std::vector<uint8_t> header_protection_key;
   CryptoUtils::SetKeyAndIV(prf, read_secret,
                            handshaker_delegate_->parsed_version(),
                            decrypter.get());
-  std::vector<uint8_t> header_protection_key =
-      CryptoUtils::GenerateHeaderProtectionKey(
-          prf, read_secret, handshaker_delegate_->parsed_version(),
-          decrypter->GetKeySize());
+  header_protection_key.resize(decrypter->GetKeySize());
+  CryptoUtils::GenerateHeaderProtectionKey(
+      prf, read_secret, handshaker_delegate_->parsed_version(),
+      absl::Span<uint8_t>(header_protection_key));
   decrypter->SetHeaderProtectionKey(
       absl::string_view(reinterpret_cast<char*>(header_protection_key.data()),
                         header_protection_key.size()));
@@ -323,6 +353,10 @@ bool TlsHandshaker::SetReadSecret(EncryptionLevel level,
       /*latch_once_used=*/false);
 }
 
+const SSL_CIPHER* TlsHandshaker::GetCipher() const {
+  return SSL_get_current_cipher(ssl());
+}
+
 std::unique_ptr<QuicDecrypter>
 TlsHandshaker::AdvanceKeysAndCreateCurrentOneRttDecrypter() {
   if (latest_read_secret_.empty() || latest_write_secret_.empty() ||
@@ -333,18 +367,20 @@ TlsHandshaker::AdvanceKeysAndCreateCurrentOneRttDecrypter() {
     CloseConnection(QUIC_INTERNAL_ERROR, error_details);
     return nullptr;
   }
-  const SSL_CIPHER* cipher = SSL_get_current_cipher(ssl());
+  const SSL_CIPHER* cipher = GetCipher();
   const EVP_MD* prf = Prf(cipher);
-  latest_read_secret_ = CryptoUtils::GenerateNextKeyPhaseSecret(
-      prf, handshaker_delegate_->parsed_version(), latest_read_secret_);
-  latest_write_secret_ = CryptoUtils::GenerateNextKeyPhaseSecret(
-      prf, handshaker_delegate_->parsed_version(), latest_write_secret_);
-
+  CryptoUtils::GenerateNextKeyPhaseSecret(
+      prf, handshaker_delegate_->parsed_version(), latest_read_secret_,
+      absl::Span<uint8_t>(latest_read_secret_));
+  CryptoUtils::GenerateNextKeyPhaseSecret(
+      prf, handshaker_delegate_->parsed_version(), latest_write_secret_,
+      absl::Span<uint8_t>(latest_write_secret_));
   std::unique_ptr<QuicDecrypter> decrypter =
       QuicDecrypter::CreateFromCipherSuite(SSL_CIPHER_get_id(cipher));
   CryptoUtils::SetKeyAndIV(prf, latest_read_secret_,
                            handshaker_delegate_->parsed_version(),
                            decrypter.get());
+
   decrypter->SetHeaderProtectionKey(absl::string_view(
       reinterpret_cast<char*>(one_rtt_read_header_protection_key_.data()),
       one_rtt_read_header_protection_key_.size()));
@@ -360,7 +396,7 @@ std::unique_ptr<QuicEncrypter> TlsHandshaker::CreateCurrentOneRttEncrypter() {
     CloseConnection(QUIC_INTERNAL_ERROR, error_details);
     return nullptr;
   }
-  const SSL_CIPHER* cipher = SSL_get_current_cipher(ssl());
+  const SSL_CIPHER* cipher = GetCipher();
   std::unique_ptr<QuicEncrypter> encrypter =
       QuicEncrypter::CreateFromCipherSuite(SSL_CIPHER_get_id(cipher));
   CryptoUtils::SetKeyAndIV(Prf(cipher), latest_write_secret_,
@@ -403,7 +439,6 @@ void TlsHandshaker::SendAlert(EncryptionLevel level, uint8_t desc) {
 
 void TlsHandshaker::MessageCallback(bool is_write, int /*version*/,
                                     int content_type, absl::string_view data) {
-#if BORINGSSL_API_VERSION >= 17
   if (content_type == SSL3_RT_CLIENT_HELLO_INNER) {
     // Notify QuicConnectionDebugVisitor. Most TLS messages can be seen in
     // CRYPTO frames, but, with ECH enabled, the ClientHelloInner is encrypted
@@ -414,11 +449,6 @@ void TlsHandshaker::MessageCallback(bool is_write, int /*version*/,
       handshaker_delegate_->OnEncryptedClientHelloReceived(data);
     }
   }
-#else   // BORINGSSL_API_VERSION
-  (void)is_write;
-  (void)content_type;
-  (void)data;
-#endif  // BORINGSSL_API_VERSION
 }
 
 }  // namespace quic

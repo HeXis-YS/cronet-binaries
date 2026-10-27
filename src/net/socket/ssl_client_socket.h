@@ -11,9 +11,9 @@
 #include <vector>
 
 #include "base/containers/flat_set.h"
-#include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
+#include "net/base/load_timing_info.h"
 #include "net/base/net_export.h"
 #include "net/cert/cert_database.h"
 #include "net/cert/cert_verifier.h"
@@ -23,7 +23,6 @@
 
 namespace net {
 
-class CTPolicyEnforcer;
 class HostPortPair;
 class SCTAuditingDelegate;
 class SSLClientSessionCache;
@@ -40,6 +39,60 @@ class TransportSecurityState;
 //
 class NET_EXPORT SSLClientSocket : public SSLSocket {
  public:
+  // Records some histograms based on the result of the SSL handshake.
+  static void RecordSSLConnectResult(
+      SSLClientSocket* ssl_socket,
+      int result,
+      bool is_ech_capable,
+      bool ech_enabled,
+      const std::optional<std::vector<uint8_t>>& ech_retry_configs,
+      bool trust_anchor_ids_from_dns,
+      bool retried_with_trust_anchor_ids,
+      bool trust_anchor_retry_used_mtc_fallback,
+      const LoadTimingInfo::ConnectTiming& connect_timing);
+
+  // These values are persisted to logs. Entries should not be renumbered
+  // and numeric values should never be reused.
+  enum class TrustAnchorIDsResult {
+    // There was a DNS hint, and the connection succeeded on the initial
+    // connection.
+    kDnsSuccessInitial = 0,
+    // There was a DNS hint, and the connection failed on the initial
+    // connection, without retrying.
+    kDnsErrorInitial = 1,
+    // There was a DNS hint, and the connection succeeded after retrying with
+    // fresh Trust Anchor IDs.
+    kDnsSuccessRetry = 2,
+    // There was a DNS hint, and the connection failed after retrying with fresh
+    // Trust Anchor IDs.
+    kDnsErrorRetry = 3,
+    // There was no DNS hint, and the connection succeeded on the initial
+    // connection.
+    kNoDnsSuccessInitial = 4,
+    // There was no DNS hint, and the connection failed on the initial
+    // connection, without retrying.
+    kNoDnsErrorInitial = 5,
+    // There was no DNS hint, and the connection succeeded after retrying with
+    // fresh Trust Anchor IDs.
+    kNoDnsSuccessRetry = 6,
+    // There was no DNS hint, and the connection failed after retrying with
+    // fresh Trust Anchor IDs.
+    kNoDnsErrorRetry = 7,
+    // There was a DNS hint, and the connection succeeded after retrying with
+    // the MTC fallback.
+    kDnsSuccessRetryMtcFallback = 8,
+    // There was a DNS hint, and the connection failed after retrying with
+    // the MTC fallback.
+    kDnsErrorRetryMtcFallback = 9,
+    // There was no DNS hint, and the connection succeeded after retrying with
+    // the MTC fallback.
+    kNoDnsSuccessRetryMtcFallback = 10,
+    // There was no DNS hint, and the connection failed after retrying with
+    // the MTC fallback.
+    kNoDnsErrorRetryMtcFallback = 11,
+    kMaxValue = kNoDnsErrorRetryMtcFallback,
+  };
+
   SSLClientSocket();
 
   // Called in response to |ERR_ECH_NOT_NEGOTIATED| in Connect(), to determine
@@ -50,6 +103,14 @@ class NET_EXPORT SSLClientSocket : public SSLSocket {
   // connection can be retried with ECH disabled.
   virtual std::vector<uint8_t> GetECHRetryConfigs() = 0;
 
+  // Called in response to a connection error in Connect(), when the client
+  // advertised the TLS Trust Anchor IDs extension. If this method returns a
+  // non-empty set, it is the Trust Anchor IDs (in binary representation) that
+  // the server provided in the handshake. The connection can be retried with
+  // these new Trust Anchor IDs, overriding the Trust Anchor IDs that the server
+  // advertised in DNS.
+  virtual std::vector<std::vector<uint8_t>> GetServerTrustAnchorIDs() = 0;
+
   // Log SSL key material to |logger|. Must be called before any
   // SSLClientSockets are created.
   //
@@ -57,33 +118,10 @@ class NET_EXPORT SSLClientSocket : public SSLSocket {
   // once https://crbug.com/458365 is resolved.
   static void SetSSLKeyLogger(std::unique_ptr<SSLKeyLogger> logger);
 
- protected:
-  void set_signed_cert_timestamps_received(
-      bool signed_cert_timestamps_received) {
-    signed_cert_timestamps_received_ = signed_cert_timestamps_received;
-  }
-
-  void set_stapled_ocsp_response_received(bool stapled_ocsp_response_received) {
-    stapled_ocsp_response_received_ = stapled_ocsp_response_received;
-  }
-
   // Serialize |next_protos| in the wire format for ALPN: protocols are listed
   // in order, each prefixed by a one-byte length.
   static std::vector<uint8_t> SerializeNextProtos(
       const NextProtoVector& next_protos);
-
- private:
-  FRIEND_TEST_ALL_PREFIXES(SSLClientSocket, SerializeNextProtos);
-  // For signed_cert_timestamps_received_ and stapled_ocsp_response_received_.
-  FRIEND_TEST_ALL_PREFIXES(SSLClientSocketVersionTest,
-                           ConnectSignedCertTimestampsTLSExtension);
-  FRIEND_TEST_ALL_PREFIXES(SSLClientSocketVersionTest,
-                           ConnectSignedCertTimestampsEnablesOCSP);
-
-  // True if SCTs were received via a TLS extension.
-  bool signed_cert_timestamps_received_ = false;
-  // True if a stapled OCSP response was received.
-  bool stapled_ocsp_response_received_ = false;
 };
 
 // Shared state and configuration across multiple SSLClientSockets.
@@ -120,7 +158,6 @@ class NET_EXPORT SSLClientContext : public SSLConfigService::Observer,
   SSLClientContext(SSLConfigService* ssl_config_service,
                    CertVerifier* cert_verifier,
                    TransportSecurityState* transport_security_state,
-                   CTPolicyEnforcer* ct_policy_enforcer,
                    SSLClientSessionCache* ssl_client_session_cache,
                    SCTAuditingDelegate* sct_auditing_delegate);
 
@@ -136,13 +173,20 @@ class NET_EXPORT SSLClientContext : public SSLConfigService::Observer,
   TransportSecurityState* transport_security_state() {
     return transport_security_state_;
   }
-  CTPolicyEnforcer* ct_policy_enforcer() { return ct_policy_enforcer_; }
   SSLClientSessionCache* ssl_client_session_cache() {
     return ssl_client_session_cache_;
   }
   SCTAuditingDelegate* sct_auditing_delegate() {
     return sct_auditing_delegate_;
   }
+
+  // Returns the EchMode for `hostname`. If `ssl_config_service_` is null,
+  // defaults to EchMode::kOpportunistic.
+  EchMode GetEchMode(std::string_view hostname) const;
+
+  // Returns true if ECH is enabled for `hostname` (i.e. GetEchMode(hostname) !=
+  // EchMode::kDisabled).
+  bool IsEchEnabled(std::string_view hostname) const;
 
   // Creates a new SSLClientSocket which can then be used to establish an SSL
   // connection to |host_and_port| over the already-connected |stream_socket|.
@@ -191,6 +235,14 @@ class NET_EXPORT SSLClientContext : public SSLConfigService::Observer,
       const net::HostPortPair& host,
       const scoped_refptr<net::X509Certificate>& certificate);
 
+  // Clears a client certificate preference, set by SetClientCertificate(),
+  // for all hosts whose cached certificate matches |certificate|.
+  //
+  // Note this method will synchronously call OnSSLConfigForServersChanged() on
+  // observers.
+  void ClearMatchingClientCertificate(
+      const scoped_refptr<net::X509Certificate>& certificate);
+
   base::flat_set<HostPortPair> GetClientCertificateCachedServersForTesting()
       const {
     return ssl_client_auth_cache_.GetCachedServers();
@@ -223,7 +275,6 @@ class NET_EXPORT SSLClientContext : public SSLConfigService::Observer,
   raw_ptr<SSLConfigService> ssl_config_service_;
   raw_ptr<CertVerifier> cert_verifier_;
   raw_ptr<TransportSecurityState> transport_security_state_;
-  raw_ptr<CTPolicyEnforcer> ct_policy_enforcer_;
   raw_ptr<SSLClientSessionCache> ssl_client_session_cache_;
   raw_ptr<SCTAuditingDelegate> sct_auditing_delegate_;
 

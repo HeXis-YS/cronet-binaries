@@ -1,0 +1,75 @@
+From b8d81e7ebd7140cf1a6c546a11a8fcc081069c33 Mon Sep 17 00:00:00 2001
+From: klzgrad <kizdiv@gmail.com>
+Date: Sat, 30 Nov 2019 21:52:42 +0800
+Subject: [PATCH] libc++: Disable exceptions and RTTI
+
+Except on Mac, where exceptions are required.
+And except on Android, where rtti is required.
+---
+ src/buildtools/third_party/libc++/BUILD.gn    |  4 ---
+ src/buildtools/third_party/libc++abi/BUILD.gn | 31 +++++++++++++++++++
+ 2 files changed, 31 insertions(+), 4 deletions(-)
+
+diff --git a/src/buildtools/third_party/libc++/BUILD.gn b/src/buildtools/third_party/libc++/BUILD.gn
+index f141b7437..614b54403 100644
+--- a/src/buildtools/third_party/libc++/BUILD.gn
++++ b/src/buildtools/third_party/libc++/BUILD.gn
+@@ -522,15 +522,11 @@ target(libcxx_target_type, "libc++") {
+   # exception and rtti.
+   configs -= [
+     "//build/config/compiler:chromium_code",
+-    "//build/config/compiler:no_exceptions",
+-    "//build/config/compiler:no_rtti",
+     "//build/config/coverage:default_coverage",
+   ]
+   configs += [
+     ":config",
+     "//build/config/compiler:no_chromium_code",
+-    "//build/config/compiler:exceptions",
+-    "//build/config/compiler:rtti",
+   ]
+ 
+   deps = [ "//third_party/llvm-libc:llvm-libc-shared" ]
+diff --git a/src/buildtools/third_party/libc++abi/BUILD.gn b/src/buildtools/third_party/libc++abi/BUILD.gn
+index e04e7afbb..7263fa546 100644
+--- a/src/buildtools/third_party/libc++abi/BUILD.gn
++++ b/src/buildtools/third_party/libc++abi/BUILD.gn
+@@ -105,4 +105,35 @@ target(libcxxabi_target_type, "libc++abi") {
+   # Disabling -Wexit-time-destructors, as libc++abi uses a static object for
+   # at exit management (see `static DtorsManager manager`).
+   configs += [ "//build/config/compiler:no_exit_time_destructors" ]
++
++  if (!is_apple) {
++    sources -= [
++      "//third_party/libc++abi/src/src/cxa_exception.cpp",
++      "//third_party/libc++abi/src/src/cxa_personality.cpp",
++      "//third_party/libc++abi/src/src/private_typeinfo.cpp",
++    ]
++    sources += [
++      "//third_party/libc++abi/src/src/cxa_noexception.cpp",
++    ]
++    defines += [ "_LIBCXXABI_NO_EXCEPTIONS" ]
++    configs -= [
++      "//build/config/compiler:exceptions",
++      "//build/config/compiler:rtti",
++    ]
++    configs += [
++      "//build/config/compiler:no_exceptions",
++      "//build/config/compiler:no_rtti",
++    ]
++  }
++  if (is_android) {
++    sources += [
++      "//third_party/libc++abi/src/src/private_typeinfo.cpp",
++    ]
++    configs -= [
++      "//build/config/compiler:no_rtti",
++    ]
++    configs += [
++      "//build/config/compiler:rtti",
++    ]
++  }
+ }
+-- 
+2.53.0
+

@@ -31,7 +31,7 @@
 // the 'static_spki_hashes' and 'bad_static_spki_hashes' fields in 'pinsets'
 // refer to, and the timestamp at which the pins list was last updated.
 //
-// Last updated: 2023-10-23 12:58 UTC
+// Last updated: 2026-10-02 13:41 UTC
 //
 {
   "pinsets": [
@@ -39,64 +39,29 @@
       "name": "test",
       "static_spki_hashes": [
         "TestSPKI"
-      ],
-      "report_uri": "http://report-example.test/test"
+      ]
     },
     {
       "name": "google",
       "static_spki_hashes": [
         "GoogleBackup2048",
-        "GTSCA1O1",
         "GTSRootR1",
-        "GTSRootR2",
-        "GTSRootR3",
         "GTSRootR4",
-        "GlobalSignRootCA_R2"
+        "GlobalSignR4_owned_by_Google",
+        "WR1_GoogleTrustServices",
+        "WR2_GoogleTrustServices",
+        "WR3_GoogleTrustServices",
+        "WR4_GoogleTrustServices",
+        "WE1_GoogleTrustServices",
+        "WE2_GoogleTrustServices",
+        "WE3_GoogleTrustServices",
+        "WE4_GoogleTrustServices",
+        "AE1_GoogleTrustServices"
       ],
       "bad_static_spki_hashes": [
         "GlobalSignExtendedValidationCA",
         "GlobalSignExtendedValidationCA_G2",
         "GlobalSignExtendedValidationCA_SHA256_G2"
-      ],
-      "report_uri": "http://clients3.google.com/cert_upload_json"
-    },
-    {
-      "name": "tor",
-      "static_spki_hashes": [
-        "RapidSSL",
-        "DigiCertEVRoot",
-        "Tor1",
-        "Tor2",
-        "Tor3",
-        "LetsEncryptAuthorityPrimary_X1_X3",
-        "LetsEncryptAuthorityBackup_X2_X4",
-        "R3LetsEncrypt",
-        "R4LetsEncrypt"
-      ]
-    },
-    {
-      "name": "facebook",
-      "static_spki_hashes": [
-        "ComodoRSACertificationAuthority",
-        "ComodoECCCertificationAuthority",
-        "UserTrustRSACertificationAuthority",
-        "UserTrustECCCertificationAuthority",
-        "DigiCertGlobalRoot",
-        "DigiCertGlobalRootG2",
-        "DigiCertGlobalRootG3",
-        "DigiCertEVRoot",
-        "DigiCertTrustedRootG4",
-        "DigiCertTLSRSA4096RootG5",
-        "DigiCertTLSECCP384RootG5",
-        "GlobalSignRootCA",
-        "GlobalSignRootCA_R3",
-        "GlobalSignRootCA_R6",
-        "GlobalSignRootR46",
-        "ISRGRootX1",
-        "ISRGRootX2",
-        "FacebookBackup",
-        "SymantecClass3EVG3",
-        "DigiCertECCSecureServerCA"
       ]
     }
   ],
@@ -128,6 +93,11 @@
     },
     {
       "name": "mail.google.com",
+      "include_subdomains": true,
+      "pins": "google"
+    },
+    {
+      "name": "partner.android.com",
       "include_subdomains": true,
       "pins": "google"
     },
@@ -198,6 +168,11 @@
     },
     {
       "name": "contributor.google.com",
+      "include_subdomains": true,
+      "pins": "google"
+    },
+    {
+      "name": "crossmediapanel.com",
       "include_subdomains": true,
       "pins": "google"
     },
@@ -288,6 +263,11 @@
     },
     {
       "name": "meet.google.com",
+      "include_subdomains": true,
+      "pins": "google"
+    },
+    {
+      "name": "mfg-inspector.com",
       "include_subdomains": true,
       "pins": "google"
     },
@@ -717,6 +697,11 @@
       "pins": "google"
     },
     {
+      "name": "google.al",
+      "include_subdomains": true,
+      "pins": "google"
+    },
+    {
       "name": "google.am",
       "include_subdomains": true,
       "pins": "google"
@@ -777,6 +762,11 @@
       "pins": "google"
     },
     {
+      "name": "google.bt",
+      "include_subdomains": true,
+      "pins": "google"
+    },
+    {
       "name": "google.by",
       "include_subdomains": true,
       "pins": "google"
@@ -788,6 +778,11 @@
     },
     {
       "name": "google.cat",
+      "include_subdomains": true,
+      "pins": "google"
+    },
+    {
+      "name": "google.eus",
       "include_subdomains": true,
       "pins": "google"
     },
@@ -1092,6 +1087,11 @@
       "pins": "google"
     },
     {
+      "name": "google.com.mm",
+      "include_subdomains": true,
+      "pins": "google"
+    },
+    {
       "name": "google.com.mt",
       "include_subdomains": true,
       "pins": "google"
@@ -1148,6 +1148,11 @@
     },
     {
       "name": "google.com.pe",
+      "include_subdomains": true,
+      "pins": "google"
+    },
+    {
+      "name": "google.com.pg",
       "include_subdomains": true,
       "pins": "google"
     },
@@ -1722,6 +1727,11 @@
       "pins": "google"
     },
     {
+      "name": "google.sr",
+      "include_subdomains": true,
+      "pins": "google"
+    },
+    {
       "name": "google.st",
       "include_subdomains": true,
       "pins": "google"
@@ -1872,119 +1882,24 @@
       "pins": "google"
     },
     {
-      "name": "facebook.com",
+      "name": "gmail.co.ug",
       "include_subdomains": true,
-      "pins": "facebook"
+      "pins": "google"
     },
     {
-      "name": "www.facebook.com",
+      "name": "google.ug",
       "include_subdomains": true,
-      "pins": "facebook"
+      "pins": "google"
     },
     {
-      "name": "m.facebook.com",
+      "name": "youtube.co.ug",
       "include_subdomains": true,
-      "pins": "facebook"
+      "pins": "google"
     },
     {
-      "name": "tablet.facebook.com",
+      "name": "youtube.ug",
       "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "secure.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "pixel.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "apps.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "upload.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "developers.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "touch.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "mbasic.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "code.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "t.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "mtouch.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "business.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "research.facebook.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "messenger.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "www.messenger.com",
-      "include_subdomains": true,
-      "pins": "facebook"
-    },
-    {
-      "name": "torproject.org",
-      "include_subdomains": false,
-      "pins": "tor"
-    },
-    {
-      "name": "blog.torproject.org",
-      "include_subdomains": true,
-      "pins": "tor"
-    },
-    {
-      "name": "check.torproject.org",
-      "include_subdomains": true,
-      "pins": "tor"
-    },
-    {
-      "name": "www.torproject.org",
-      "include_subdomains": true,
-      "pins": "tor"
-    },
-    {
-      "name": "dist.torproject.org",
-      "include_subdomains": true,
-      "pins": "tor"
+      "pins": "google"
     }
   ]
 }

@@ -3,13 +3,19 @@
 # found in the LICENSE file.
 
 import("//build/buildflag_header.gni")
-import("//build/config/chromeos/ui_mode.gni")
-import("//components/nacl/toolchain.gni")
 import("//crypto/features.gni")
+
+if (is_ios) {
+  import("//build/config/apple/mobile_config.gni")  # For `target_platform`
+}
 
 buildflag_header("buildflags") {
   header = "crypto_buildflags.h"
-  flags = [ "USE_NSS_CERTS=$use_nss_certs" ]
+  flags = [
+    "USE_NSS_CLIENT_CERTS=$use_nss_client_certs",
+    "USE_NSS_SERVER_CERTS=$use_nss_server_certs",
+    "USE_NSS_CERTS=$use_nss_certs",
+  ]
 }
 
 component("crypto") {
@@ -17,27 +23,45 @@ component("crypto") {
   sources = [
     "aead.cc",
     "aead.h",
+    "aes_cbc.cc",
+    "aes_cbc.h",
+    "aes_ctr.cc",
+    "aes_ctr.h",
     "crypto_export.h",
-    "ec_private_key.cc",
-    "ec_private_key.h",
-    "ec_signature_creator.cc",
-    "ec_signature_creator.h",
-    "ec_signature_creator_impl.cc",
-    "ec_signature_creator_impl.h",
-    "encryptor.cc",
-    "encryptor.h",
-    "hkdf.cc",
-    "hkdf.h",
+    "ecdsa_utils.cc",
+    "ecdsa_utils.h",
+    "encrypt.cc",
+    "encrypt.h",
+    "evp.cc",
+    "evp.h",
+    "features.cc",
+    "features.h",
+    "hash.cc",
+    "hash.h",
     "hmac.cc",
     "hmac.h",
+    "hpke.cc",
+    "hpke.h",
+    "kdf.cc",
+    "kdf.h",
+    "kem.cc",
+    "kem.h",
+    "kex.cc",
+    "kex.h",
+    "keypair.cc",
+    "keypair.h",
+    "obsolete/md5.cc",
+    "obsolete/md5.h",
+    "obsolete/sha1.cc",
+    "obsolete/sha1.h",
     "openssl_util.cc",
     "openssl_util.h",
-    "p224_spake.cc",
-    "p224_spake.h",
+    "pem.cc",
+    "pem.h",
+    "process_bound_string.cc",
+    "process_bound_string.h",
     "random.cc",
     "random.h",
-    "rsa_private_key.cc",
-    "rsa_private_key.h",
     "scoped_nss_types.h",
     "secure_hash.cc",
     "secure_hash.h",
@@ -45,77 +69,73 @@ component("crypto") {
     "secure_util.h",
     "sha2.cc",
     "sha2.h",
-    "signature_creator.cc",
-    "signature_creator.h",
-    "signature_verifier.cc",
-    "signature_verifier.h",
-    "symmetric_key.cc",
-    "symmetric_key.h",
-    "unexportable_key.cc",
-    "unexportable_key.h",
-    "unexportable_key_metrics.cc",
-    "unexportable_key_metrics.h",
-    "unexportable_key_software_unsecure.cc",
+    "sign.cc",
+    "sign.h",
+    "subtle_passkey.cc",
+    "subtle_passkey.h",
+    "user_verifying_key.cc",
+    "user_verifying_key.h",
   ]
 
-  deps = [
-    "//base",
-    "//base/third_party/dynamic_annotations",
-  ]
+  deps = []
 
   public_deps = [
     ":buildflags",
+    "//base",
     "//third_party/boringssl",
   ]
 
   if (is_apple) {
     sources += [
-      "apple_keychain.h",
-
-      # TODO(brettw): these mocks should be moved to a test_support_crypto
-      # target if possible.
-      "mock_apple_keychain.cc",
-      "mock_apple_keychain.h",
+      "apple/keychain_util.h",
+      "apple/keychain_util.mm",
+      "apple/keychain_v2.h",
+      "apple/keychain_v2.mm",
+      "apple/scoped_keychain_user_interaction_allowed.cc",
+      "apple/scoped_keychain_user_interaction_allowed.h",
     ]
 
     if (is_mac) {
       sources += [
-        "apple_keychain_mac.cc",
-
-        # TODO(brettw): these mocks should be moved to a test_support_crypto
-        # target if possible.
-        "mock_apple_keychain_mac.cc",
+        "apple/scoped_lacontext.h",
+        "apple/scoped_lacontext.mm",
+        "apple/security_framework_lock.cc",
+        "apple/security_framework_lock.h",
+        "user_verifying_key_mac.mm",
       ]
     }
-    if (is_ios) {
-      sources += [
-        "apple_keychain_ios.mm",
 
-        # TODO(brettw): these mocks should be moved to a test_support_crypto
-        # target if possible.
-        "mock_apple_keychain_ios.cc",
+    if (!(is_ios && target_platform == "tvos")) {
+      sources += [
+        "apple/unexportable_key_apple.h",
+        "apple/unexportable_key_apple.mm",
       ]
     }
 
     frameworks = [
       "CoreFoundation.framework",
+      "CryptoTokenKit.framework",
+      "Foundation.framework",
       "Security.framework",
     ]
+
+    if (is_mac || (is_ios && target_platform != "tvos")) {
+      frameworks += [ "LocalAuthentication.framework" ]
+    }
   }
 
-  if (is_mac) {
-    sources += [
-      "mac_security_services_lock.cc",
-      "mac_security_services_lock.h",
-    ]
-  }
   if (is_win) {
     sources += [
       "scoped_capi_types.h",
       "scoped_cng_types.h",
-      "unexportable_key_win.cc",
+      "user_verifying_key_win.cc",
     ]
-    libs = [ "ncrypt.lib" ]
+    libs = [
+      "crypt32.lib",
+      "ncrypt.lib",
+      "tbs.lib",
+    ]
+    ldflags = [ "/DELAYLOAD:tbs.dll" ]
   }
 
   # Some files are built when NSS is used for the platform certificate library.
@@ -128,23 +148,59 @@ component("crypto") {
       "nss_util.h",
       "nss_util_internal.h",
     ]
-    deps += [
-      "//build:chromeos_buildflags",
-      "//components/nacl/common:buildflags",
-    ]
     configs += [ "//build/config/linux/nss" ]
   }
 
-  if (is_chromeos_ash && !is_minimal_toolchain) {
-    sources += [ "nss_util_chromeos.cc" ]
-  }
-
-  if (is_chromeos && !is_minimal_toolchain) {
+  if (is_chromeos) {
     sources += [
       "chaps_support.cc",
       "chaps_support.h",
+      "nss_util_chromeos.cc",
     ]
   }
 
   defines = [ "CRYPTO_IMPLEMENTATION" ]
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
 }
+
+if (is_apple) {
+  # TODO(https://crbug.com/431952820): move this into a crypto/apple/BUILD.gn
+  source_set("mock_apple_keychain") {
+    sources = [
+      "apple/fake_keychain_v2.h",
+      "apple/fake_keychain_v2.mm",
+      "apple/scoped_fake_keychain_v2.h",
+      "apple/scoped_fake_keychain_v2.mm",
+    ]
+
+    deps = [
+      ":crypto",
+      "//base",
+    ]
+
+    frameworks = [
+      "CoreFoundation.framework",
+      "Foundation.framework",
+      "Security.framework",
+    ]
+
+    if (is_mac || (is_ios && target_platform != "tvos")) {
+      frameworks += [ "LocalAuthentication.framework" ]
+    }
+  }
+}
+
+source_set("cose") {
+  sources = [
+    "cose.cc",
+    "cose.h",
+  ]
+  deps = [
+    ":crypto",
+    "//base",
+    "//components/cbor",
+    "//third_party/boringssl",
+  ]
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
+}
+

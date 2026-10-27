@@ -6,15 +6,21 @@
 
 #include <fcntl.h>
 #include <glib.h>
-#include <math.h>
 
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
+#include "base/message_loop/io_watcher.h"
+#include "base/message_loop/message_pump_wakeup_counter.h"
 #include "base/notreached.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/synchronization/lock.h"
+#include "base/task/current_thread.h"
 #include "base/threading/platform_thread.h"
+
+#if !BUILDFLAG(IS_OZONE) || BUILDFLAG(IS_FUCHSIA)
+#include "base/notimplemented.h"
+#endif  // !BUILDFLAG(IS_OZONE) || BUILDFLAG(IS_FUCHSIA)
 
 namespace base {
 
@@ -39,10 +45,11 @@ static_assert(G_PRIORITY_DEFAULT < kPriorityFdWatch &&
 // to block forever, 0 to return right away, or a timeout in milliseconds from
 // now.
 int GetTimeIntervalMilliseconds(TimeTicks next_task_time) {
-  if (next_task_time.is_null())
+  if (next_task_time.is_null()) {
     return 0;
-  else if (next_task_time.is_max())
+  } else if (next_task_time.is_max()) {
     return -1;
+  }
 
   auto timeout_ms =
       (next_task_time - TimeTicks::Now()).InMillisecondsRoundedUp();
@@ -51,8 +58,8 @@ int GetTimeIntervalMilliseconds(TimeTicks next_task_time) {
 }
 
 bool RunningOnMainThread() {
-  auto pid = getpid();
-  auto tid = PlatformThread::CurrentId();
+  pid_t pid = getpid();
+  pid_t tid = PlatformThread::CurrentId().raw();
   return pid > 0 && tid > 0 && pid == tid;
 }
 
@@ -153,7 +160,7 @@ bool RunningOnMainThread() {
 //     Then, considering nesting case B, |state_->do_work_depth| is incremented
 // during any Chrome work, to allow the pump to detect re-entrancy during a
 // chrome work item. This is required because `g_main_depth` is not incremented
-// in any `DoWork` call not occuring during `Dispatch()` (i.e. during
+// in any `DoWork` call not occurring during `Dispatch()` (i.e. during
 // `MessagePumpGlib::Run()`). In this case, a nested loop is recorded, and the
 // pump sets-and-clears scoped work items during Prepare, Check, and Dispatch. A
 // work item can never be active when control flow returns to GLib (i.e. on
@@ -251,6 +258,80 @@ bool RunningOnMainThread() {
 // 4.2.1: DoWork uses its own work item, so no ScopedDoWorkItems are active in
 //        this case.
 
+class FdWatchImpl : public IOWatcher::FdWatch,
+                    public MessagePumpForIO::FdWatcher {
+ public:
+  FdWatchImpl(IOWatcher::FdWatcher* fd_watcher, const Location& location)
+      : fd_watcher_(fd_watcher), controller_(location) {}
+
+  ~FdWatchImpl() override { controller_.StopWatchingFileDescriptor(); }
+
+  MessagePumpGlib::FdWatchController& controller() { return controller_; }
+
+ private:
+  // MessagePumpForIO::FdWatcher:
+  void OnFileCanReadWithoutBlocking(int fd) override {
+    fd_watcher_->OnFdReadable(fd);
+  }
+
+  void OnFileCanWriteWithoutBlocking(int fd) override {
+    fd_watcher_->OnFdWritable(fd);
+  }
+
+  const raw_ptr<IOWatcher::FdWatcher> fd_watcher_;
+  MessagePumpGlib::FdWatchController controller_;
+};
+
+// Implements IOWatcher to allow any UI thread using a glib message pump to
+// watch arbitrary file descriptors for I/O events.
+class IOWatcherImpl : public IOWatcher {
+ public:
+  IOWatcherImpl() : thread_(CurrentUIThread::Get()) {}
+
+  // IOWatcher:
+  std::unique_ptr<IOWatcher::FdWatch> WatchFileDescriptorImpl(
+      int fd,
+      FdWatchDuration duration,
+      FdWatchMode mode,
+      IOWatcher::FdWatcher& watcher,
+      const Location& location) override {
+    // CurrentThreadForUI::WatchFileDescriptor is an Ozone-only feature.
+    // On ChromeOS, the libchrome package is built with use_glib=true, which
+    // includes this file. However, its configuration does not have
+    // BUILDFLAG(IS_OZONE) enabled, so WatchFileDescriptor is not declared. This
+    // guard prevents a compile error. Please note that while libchrome is
+    // ChromeOS specific and is used extensively by various components within
+    // ChromeOS, libchrome is not part of Ash-chrome.
+#if BUILDFLAG(IS_OZONE) && !BUILDFLAG(IS_FUCHSIA)
+    MessagePumpForIO::Mode io_mode;
+    switch (mode) {
+      case FdWatchMode::kRead:
+        io_mode = MessagePumpForIO::WATCH_READ;
+        break;
+      case FdWatchMode::kWrite:
+        io_mode = MessagePumpForIO::WATCH_WRITE;
+        break;
+      case FdWatchMode::kReadWrite:
+        io_mode = MessagePumpForIO::WATCH_READ_WRITE;
+        break;
+    }
+    const bool is_persistent = duration == FdWatchDuration::kPersistent;
+    auto watch = std::make_unique<FdWatchImpl>(&watcher, location);
+    if (!thread_->WatchFileDescriptor(fd, is_persistent, io_mode,
+                                      &watch->controller(), watch.get())) {
+      return nullptr;
+    }
+    return watch;
+#else
+    NOTIMPLEMENTED();
+    return nullptr;
+#endif  // BUILDFLAG(IS_OZONE) && !BUILDFLAG(IS_FUCHSIA)
+  }
+
+ private:
+  CurrentUIThread thread_;
+};
+
 struct WorkSource : public GSource {
   raw_ptr<MessagePumpGlib> pump;
 };
@@ -284,10 +365,6 @@ void WorkSourceFinalize(GSource* source) {
   static_cast<WorkSource*>(source)->pump = nullptr;
 }
 
-// I wish these could be const, but g_source_new wants non-const.
-GSourceFuncs g_work_source_funcs = {WorkSourcePrepare, WorkSourceCheck,
-                                    WorkSourceDispatch, WorkSourceFinalize};
-
 struct ObserverSource : public GSource {
   raw_ptr<MessagePumpGlib> pump;
 };
@@ -310,12 +387,9 @@ void ObserverFinalize(GSource* source) {
   static_cast<ObserverSource*>(source)->pump = nullptr;
 }
 
-GSourceFuncs g_observer_funcs = {ObserverPrepare, ObserverCheck, nullptr,
-                                 ObserverFinalize};
-
 struct FdWatchSource : public GSource {
   raw_ptr<MessagePumpGlib> pump;
-  raw_ptr<MessagePumpGlib::FdWatchController, DanglingUntriaged> controller;
+  raw_ptr<MessagePumpGlib::FdWatchController> controller;
 };
 
 gboolean FdWatchSourcePrepare(GSource* source, gint* timeout_ms) {
@@ -332,20 +406,15 @@ gboolean FdWatchSourceDispatch(GSource* gsource,
                                GSourceFunc unused_func,
                                gpointer unused_data) {
   auto* source = static_cast<FdWatchSource*>(gsource);
-  source->pump->HandleFdWatchDispatch(source->controller);
-  return TRUE;
+  return source->pump->HandleFdWatchDispatch(source->controller) ? TRUE : FALSE;
 }
 
-void FdWatchSourcFinalize(GSource* gsource) {
+void FdWatchSourceFinalize(GSource* gsource) {
   // Read the comment in `WorkSourceFinalize`, the issue is exactly the same.
   auto* source = static_cast<FdWatchSource*>(gsource);
   source->pump = nullptr;
   source->controller = nullptr;
 }
-
-GSourceFuncs g_fd_watch_source_funcs = {
-    FdWatchSourcePrepare, FdWatchSourceCheck, FdWatchSourceDispatch,
-    FdWatchSourcFinalize};
 
 }  // namespace
 
@@ -368,7 +437,7 @@ struct MessagePumpGlib::RunState {
   // g_main_context_iteration() in Run(). nullopt if Run() is not calling
   // g_main_context_iteration(). Used to track whether the pump has forced a
   // nested state due to a native pump.
-  absl::optional<int> g_depth_on_iteration;
+  std::optional<int> g_depth_on_iteration;
 
   // Used to keep track of the native event work items processed by the message
   // pump.
@@ -406,13 +475,17 @@ MessagePumpGlib::MessagePumpGlib()
   wakeup_gpollfd_->fd = wakeup_pipe_read_;
   wakeup_gpollfd_->events = G_IO_IN;
 
+  static GSourceFuncs observer_funcs = {ObserverPrepare, ObserverCheck, nullptr,
+                                        ObserverFinalize};
   observer_source_ = std::unique_ptr<GSource, GSourceDeleter>(
-      g_source_new(&g_observer_funcs, sizeof(ObserverSource)));
+      g_source_new(&observer_funcs, sizeof(ObserverSource)));
   static_cast<ObserverSource*>(observer_source_.get())->pump = this;
   g_source_attach(observer_source_.get(), context_);
 
+  static GSourceFuncs work_funcs = {WorkSourcePrepare, WorkSourceCheck,
+                                    WorkSourceDispatch, WorkSourceFinalize};
   work_source_ = std::unique_ptr<GSource, GSourceDeleter>(
-      g_source_new(&g_work_source_funcs, sizeof(WorkSource)));
+      g_source_new(&work_funcs, sizeof(WorkSource)));
   static_cast<WorkSource*>(work_source_.get())->pump = this;
   g_source_add_poll(work_source_.get(), wakeup_gpollfd_.get());
   g_source_set_priority(work_source_.get(), kPriorityWork);
@@ -423,6 +496,7 @@ MessagePumpGlib::MessagePumpGlib()
 
 MessagePumpGlib::~MessagePumpGlib() {
   work_source_.reset();
+  io_watcher_.reset();
   close(wakeup_pipe_read_);
   close(wakeup_pipe_write_);
   context_ = nullptr;
@@ -443,9 +517,11 @@ MessagePumpGlib::FdWatchController::~FdWatchController() {
 }
 
 bool MessagePumpGlib::FdWatchController::StopWatchingFileDescriptor() {
-  if (!IsInitialized())
+  if (!IsInitialized()) {
     return false;
+  }
 
+  static_cast<FdWatchSource*>(source_)->controller = nullptr;
   g_source_destroy(source_);
   g_source_unref(source_.ExtractAsDangling());
   watcher_ = nullptr;
@@ -457,6 +533,7 @@ bool MessagePumpGlib::FdWatchController::IsInitialized() const {
 }
 
 bool MessagePumpGlib::FdWatchController::InitOrUpdate(int fd,
+                                                      bool persistent,
                                                       int mode,
                                                       FdWatcher* watcher) {
   gushort event_flags = 0;
@@ -471,8 +548,9 @@ bool MessagePumpGlib::FdWatchController::InitOrUpdate(int fd,
     poll_fd_ = std::make_unique<GPollFD>();
     poll_fd_->fd = fd;
   } else {
-    if (poll_fd_->fd != fd)
+    if (poll_fd_->fd != fd) {
       return false;
+    }
     // Combine old/new event masks.
     event_flags |= poll_fd_->events;
     // Destroy previous source
@@ -482,7 +560,10 @@ bool MessagePumpGlib::FdWatchController::InitOrUpdate(int fd,
   poll_fd_->events = event_flags;
   poll_fd_->revents = 0;
 
-  source_ = g_source_new(&g_fd_watch_source_funcs, sizeof(FdWatchSource));
+  static GSourceFuncs source_funcs = {FdWatchSourcePrepare, FdWatchSourceCheck,
+                                      FdWatchSourceDispatch,
+                                      FdWatchSourceFinalize};
+  source_ = g_source_new(&source_funcs, sizeof(FdWatchSource));
   DCHECK(source_);
   g_source_add_poll(source_, poll_fd_.get());
   g_source_set_can_recurse(source_, TRUE);
@@ -490,6 +571,7 @@ bool MessagePumpGlib::FdWatchController::InitOrUpdate(int fd,
   g_source_set_priority(source_, kPriorityFdWatch);
 
   watcher_ = watcher;
+  is_persistent_ = persistent;
   return true;
 }
 
@@ -506,15 +588,17 @@ bool MessagePumpGlib::FdWatchController::Attach(MessagePumpGlib* pump) {
 }
 
 void MessagePumpGlib::FdWatchController::NotifyCanRead() {
-  if (!watcher_)
+  if (!watcher_) {
     return;
+  }
   DCHECK(poll_fd_);
   watcher_->OnFileCanReadWithoutBlocking(poll_fd_->fd);
 }
 
 void MessagePumpGlib::FdWatchController::NotifyCanWrite() {
-  if (!watcher_)
+  if (!watcher_) {
     return;
+  }
   DCHECK(poll_fd_);
   watcher_->OnFileCanWriteWithoutBlocking(poll_fd_->fd);
 }
@@ -532,7 +616,7 @@ bool MessagePumpGlib::WatchFileDescriptor(int fd,
   // threadsafe, so the watcher may never be registered.
   DCHECK_CALLED_ON_VALID_THREAD(watch_fd_caller_checker_);
 
-  if (!controller->InitOrUpdate(fd, mode, watcher)) {
+  if (!controller->InitOrUpdate(fd, persistent, mode, watcher)) {
     DPLOG(ERROR) << "FdWatchController init failed (fd=" << fd << ")";
     return false;
   }
@@ -553,11 +637,9 @@ void MessagePumpGlib::HandleObserverPrepare() {
     // Contingency 1.1.2 detailed above
     NestIfRequired();
   }
-
-  return;
 }
 
-bool MessagePumpGlib::HandleObserverCheck() {
+gboolean MessagePumpGlib::HandleObserverCheck() {
   // |state_| may be null in tests.
   if (!state_) {
     return FALSE;
@@ -578,8 +660,9 @@ bool MessagePumpGlib::HandleObserverCheck() {
 // Return the timeout we want passed to poll.
 int MessagePumpGlib::HandlePrepare() {
   // |state_| may be null during tests.
-  if (!state_)
+  if (!state_) {
     return 0;
+  }
 
   const int next_wakeup_millis =
       GetTimeIntervalMilliseconds(state_->next_work_info.delayed_run_time);
@@ -595,9 +678,10 @@ int MessagePumpGlib::HandlePrepare() {
   return next_wakeup_millis;
 }
 
-bool MessagePumpGlib::HandleCheck() {
-  if (!state_)  // state_ may be null during tests.
-    return false;
+gboolean MessagePumpGlib::HandleCheck() {
+  if (!state_) {  // state_ may be null during tests.
+    return FALSE;
+  }
 
   // Ensure pump is awake.
   EnsureSetScopedWorkItem();
@@ -624,20 +708,22 @@ bool MessagePumpGlib::HandleCheck() {
     // because HandleCheck() may be called without HandleDispatch being called
     // afterwards.
     state_->next_work_info = {TimeTicks()};
-    return true;
+    return TRUE;
   }
 
   // As described in the summary at the top : Check is a second-chance to
   // Prepare, verify whether we have work ready again.
   if (GetTimeIntervalMilliseconds(state_->next_work_info.delayed_run_time) ==
       0) {
-    return true;
+    return TRUE;
   }
 
-  return false;
+  return FALSE;
 }
 
 void MessagePumpGlib::HandleDispatch() {
+  MessagePumpWakeupCounter::GetForCurrentThread().RecordWakeup();
+
   // Contingency 3.2.1
   EnsureClearedScopedWorkItem();
 
@@ -680,8 +766,9 @@ void MessagePumpGlib::Run(Delegate* delegate) {
     more_work_is_plausible = g_main_context_iteration(context_, block);
     OnExitFromGlib();
 
-    if (state_->should_quit)
+    if (state_->should_quit) {
       break;
+    }
 
     // Contingency 4.2.1
     EnsureClearedScopedWorkItem();
@@ -692,15 +779,18 @@ void MessagePumpGlib::Run(Delegate* delegate) {
     --state_->do_work_depth;
 
     more_work_is_plausible |= state_->next_work_info.is_immediate();
-    if (state_->should_quit)
+    if (state_->should_quit) {
       break;
+    }
 
-    if (more_work_is_plausible)
+    if (more_work_is_plausible) {
       continue;
+    }
 
-    more_work_is_plausible = state_->delegate->DoIdleWork();
-    if (state_->should_quit)
+    state_->delegate->DoIdleWork();
+    if (state_->should_quit) {
       break;
+    }
   }
 
   state_ = previous_state;
@@ -731,31 +821,56 @@ void MessagePumpGlib::ScheduleDelayedWork(
   ScheduleWork();
 }
 
+IOWatcher* MessagePumpGlib::GetIOWatcher() {
+  if (!io_watcher_) {
+    io_watcher_ = std::make_unique<IOWatcherImpl>();
+  }
+  return io_watcher_.get();
+}
+
+bool MessagePumpGlib::IsAsyncIOSupported() {
+  return true;
+}
+
 bool MessagePumpGlib::HandleFdWatchCheck(FdWatchController* controller) {
   DCHECK(controller);
   gushort flags = controller->poll_fd_->revents;
   return (flags & G_IO_IN) || (flags & G_IO_OUT);
 }
 
-void MessagePumpGlib::HandleFdWatchDispatch(FdWatchController* controller) {
+bool MessagePumpGlib::HandleFdWatchDispatch(FdWatchController* controller) {
   DCHECK(controller);
   DCHECK(controller->poll_fd_);
   gushort flags = controller->poll_fd_->revents;
-  if ((flags & G_IO_IN) && (flags & G_IO_OUT)) {
-    // Both callbacks will be called. It is necessary to check that
+
+  // The contract for a one-shot (i.e. is_persistent is false) watch is exactly
+  // one event fires, doesn't matter if it's read or write. This implementation
+  // reports writes before reads.
+  const bool is_persistent = controller->is_persistent_;
+  const bool can_write = flags & G_IO_OUT;
+  const bool can_read = flags & G_IO_IN && (is_persistent || !can_write);
+
+  DCHECK(can_read || can_write);
+  MessagePumpWakeupCounter::GetForCurrentThread().RecordWakeup();
+
+  if (can_read && can_write) {
+    // In case both callbacks can be called, it's necessary to check that
     // |controller| is not destroyed.
     bool controller_was_destroyed = false;
     controller->was_destroyed_ = &controller_was_destroyed;
     controller->NotifyCanWrite();
-    if (!controller_was_destroyed)
+    if (!controller_was_destroyed) {
       controller->NotifyCanRead();
-    if (!controller_was_destroyed)
+    }
+    if (!controller_was_destroyed) {
       controller->was_destroyed_ = nullptr;
-  } else if (flags & G_IO_IN) {
-    controller->NotifyCanRead();
-  } else if (flags & G_IO_OUT) {
+    }
+  } else if (can_write) {
     controller->NotifyCanWrite();
+  } else if (can_read) {
+    controller->NotifyCanRead();
   }
+  return is_persistent;
 }
 
 bool MessagePumpGlib::ShouldQuit() const {

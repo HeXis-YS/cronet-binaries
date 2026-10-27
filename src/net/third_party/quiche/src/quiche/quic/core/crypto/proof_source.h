@@ -5,18 +5,31 @@
 #ifndef QUICHE_QUIC_CORE_CRYPTO_PROOF_SOURCE_H_
 #define QUICHE_QUIC_CORE_CRYPTO_PROOF_SOURCE_H_
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
+#include <variant>
 #include <vector>
 
+#include "absl/base/nullability.h"
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "openssl/base.h"
+#include "openssl/pool.h"
 #include "openssl/ssl.h"
 #include "quiche/quic/core/crypto/certificate_view.h"
 #include "quiche/quic/core/crypto/quic_crypto_proof.h"
+#include "quiche/quic/core/quic_connection_id.h"
+#include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_versions.h"
-#include "quiche/quic/platform/api/quic_export.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/common/platform/api/quiche_export.h"
 #include "quiche/common/platform/api/quiche_reference_counted.h"
+#include "quiche/common/quiche_callbacks.h"
 
 namespace quic {
 
@@ -30,10 +43,32 @@ struct QUICHE_EXPORT CryptoBuffers {
   CryptoBuffers() = default;
   CryptoBuffers(const CryptoBuffers&) = delete;
   CryptoBuffers(CryptoBuffers&&) = default;
+  CryptoBuffers& operator=(const CryptoBuffers&) = delete;
+  CryptoBuffers& operator=(CryptoBuffers&&) = default;
   ~CryptoBuffers();
 
   std::vector<CRYPTO_BUFFER*> value;
 };
+
+// The ex_data for SSL_CREDENTIAL.
+struct QUICHE_EXPORT CredentialExData {
+  explicit CredentialExData(CryptoBuffers cert_chain)
+      : cert_chain_buffers(std::move(cert_chain)) {}
+  CryptoBuffers cert_chain_buffers;
+};
+
+// Sets ex_data for a SSL_CREDENTIAL.
+QUICHE_EXPORT void SetCredentialExData(
+    SSL_CREDENTIAL& credential, std::unique_ptr<CredentialExData> exdata);
+
+// Gets ex_data for a SSL_CREDENTIAL. Returns nullptr if not set.
+//
+// Note that the SSL_CREDENTIAL used by a handshake is deleted after the
+// handshake, so there is only a short window to get the ex_data from
+// SSL_get0_selected_credential(). See test `GetCredentialExData` in
+// `TlsServerHandshakerTest` for an example.
+QUICHE_EXPORT const CredentialExData* GetCredentialExData(
+    const SSL_CREDENTIAL& credential);
 
 // ProofSource is an interface by which a QUIC server can obtain certificate
 // chains and signatures that prove its identity.
@@ -42,16 +77,28 @@ class QUICHE_EXPORT ProofSource {
   // Chain is a reference-counted wrapper for a vector of stringified
   // certificates.
   struct QUICHE_EXPORT Chain : public quiche::QuicheReferenceCounted {
-    explicit Chain(const std::vector<std::string>& certs);
+    Chain(const std::vector<std::string>& certs,
+          const std::string& trust_anchor_id = "");
     Chain(const Chain&) = delete;
     Chain& operator=(const Chain&) = delete;
 
     CryptoBuffers ToCryptoBuffers() const;
 
     const std::vector<std::string> certs;
+    // Trust anchor ID to be configured alongside the certificate. If empty, no
+    // trust anchor ID will be set.
+    const std::string trust_anchor_id;
 
    protected:
     ~Chain() override;
+  };
+
+  // The result of a call to `GetCertChains()`.
+  struct CertChainsResult {
+    bool chains_match_sni = false;
+    std::vector<quiche::QuicheReferenceCountedPointer<Chain> absl_nonnull>
+        chains;
+    std::optional<ssl_compliance_policy_t> ssl_compliance_policy = std::nullopt;
   };
 
   // Details is an abstract class which acts as a container for any
@@ -143,6 +190,9 @@ class QUICHE_EXPORT ProofSource {
   // This function may be called concurrently.
   //
   // Callers should expect that |callback| might be invoked synchronously.
+  //
+  // This is used only for "gQUIC" -- that is, version QUIC_VERSION_46, which
+  // does not use TLS, as opposed to "IETF QUIC".
   virtual void GetProof(const QuicSocketAddress& server_address,
                         const QuicSocketAddress& client_address,
                         const std::string& hostname,
@@ -159,6 +209,27 @@ class QUICHE_EXPORT ProofSource {
       const QuicSocketAddress& server_address,
       const QuicSocketAddress& client_address, const std::string& hostname,
       bool* cert_matched_sni) = 0;
+
+  // Returns zero or more certificate chains. None of the returned chains are
+  // nullptr. Chains are returned in decreasing order of preference, so earlier
+  // chains are preferred over later chains. Within each chain, certificates are
+  // in leaf-first order.
+  //
+  // Implementations should return only chains that match `hostname`. If no such
+  // chains exist, implementations may return only non-matching chains. (Either
+  // all of the returned chains match `hostname` or none of them do.) Chains are
+  // returned via the `CertChainsResult::chains` field. The value of
+  // `CertChainsResult::chains_match_sni` is undefined when `chains` is empty.
+  // Otherwise, `CertChainsResult::chains_match_sni` must be true when all of
+  // the chains match `hostname`, and false when none of the chains match
+  // `hostname`.
+  //
+  // The default implementation returns a vector of zero or one elements based
+  // on the result of `GetCertChain()`. If `GetCertChain()` returns nullptr,
+  // this method returns the empty vector.
+  virtual CertChainsResult GetCertChains(
+      const QuicSocketAddress& server_address,
+      const QuicSocketAddress& client_address, const std::string& hostname);
 
   // Computes a signature using the private key of the certificate for
   // |hostname|. The value in |in| is signed using the algorithm specified by
@@ -245,27 +316,64 @@ class QUICHE_EXPORT ProofSourceHandleCallback {
  public:
   virtual ~ProofSourceHandleCallback() = default;
 
+  // Configuration to use for configuring the SSL object when handshaking
+  // locally.
+  struct LocalSSLConfig {
+    using ReferenceCountedChain =
+        quiche::QuicheReferenceCountedPointer<ProofSource::Chain>;
+
+    // TODO: b/451645567 - Remove this constructor.
+    LocalSSLConfig(const ProofSource::Chain* absl_nullable chain,
+                   QuicDelayedSSLConfig delayed_ssl_config)
+        : chain(chain), delayed_ssl_config(delayed_ssl_config) {}
+
+    LocalSSLConfig(absl::Span<const ReferenceCountedChain> chains,
+                   QuicDelayedSSLConfig delayed_ssl_config)
+        : chains(std::move(chains)), delayed_ssl_config(delayed_ssl_config) {}
+
+    // TODO: b/451645567 - Once we remove `ProofSource::GetCertChain()`, we can
+    // delete the `chain` field.
+    const ProofSource::Chain* absl_nullable chain = nullptr;
+    absl::Span<const ReferenceCountedChain absl_nonnull> chains;
+    QuicDelayedSSLConfig delayed_ssl_config;
+  };
+
+  // Functor to call to configure the SSL object.
+  using ConfigureSSLFunc = quiche::SingleUseCallback<absl::Status(
+      SSL& ssl, const SSL_PRIVATE_KEY_METHOD& key)>;
+
+  // Functor to call to select ALPN and configure ALPS.
+  using ALPNSelectFunc = quiche::SingleUseCallback<int(
+      SSL& ssl, const uint8_t** out, uint8_t* out_len, const uint8_t* in,
+      unsigned in_len)>;
+
+  // Configuration to use for configuring the SSL object when using a
+  // handshake-hints server.
+  struct HintsSSLConfig {
+    ConfigureSSLFunc configure_ssl;
+    ALPNSelectFunc select_alpn;
+    QuicDelayedSSLConfig delayed_ssl_config;
+  };
+
+  using SSLConfig = std::variant<LocalSSLConfig, HintsSSLConfig>;
+
   // Called when a ProofSourceHandle::SelectCertificate operation completes.
   // |ok| indicates whether the operation was successful.
   // |is_sync| indicates whether the operation completed synchronously, i.e.
   //      whether it is completed before ProofSourceHandle::SelectCertificate
   //      returned.
-  // |chain| the certificate chain in leaf-first order.
-  // |handshake_hints| (optional) handshake hints that can be used by
-  //      SSL_set_handshake_hints.
+  // |ssl_config| configuration used to configure the SSL object.
   // |ticket_encryption_key| (optional) encryption key to be used for minting
   //      TLS resumption tickets.
   // |cert_matched_sni| is true if the certificate matched the SNI hostname,
   //      false if a non-matching default cert was used.
-  // |delayed_ssl_config| contains SSL configs to be applied on the SSL object.
   //
   // When called asynchronously(is_sync=false), this method will be responsible
   // to continue the handshake from where it left off.
-  virtual void OnSelectCertificateDone(
-      bool ok, bool is_sync, const ProofSource::Chain* chain,
-      absl::string_view handshake_hints,
-      absl::string_view ticket_encryption_key, bool cert_matched_sni,
-      QuicDelayedSSLConfig delayed_ssl_config) = 0;
+  virtual void OnSelectCertificateDone(bool ok, bool is_sync,
+                                       SSLConfig ssl_config,
+                                       absl::string_view ticket_encryption_key,
+                                       bool cert_matched_sni) = 0;
 
   // Called when a ProofSourceHandle::ComputeSignature operation completes.
   virtual void OnComputeSignatureDone(
@@ -275,6 +383,13 @@ class QUICHE_EXPORT ProofSourceHandleCallback {
   // Return true iff ProofSourceHandle::ComputeSignature won't be called later.
   // The handle can use this function to release resources promptly.
   virtual bool WillNotCallComputeSignature() const = 0;
+
+  // Get the TLS ciphersuite negotiated during the handshake, or nullopt if the
+  // handshake has not selected one yet.
+  virtual std::optional<uint16_t> GetCiphersuite() const = 0;
+
+  // Get the ID of the NamedGroup negotiated during the handshake.
+  virtual uint16_t GetNegotiatedCurve() const = 0;
 };
 
 // ProofSourceHandle is an interface by which a TlsServerHandshaker can obtain
@@ -319,11 +434,12 @@ class QUICHE_EXPORT ProofSourceHandle {
       const QuicSocketAddress& client_address,
       const QuicConnectionId& original_connection_id,
       absl::string_view ssl_capabilities, const std::string& hostname,
-      absl::string_view client_hello, const std::string& alpn,
-      absl::optional<std::string> alps,
+      const SSL_CLIENT_HELLO& client_hello, const std::string& alpn,
+      std::optional<std::string> alps,
       const std::vector<uint8_t>& quic_transport_params,
-      const absl::optional<std::vector<uint8_t>>& early_data_context,
-      const QuicSSLConfig& ssl_config) = 0;
+      const std::optional<std::vector<uint8_t>>& early_data_context,
+      const QuicSSLConfig& ssl_config,
+      bool disable_alps_explicit_codepoint) = 0;
 
   // Starts a compute signature operation. If the operation is not cancelled
   // when it completes, callback()->OnComputeSignatureDone will be invoked.

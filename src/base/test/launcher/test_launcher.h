@@ -9,10 +9,8 @@
 #include <stdint.h>
 
 #include <memory>
-#include <set>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 #include <vector>
 
 #include "base/command_line.h"
@@ -26,8 +24,11 @@
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "build/build_config.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 namespace base {
+
+class TaskRunner;
 
 // Constants for GTest command-line flags.
 extern const char kGTestFilterFlag[];
@@ -162,7 +163,7 @@ class TestLauncher {
 #if BUILDFLAG(IS_WIN)
     return true;
 #else
-    // TODO(https://crbug.com/1038857): Enable for macOS, Linux, and Fuchsia.
+    // TODO(crbug.com/40666527): Enable for macOS, Linux, and Fuchsia.
     return false;
 #endif
   }
@@ -313,7 +314,7 @@ class TestLauncher {
   bool force_run_broken_tests_;
 
   // Tests to retry in this iteration.
-  std::unordered_set<std::string> tests_to_retry_;
+  absl::flat_hash_set<std::string> tests_to_retry_;
 
   TestResultsTracker results_tracker_;
 
@@ -393,8 +394,7 @@ std::string GetTestOutputSnippet(const TestResult& result,
 
 // Truncates a snippet to approximately the allowed length, while trying to
 // retain fatal messages. Exposed for testing only.
-std::string TruncateSnippetFocused(const base::StringPiece snippet,
-                                   size_t byte_limit);
+std::string TruncateSnippetFocused(std::string_view snippet, size_t byte_limit);
 
 }  // namespace base
 

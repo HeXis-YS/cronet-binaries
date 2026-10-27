@@ -6,17 +6,30 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
-#include "quiche/quic/core/congestion_control/general_loss_algorithm.h"
+#include "quiche/quic/core/congestion_control/loss_detection_interface.h"
 #include "quiche/quic/core/congestion_control/pacing_sender.h"
 #include "quiche/quic/core/congestion_control/send_algorithm_interface.h"
+#include "quiche/quic/core/congestion_control/uber_loss_algorithm.h"
 #include "quiche/quic/core/crypto/crypto_protocol.h"
+#include "quiche/quic/core/crypto/quic_random.h"
+#include "quiche/quic/core/frames/quic_ack_frame.h"
 #include "quiche/quic/core/frames/quic_ack_frequency_frame.h"
+#include "quiche/quic/core/frames/quic_frame.h"
 #include "quiche/quic/core/proto/cached_network_parameters_proto.h"
+#include "quiche/quic/core/quic_bandwidth.h"
 #include "quiche/quic/core/quic_connection_stats.h"
 #include "quiche/quic/core/quic_constants.h"
 #include "quiche/quic/core/quic_packet_number.h"
+#include "quiche/quic/core/quic_packets.h"
+#include "quiche/quic/core/quic_tag.h"
+#include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_transmission_info.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_utils.h"
@@ -24,6 +37,7 @@
 #include "quiche/quic/platform/api/quic_flag_utils.h"
 #include "quiche/quic/platform/api/quic_flags.h"
 #include "quiche/quic/platform/api/quic_logging.h"
+#include "quiche/common/platform/api/quiche_logging.h"
 #include "quiche/common/print_elements.h"
 
 namespace quic {
@@ -31,7 +45,7 @@ namespace quic {
 namespace {
 static const int64_t kDefaultRetransmissionTimeMs = 500;
 
-// Ensure the handshake timer isnt't faster than 10ms.
+// Ensure the handshake timer isn't faster than 10ms.
 // This limits the tenth retransmitted packet to 10s after the initial CHLO.
 static const int64_t kMinHandshakeTimeoutMs = 10;
 
@@ -58,6 +72,15 @@ static const uint32_t kConservativeUnpacedBurst = 2;
 // The default number of PTOs to trigger path degrading.
 static const uint32_t kNumProbeTimeoutsForPathDegradingDelay = 4;
 
+// QUIC overhead returned if there is not enough data to provide an estimate. 5%
+// is roughly the number one can get from a simulated unit test.
+constexpr float kDefaultOverhead = 0.05f;
+
+// Minimum number of data bytes sent before the packet manager can provide an
+// estimate of the QUIC overhead.
+constexpr QuicByteCount kMinBytesForOverheadMeasurement =
+    kDefaultMaxPacketSize * 20;
+
 }  // namespace
 
 #define ENDPOINT                                                         \
@@ -82,7 +105,7 @@ QuicSentPacketManager::QuicSentPacketManager(
       largest_mtu_acked_(0),
       handshake_finished_(false),
       peer_max_ack_delay_(
-          QuicTime::Delta::FromMilliseconds(kDefaultDelayedAckTimeMs)),
+          QuicTime::Delta::FromMilliseconds(kDefaultPeerDelayedAckTimeMs)),
       rtt_updated_(false),
       acked_packets_iter_(last_ack_frame_.packets.rbegin()),
       consecutive_pto_count_(0),
@@ -92,7 +115,8 @@ QuicSentPacketManager::QuicSentPacketManager(
       one_rtt_packet_acked_(false),
       num_ptos_for_path_degrading_(kNumProbeTimeoutsForPathDegradingDelay),
       ignore_pings_(false),
-      ignore_ack_delay_(false) {
+      ignore_ack_delay_(false),
+      measure_overhead_(false) {
   SetSendAlgorithm(congestion_control_type);
 }
 
@@ -117,16 +141,10 @@ void QuicSentPacketManager::SetFromConfig(const QuicConfig& config) {
     peer_max_ack_delay_ =
         QuicTime::Delta::FromMilliseconds(config.ReceivedMaxAckDelayMs());
   }
-  if (GetQuicReloadableFlag(quic_can_send_ack_frequency) &&
-      perspective == Perspective::IS_SERVER) {
-    if (config.HasReceivedMinAckDelayMs()) {
-      peer_min_ack_delay_ =
-          QuicTime::Delta::FromMilliseconds(config.ReceivedMinAckDelayMs());
-    }
-    if (config.HasClientSentConnectionOption(kAFF1, perspective)) {
-      use_smoothed_rtt_in_ack_delay_ = true;
-    }
-  }
+  // TODO(b/389762349): set peer_min_ack_delay_ if
+  // config.HasReceivedMinAckDelayDraft10Ms(). Set
+  // use_smoothed_rtt_in_ack_delay_ based on
+  // config.HasClientSentConnectionOption(kAFF1, perspective).
   if (config.HasClientSentConnectionOption(kMAD0, perspective)) {
     ignore_ack_delay_ = true;
   }
@@ -135,9 +153,7 @@ void QuicSentPacketManager::SetFromConfig(const QuicConfig& config) {
   if (config.HasClientRequestedIndependentOption(kTBBR, perspective)) {
     SetSendAlgorithm(kBBR);
   }
-  if (GetQuicReloadableFlag(quic_allow_client_enabled_bbr_v2) &&
-      config.HasClientRequestedIndependentOption(kB2ON, perspective)) {
-    QUIC_RELOADABLE_FLAG_COUNT(quic_allow_client_enabled_bbr_v2);
+  if (config.HasClientRequestedIndependentOption(kB2ON, perspective)) {
     SetSendAlgorithm(kBBRv2);
   }
 
@@ -147,6 +163,13 @@ void QuicSentPacketManager::SetFromConfig(const QuicConfig& config) {
              (GetQuicReloadableFlag(quic_default_to_bbr) &&
               config.HasClientRequestedIndependentOption(kQBIC, perspective))) {
     SetSendAlgorithm(kCubicBytes);
+  }
+  if (perspective == Perspective::IS_CLIENT) {
+    if (config.HasClientRequestedIndependentOption(kPRGC, perspective)) {
+      SetSendAlgorithm(kPragueCubic);
+    } else if (config.HasClientRequestedIndependentOption(kCQBC, perspective)) {
+      SetSendAlgorithm(kCubicBytes);
+    }
   }
 
   // Initial window.
@@ -165,6 +188,11 @@ void QuicSentPacketManager::SetFromConfig(const QuicConfig& config) {
   if (config.HasClientRequestedIndependentOption(kIW50, perspective)) {
     initial_congestion_window_ = 50;
     send_algorithm_->SetInitialCongestionWindowInPackets(50);
+  }
+  if (config.HasClientRequestedIndependentOption(kIW2X, perspective)) {
+    initial_congestion_window_ *= 2;
+    send_algorithm_->SetInitialCongestionWindowInPackets(
+        initial_congestion_window_);
   }
   if (config.HasClientRequestedIndependentOption(kBWS5, perspective)) {
     initial_congestion_window_ = 10;
@@ -204,6 +232,20 @@ void QuicSentPacketManager::SetFromConfig(const QuicConfig& config) {
   if (config.HasClientSentConnectionOption(kCONH, perspective)) {
     conservative_handshake_retransmits_ = true;
   }
+  if (config.HasClientSentConnectionOption(kRNIB, perspective)) {
+    pacing_sender_.set_remove_non_initial_burst();
+  }
+  // Path degradation experiments
+  if (config.HasClientRequestedIndependentOption(kPDE2, perspective)) {
+    num_ptos_for_path_degrading_ = 2;
+  }
+  if (config.HasClientRequestedIndependentOption(kPDE3, perspective)) {
+    num_ptos_for_path_degrading_ = 3;
+  }
+  // kPDE4 is the default. We have the experiments with kPDE4.
+  if (config.HasClientRequestedIndependentOption(kPDE5, perspective)) {
+    num_ptos_for_path_degrading_ = 5;
+  }
   send_algorithm_->SetFromConfig(config, perspective);
   loss_algorithm_->SetFromConfig(config, perspective);
 
@@ -223,7 +265,7 @@ void QuicSentPacketManager::SetFromConfig(const QuicConfig& config) {
 
 void QuicSentPacketManager::ApplyConnectionOptions(
     const QuicTagVector& connection_options) {
-  absl::optional<CongestionControlType> cc_type;
+  std::optional<CongestionControlType> cc_type;
   if (ContainsQuicTag(connection_options, kB2ON)) {
     cc_type = kBBRv2;
   } else if (ContainsQuicTag(connection_options, kTBBR)) {
@@ -233,7 +275,9 @@ void QuicSentPacketManager::ApplyConnectionOptions(
   } else if (ContainsQuicTag(connection_options, kQBIC)) {
     cc_type = kCubicBytes;
   }
-
+  // This function is only used in server experiments, so do not apply the
+  // client-only PRGC tag.
+  QUICHE_DCHECK(unacked_packets_.perspective() == Perspective::IS_SERVER);
   if (cc_type.has_value()) {
     SetSendAlgorithm(*cc_type);
   }
@@ -284,11 +328,31 @@ void QuicSentPacketManager::AdjustNetworkParameters(
     QUIC_RELOADABLE_FLAG_COUNT(quic_conservative_bursts);
     pacing_sender_.SetBurstTokens(kConservativeUnpacedBurst);
   }
-  send_algorithm_->AdjustNetworkParameters(params);
+
+  SendAlgorithmInterface::NetworkParams new_params = params;
+
+  if (params.clamp_cwnd_and_rtt_before_send_algorithm) {
+    static constexpr QuicBandwidth kAbsurdlyLargeMaxBandwidth =
+        QuicBandwidth::FromKBytesPerSecond(2 * 1024 * 1024);  // 16 Gbps
+    static constexpr QuicTime::Delta kAbsurdlyLargeMinRtt =
+        QuicTime::Delta::FromMilliseconds(512 * 1024);  // ~8.7 minutes
+    // These constants are safe to multiply with `QuicByteCount
+    // operator*(QuicBandwidth, QuicTime::Delta)`. Therefore, the clamped
+    // bandwidth and rtt are also safe to multiply.
+    static_assert(
+        kAbsurdlyLargeMaxBandwidth.ToBytesPerPeriodSafe(kAbsurdlyLargeMinRtt)
+            .has_value());
+    new_params.bandwidth =
+        std::min(params.bandwidth, kAbsurdlyLargeMaxBandwidth);
+    new_params.rtt = std::min(params.rtt, kAbsurdlyLargeMinRtt);
+  }
+
+  send_algorithm_->AdjustNetworkParameters(new_params);
   if (debug_delegate_ != nullptr) {
     debug_delegate_->OnAdjustNetworkParameters(
-        bandwidth, rtt.IsZero() ? rtt_stats_.MinOrInitialRtt() : rtt, old_cwnd,
-        send_algorithm_->GetCongestionWindow());
+        new_params.bandwidth,
+        new_params.rtt.IsZero() ? rtt_stats_.MinOrInitialRtt() : new_params.rtt,
+        old_cwnd, send_algorithm_->GetCongestionWindow());
   }
 }
 
@@ -316,7 +380,7 @@ void QuicSentPacketManager::PostProcessNewlyAckedPackets(
     QuicPacketNumber ack_packet_number, EncryptionLevel ack_decrypted_level,
     const QuicAckFrame& ack_frame, QuicTime ack_receive_time, bool rtt_updated,
     QuicByteCount prior_bytes_in_flight,
-    absl::optional<QuicEcnCounts> ecn_counts) {
+    std::optional<QuicEcnCounts> ecn_counts) {
   unacked_packets_.NotifyAggregatedStreamFrameAcked(
       last_ack_frame_.ack_delay_time);
   InvokeLossDetection(ack_receive_time);
@@ -358,7 +422,7 @@ void QuicSentPacketManager::PostProcessNewlyAckedPackets(
 
 void QuicSentPacketManager::MaybeInvokeCongestionEvent(
     bool rtt_updated, QuicByteCount prior_in_flight, QuicTime event_time,
-    absl::optional<QuicEcnCounts> ecn_counts,
+    std::optional<QuicEcnCounts> ecn_counts,
     const QuicEcnCounts& previous_counts) {
   if (!rtt_updated && packets_acked_.empty() && packets_lost_.empty()) {
     return;
@@ -369,7 +433,6 @@ void QuicSentPacketManager::MaybeInvokeCongestionEvent(
   // is necessary.
   QuicPacketCount newly_acked_ect = 0, newly_acked_ce = 0;
   if (ecn_counts.has_value()) {
-    QUICHE_DCHECK(GetQuicReloadableFlag(quic_send_ect1));
     newly_acked_ect = ecn_counts->ect1 - previous_counts.ect1;
     if (newly_acked_ect == 0) {
       newly_acked_ect = ecn_counts->ect0 - previous_counts.ect0;
@@ -559,10 +622,10 @@ void QuicSentPacketManager::RecordOneSpuriousRetransmission(
 }
 
 void QuicSentPacketManager::MarkPacketHandled(QuicPacketNumber packet_number,
-                                              QuicTransmissionInfo* info,
                                               QuicTime ack_receive_time,
                                               QuicTime::Delta ack_delay_time,
-                                              QuicTime receive_timestamp) {
+                                              QuicTime receive_timestamp,
+                                              QuicTransmissionInfo*& info) {
   if (info->has_ack_frequency) {
     for (const auto& frame : info->retransmittable_frames) {
       if (frame.type == ACK_FREQUENCY_FRAME) {
@@ -573,12 +636,13 @@ void QuicSentPacketManager::MarkPacketHandled(QuicPacketNumber packet_number,
   // Try to aggregate acked stream frames if acked packet is not a
   // retransmission.
   if (info->transmission_type == NOT_RETRANSMISSION) {
-    unacked_packets_.MaybeAggregateAckedStreamFrame(*info, ack_delay_time,
-                                                    receive_timestamp);
+    unacked_packets_.MaybeAggregateAckedStreamFrame(
+        packet_number, ack_delay_time, receive_timestamp, info);
   } else {
     unacked_packets_.NotifyAggregatedStreamFrameAcked(ack_delay_time);
+    info = unacked_packets_.GetMutableTransmissionInfo(packet_number);
     const bool new_data_acked = unacked_packets_.NotifyFramesAcked(
-        *info, ack_delay_time, receive_timestamp);
+        packet_number, ack_delay_time, receive_timestamp, info);
     if (!new_data_acked && info->transmission_type != NOT_RETRANSMISSION) {
       // Record as a spurious retransmission if this packet is a
       // retransmission and no new data gets acked.
@@ -621,6 +685,7 @@ bool QuicSentPacketManager::CanSendAckFrequency() const {
   return !peer_min_ack_delay_.IsInfinite() && handshake_finished_;
 }
 
+// TODO(martinduke): Update to include reordering threshold.
 QuicAckFrequencyFrame QuicSentPacketManager::GetUpdatedAckFrequencyFrame()
     const {
   QuicAckFrequencyFrame frame;
@@ -630,16 +695,16 @@ QuicAckFrequencyFrame QuicSentPacketManager::GetUpdatedAckFrequencyFrame()
     return frame;
   }
 
-  QUIC_RELOADABLE_FLAG_COUNT_N(quic_can_send_ack_frequency, 1, 3);
-  frame.packet_tolerance = kMaxRetransmittablePacketsBeforeAck;
+  frame.ack_eliciting_threshold = kMaxRetransmittablePacketsBeforeAck;
   auto rtt = use_smoothed_rtt_in_ack_delay_ ? rtt_stats_.SmoothedOrInitialRtt()
                                             : rtt_stats_.MinOrInitialRtt();
-  frame.max_ack_delay = rtt * kAckDecimationDelay;
-  frame.max_ack_delay = std::max(frame.max_ack_delay, peer_min_ack_delay_);
+  frame.requested_max_ack_delay = rtt * kPeerAckDecimationDelay;
+  frame.requested_max_ack_delay =
+      std::max(frame.requested_max_ack_delay, peer_min_ack_delay_);
   // TODO(haoyuewang) Remove this once kDefaultMinAckDelayTimeMs is updated to
   // 5 ms on the client side.
-  frame.max_ack_delay =
-      std::max(frame.max_ack_delay,
+  frame.requested_max_ack_delay =
+      std::max(frame.requested_max_ack_delay,
                QuicTime::Delta::FromMilliseconds(kDefaultMinAckDelayTimeMs));
   return frame;
 }
@@ -681,6 +746,8 @@ bool QuicSentPacketManager::OnPacketSent(
     --pending_timer_transmission_count_;
   }
 
+  UpdateOverheadMeasurements(packet);
+
   bool in_flight = has_retransmittable_data == HAS_RETRANSMITTABLE_DATA;
   if (ignore_pings_ && mutable_packet->retransmittable_frames.size() == 1 &&
       mutable_packet->retransmittable_frames[0].type == PING_FRAME) {
@@ -698,13 +765,13 @@ bool QuicSentPacketManager::OnPacketSent(
                                   has_retransmittable_data);
   }
 
-  // Deallocate message data in QuicMessageFrame immediately after packet
+  // Deallocate datagram data in QuicDatagramFrame immediately after packet
   // sent.
-  if (packet.has_message) {
+  if (packet.has_datagram) {
     for (auto& frame : mutable_packet->retransmittable_frames) {
-      if (frame.type == MESSAGE_FRAME) {
-        frame.message_frame->message_data.clear();
-        frame.message_frame->message_length = 0;
+      if (frame.type == DATAGRAM_FRAME) {
+        frame.datagram_frame->datagram_data.clear();
+        frame.datagram_frame->datagram_length = 0;
       }
     }
   }
@@ -721,6 +788,24 @@ bool QuicSentPacketManager::OnPacketSent(
                                  in_flight, measure_rtt, ecn_codepoint);
   // Reset the retransmission timer anytime a pending packet is sent.
   return in_flight;
+}
+
+const QuicTransmissionInfo& QuicSentPacketManager::AddDispatcherSentPacket(
+    const DispatcherSentPacket& packet) {
+  QUIC_DVLOG(1) << "QuicSPM: Adding dispatcher sent packet "
+                << packet.packet_number << ", size: " << packet.bytes_sent
+                << ", sent_time: " << packet.sent_time
+                << ", largest_acked: " << packet.largest_acked;
+  if (using_pacing_) {
+    pacing_sender_.OnPacketSent(
+        packet.sent_time, unacked_packets_.bytes_in_flight(),
+        packet.packet_number, packet.bytes_sent, NO_RETRANSMITTABLE_DATA);
+  } else {
+    send_algorithm_->OnPacketSent(
+        packet.sent_time, unacked_packets_.bytes_in_flight(),
+        packet.packet_number, packet.bytes_sent, NO_RETRANSMITTABLE_DATA);
+  }
+  return unacked_packets_.AddDispatcherSentPacket(packet);
 }
 
 QuicSentPacketManager::RetransmissionTimeoutMode
@@ -745,7 +830,7 @@ QuicSentPacketManager::OnRetransmissionTimeout() {
       const QuicTime now = clock_->Now();
       InvokeLossDetection(now);
       MaybeInvokeCongestionEvent(false, prior_in_flight, now,
-                                 absl::optional<QuicEcnCounts>(),
+                                 std::optional<QuicEcnCounts>(),
                                  peer_ack_ecn_counts_[APPLICATION_DATA]);
       return LOSS_MODE;
     }
@@ -980,7 +1065,12 @@ bool QuicSentPacketManager::MaybeUpdateRTT(QuicPacketNumber largest_acked,
 
   QuicTime::Delta send_delta = ack_receive_time - transmission_info.sent_time;
   const bool min_rtt_available = !rtt_stats_.min_rtt().IsZero();
-  rtt_stats_.UpdateRtt(send_delta, ack_delay_time, ack_receive_time);
+  const bool rtt_updated =
+      rtt_stats_.UpdateRtt(send_delta, ack_delay_time, ack_receive_time);
+  if (rtt_updated && network_change_visitor_ != nullptr) {
+    network_change_visitor_->OnRttSampleAvailable(
+        QuicRttSample{.latest_rtt = rtt_stats_.latest_rtt()});
+  }
 
   if (!min_rtt_available && !rtt_stats_.min_rtt().IsZero()) {
     loss_algorithm_->OnMinRttAvailable();
@@ -1134,7 +1224,8 @@ const QuicTime::Delta QuicSentPacketManager::GetProbeTimeoutDelay(
 
 QuicTime::Delta QuicSentPacketManager::GetSlowStartDuration() const {
   if (send_algorithm_->GetCongestionControlType() == kBBR ||
-      send_algorithm_->GetCongestionControlType() == kBBRv2) {
+      send_algorithm_->GetCongestionControlType() == kBBRv2 ||
+      send_algorithm_->GetCongestionControlType() == kBBRv3) {
     return stats_->slowstart_duration.GetTotalElapsedTime(
         clock_->ApproximateNow());
   }
@@ -1201,6 +1292,7 @@ QuicSentPacketManager::OnConnectionMigration(bool reset_send_algorithm) {
         MarkForRetransmission(packet_number, PATH_RETRANSMISSION);
         QUICHE_DCHECK_EQ(it->state, NOT_CONTRIBUTING_RTT);
       }
+      old_send_algorithm->OnPacketNeutered(packet_number);
     }
     it->state = NOT_CONTRIBUTING_RTT;
   }
@@ -1278,7 +1370,7 @@ void QuicSentPacketManager::OnAckTimestamp(QuicPacketNumber packet_number,
 }
 
 bool QuicSentPacketManager::IsEcnFeedbackValid(
-    PacketNumberSpace space, const absl::optional<QuicEcnCounts>& ecn_counts,
+    PacketNumberSpace space, const std::optional<QuicEcnCounts>& ecn_counts,
     QuicPacketCount newly_acked_ect0, QuicPacketCount newly_acked_ect1) {
   if (!ecn_counts.has_value()) {
     if (newly_acked_ect0 > 0 || newly_acked_ect1 > 0) {
@@ -1325,7 +1417,7 @@ bool QuicSentPacketManager::IsEcnFeedbackValid(
 AckResult QuicSentPacketManager::OnAckFrameEnd(
     QuicTime ack_receive_time, QuicPacketNumber ack_packet_number,
     EncryptionLevel ack_decrypted_level,
-    const absl::optional<QuicEcnCounts>& ecn_counts) {
+    const std::optional<QuicEcnCounts>& ecn_counts) {
   QuicByteCount prior_bytes_in_flight = unacked_packets_.bytes_in_flight();
   QuicPacketCount newly_acked_ect0 = 0;
   QuicPacketCount newly_acked_ect1 = 0;
@@ -1391,6 +1483,7 @@ AckResult QuicSentPacketManager::OnAckFrameEnd(
     if (info->in_flight) {
       acked_packet.bytes_acked = info->bytes_sent;
     } else {
+      acked_packet.spurious_loss = (info->state == LOST);
       // Unackable packets are skipped earlier.
       largest_newly_acked_ = acked_packet.packet_number;
     }
@@ -1418,14 +1511,17 @@ AckResult QuicSentPacketManager::OnAckFrameEnd(
     }
     unacked_packets_.MaybeUpdateLargestAckedOfPacketNumberSpace(
         packet_number_space, acked_packet.packet_number);
-    MarkPacketHandled(acked_packet.packet_number, info, ack_receive_time,
+    MarkPacketHandled(acked_packet.packet_number, ack_receive_time,
                       last_ack_frame_.ack_delay_time,
-                      acked_packet.receive_timestamp);
+                      acked_packet.receive_timestamp, info);
   }
+  // Copy raw ECN counts to last_ack_frame_ so it is logged properly. Validated
+  // ECN counts are stored in valid_ecn_counts, and the congestion controller
+  // uses that for processing.
+  last_ack_frame_.ecn_counters = ecn_counts;
   // Validate ECN feedback.
-  absl::optional<QuicEcnCounts> valid_ecn_counts;
-  if (GetQuicReloadableFlag(quic_send_ect1)) {
-    QUIC_RELOADABLE_FLAG_COUNT_N(quic_send_ect1, 1, 8);
+  std::optional<QuicEcnCounts> valid_ecn_counts;
+  if (ecn_queried_) {
     if (IsEcnFeedbackValid(acked_packet_number_space, ecn_counts,
                            newly_acked_ect0, newly_acked_ect1)) {
       valid_ecn_counts = ecn_counts;
@@ -1444,7 +1540,7 @@ AckResult QuicSentPacketManager::OnAckFrameEnd(
                                last_ack_frame_, ack_receive_time, rtt_updated_,
                                prior_bytes_in_flight, valid_ecn_counts);
   if (valid_ecn_counts.has_value()) {
-    peer_ack_ecn_counts_[acked_packet_number_space] = valid_ecn_counts.value();
+    peer_ack_ecn_counts_[acked_packet_number_space] = *valid_ecn_counts;
   }
   return acked_new_packet ? PACKETS_NEWLY_ACKED : NO_PACKETS_NEWLY_ACKED;
 }
@@ -1515,9 +1611,11 @@ QuicPacketNumber QuicSentPacketManager::GetLeastPacketAwaitedByPeer(
 
 QuicPacketNumber QuicSentPacketManager::GetLargestPacketPeerKnowsIsAcked(
     EncryptionLevel decrypted_packet_level) const {
-  QUICHE_DCHECK(supports_multiple_packet_number_spaces());
-  return largest_packets_peer_knows_is_acked_[QuicUtils::GetPacketNumberSpace(
-      decrypted_packet_level)];
+  if (supports_multiple_packet_number_spaces()) {
+    return largest_packets_peer_knows_is_acked_[QuicUtils::GetPacketNumberSpace(
+        decrypted_packet_level)];
+  }
+  return largest_packet_peer_knows_is_acked_;
 }
 
 QuicTime::Delta
@@ -1573,10 +1671,11 @@ QuicTime::Delta QuicSentPacketManager::GetPtoDelay() const {
 
 void QuicSentPacketManager::OnAckFrequencyFrameSent(
     const QuicAckFrequencyFrame& ack_frequency_frame) {
-  in_use_sent_ack_delays_.emplace_back(ack_frequency_frame.max_ack_delay,
-                                       ack_frequency_frame.sequence_number);
-  if (ack_frequency_frame.max_ack_delay > peer_max_ack_delay_) {
-    peer_max_ack_delay_ = ack_frequency_frame.max_ack_delay;
+  in_use_sent_ack_delays_.emplace_back(
+      ack_frequency_frame.requested_max_ack_delay,
+      ack_frequency_frame.sequence_number);
+  if (ack_frequency_frame.requested_max_ack_delay > peer_max_ack_delay_) {
+    peer_max_ack_delay_ = ack_frequency_frame.requested_max_ack_delay;
   }
 }
 
@@ -1601,6 +1700,38 @@ void QuicSentPacketManager::OnAckFrequencyFrameAcked(
   peer_max_ack_delay_ = std::max_element(in_use_sent_ack_delays_.cbegin(),
                                          in_use_sent_ack_delays_.cend())
                             ->first;
+}
+
+float QuicSentPacketManager::GetOverheadEstimate() const {
+  // `overhead_total_bytes_` check is a defense-in-depth again divide-by-zero.
+  if (overhead_total_bytes_ < kMinBytesForOverheadMeasurement ||
+      overhead_good_bytes_ < kMinBytesForOverheadMeasurement) {
+    return kDefaultOverhead;
+  }
+
+  return 1.0f - static_cast<float>(overhead_good_bytes_) /
+                    static_cast<float>(overhead_total_bytes_);
+}
+
+void QuicSentPacketManager::UpdateOverheadMeasurements(
+    const SerializedPacket& packet) {
+  if (!measure_overhead_) {
+    return;
+  }
+  // Ignore packets with the long header.
+  if (packet.encryption_level != ENCRYPTION_FORWARD_SECURE) {
+    return;
+  }
+
+  overhead_total_bytes_ += packet.encrypted_length;
+  for (const QuicFrame& frame : packet.retransmittable_frames) {
+    if (frame.type == QuicFrameType::STREAM_FRAME) {
+      overhead_good_bytes_ += frame.stream_frame.data_length;
+    }
+    if (frame.type == QuicFrameType::DATAGRAM_FRAME) {
+      overhead_good_bytes_ += frame.datagram_frame->datagram_length;
+    }
+  }
 }
 
 #undef ENDPOINT  // undef for jumbo builds

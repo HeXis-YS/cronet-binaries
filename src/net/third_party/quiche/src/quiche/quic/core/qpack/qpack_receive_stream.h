@@ -19,7 +19,7 @@ class QUICHE_EXPORT QpackReceiveStream : public QuicStream {
  public:
   // Construct receive stream from pending stream, the |pending| object needs
   // to be deleted after the construction.
-  QpackReceiveStream(PendingStream* pending, QuicSession* session,
+  QpackReceiveStream(PendingStream& pending, QuicSession* session,
                      QpackStreamReceiver* receiver);
   QpackReceiveStream(const QpackReceiveStream&) = delete;
   QpackReceiveStream& operator=(const QpackReceiveStream&) = delete;
@@ -31,6 +31,11 @@ class QUICHE_EXPORT QpackReceiveStream : public QuicStream {
 
   // Implementation of QuicStream.
   void OnDataAvailable() override;
+
+  // Number of incoming bytes that have been consumed on this stream.
+  QuicStreamOffset NumBytesConsumed() const {
+    return sequencer()->NumBytesConsumed();
+  }
 
  private:
   QpackStreamReceiver* receiver_;

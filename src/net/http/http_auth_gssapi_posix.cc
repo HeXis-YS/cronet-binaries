@@ -6,22 +6,20 @@
 
 #include <limits>
 #include <string>
+#include <string_view>
 
 #include "base/base64.h"
 #include "base/compiler_specific.h"
-#include "base/feature_list.h"
 #include "base/files/file_path.h"
 #include "base/format_macros.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#include "net/base/features.h"
 #include "net/base/net_errors.h"
 #include "net/http/http_auth.h"
 #include "net/http/http_auth_gssapi_posix.h"
@@ -118,13 +116,14 @@ class ScopedName {
 bool OidEquals(const gss_OID left, const gss_OID right) {
   if (left->length != right->length)
     return false;
-  return 0 == memcmp(left->elements, right->elements, right->length);
+  return 0 ==
+         UNSAFE_TODO(memcmp(left->elements, right->elements, right->length));
 }
 
-base::Value::Dict GetGssStatusCodeValue(GSSAPILibrary* gssapi_lib,
-                                        OM_uint32 status,
-                                        OM_uint32 status_code_type) {
-  base::Value::Dict rv;
+base::DictValue GetGssStatusCodeValue(GSSAPILibrary* gssapi_lib,
+                                      OM_uint32 status,
+                                      OM_uint32 status_code_type) {
+  base::DictValue rv;
 
   rv.Set("status", static_cast<int>(status));
 
@@ -151,7 +150,7 @@ base::Value::Dict GetGssStatusCodeValue(GSSAPILibrary* gssapi_lib,
   // |kMaxMsgLength|. There's no real documented limit to work with here.
   constexpr size_t kMaxMsgLength = 4096;
 
-  base::Value::List messages;
+  base::ListValue messages;
   do {
     gss_buffer_desc_struct message_buffer = GSS_C_EMPTY_BUFFER;
     ScopedBuffer message_buffer_releaser(&message_buffer, gssapi_lib);
@@ -166,7 +165,7 @@ base::Value::Dict GetGssStatusCodeValue(GSSAPILibrary* gssapi_lib,
       continue;
     }
 
-    base::StringPiece message_string{
+    std::string_view message_string{
         static_cast<const char*>(message_buffer.value),
         std::min(kMaxMsgLength, message_buffer.length)};
 
@@ -182,11 +181,11 @@ base::Value::Dict GetGssStatusCodeValue(GSSAPILibrary* gssapi_lib,
   return rv;
 }
 
-base::Value::Dict GetGssStatusValue(GSSAPILibrary* gssapi_lib,
-                                    base::StringPiece method,
-                                    OM_uint32 major_status,
-                                    OM_uint32 minor_status) {
-  base::Value::Dict params;
+base::DictValue GetGssStatusValue(GSSAPILibrary* gssapi_lib,
+                                  std::string_view method,
+                                  OM_uint32 major_status,
+                                  OM_uint32 minor_status) {
+  base::DictValue params;
   params.Set("function", method);
   params.Set("major_status",
              GetGssStatusCodeValue(gssapi_lib, major_status, GSS_C_GSS_CODE));
@@ -195,8 +194,8 @@ base::Value::Dict GetGssStatusValue(GSSAPILibrary* gssapi_lib,
   return params;
 }
 
-base::Value::Dict OidToValue(gss_OID oid) {
-  base::Value::Dict params;
+base::DictValue OidToValue(gss_OID oid) {
+  base::DictValue params;
 
   if (!oid || oid->length == 0) {
     params.Set("oid", "<Empty OID>");
@@ -240,14 +239,14 @@ base::Value::Dict OidToValue(gss_OID oid) {
   return params;
 }
 
-base::Value::Dict GetDisplayNameValue(GSSAPILibrary* gssapi_lib,
-                                      const gss_name_t gss_name) {
+base::DictValue GetDisplayNameValue(GSSAPILibrary* gssapi_lib,
+                                    const gss_name_t gss_name) {
   OM_uint32 major_status = 0;
   OM_uint32 minor_status = 0;
   gss_buffer_desc_struct name = GSS_C_EMPTY_BUFFER;
   gss_OID name_type = GSS_C_NO_OID;
 
-  base::Value::Dict rv;
+  base::DictValue rv;
   major_status =
       gssapi_lib->display_name(&minor_status, gss_name, &name, &name_type);
   ScopedBuffer scoped_output_name(&name, gssapi_lib);
@@ -257,7 +256,7 @@ base::Value::Dict GetDisplayNameValue(GSSAPILibrary* gssapi_lib,
     return rv;
   }
   auto name_string =
-      base::StringPiece(reinterpret_cast<const char*>(name.value), name.length);
+      std::string_view(reinterpret_cast<const char*>(name.value), name.length);
   rv.Set("name", base::IsStringUTF8(name_string)
                      ? NetLogStringValue(name_string)
                      : NetLogBinaryValue(name.value, name.length));
@@ -265,17 +264,17 @@ base::Value::Dict GetDisplayNameValue(GSSAPILibrary* gssapi_lib,
   return rv;
 }
 
-base::Value::Dict ContextFlagsToValue(OM_uint32 flags) {
-  base::Value::Dict rv;
+base::DictValue ContextFlagsToValue(OM_uint32 flags) {
+  base::DictValue rv;
   rv.Set("value", base::StringPrintf("0x%08x", flags));
   rv.Set("delegated", (flags & GSS_C_DELEG_FLAG) == GSS_C_DELEG_FLAG);
   rv.Set("mutual", (flags & GSS_C_MUTUAL_FLAG) == GSS_C_MUTUAL_FLAG);
   return rv;
 }
 
-base::Value::Dict GetContextStateAsValue(GSSAPILibrary* gssapi_lib,
-                                         const gss_ctx_id_t context_handle) {
-  base::Value::Dict rv;
+base::DictValue GetContextStateAsValue(GSSAPILibrary* gssapi_lib,
+                                       const gss_ctx_id_t context_handle) {
+  base::DictValue rv;
   if (context_handle == GSS_C_NO_CONTEXT) {
     rv.Set("error", GetGssStatusValue(nullptr, "<none>", GSS_S_NO_CONTEXT, 0));
     return rv;
@@ -321,10 +320,10 @@ base::Value::Dict GetContextStateAsValue(GSSAPILibrary* gssapi_lib,
 namespace {
 
 // Return a NetLog value for the result of loading a library.
-base::Value::Dict LibraryLoadResultParams(base::StringPiece library_name,
-                                          base::StringPiece load_result) {
-  base::Value::Dict params;
-  params.Set("library_name", library_name);
+base::DictValue LibraryLoadResultParams(const base::FilePath& library_name,
+                                        std::string_view load_result) {
+  base::DictValue params;
+  params.Set("library_name", library_name.value());
   if (!load_result.empty())
     params.Set("load_result", load_result);
   return params;
@@ -359,49 +358,44 @@ bool GSSAPISharedLibrary::InitImpl(const NetLogWithSource& net_log) {
 
 base::NativeLibrary GSSAPISharedLibrary::LoadSharedLibrary(
     const NetLogWithSource& net_log) {
-  const char* const* library_names;
-  size_t num_lib_names;
-  const char* user_specified_library[1];
+  std::vector<base::FilePath> library_names;
   if (!gssapi_library_name_.empty()) {
-    user_specified_library[0] = gssapi_library_name_.c_str();
-    library_names = user_specified_library;
-    num_lib_names = 1;
+    library_names.emplace_back(gssapi_library_name_);
   } else {
-    static const char* const kDefaultLibraryNames[] = {
 #if BUILDFLAG(IS_APPLE)
-      "/System/Library/Frameworks/GSS.framework/GSS"
+    library_names.emplace_back("/System/Library/Frameworks/GSS.framework/GSS");
 #elif BUILDFLAG(IS_OPENBSD)
-      "libgssapi.so"  // Heimdal - OpenBSD
+    // Heimdal - OpenBSD
+    library_names.emplace_back("libgssapi.so");
 #else
-      "libgssapi_krb5.so.2",  // MIT Kerberos - FC, Suse10, Debian
-      "libgssapi.so.4",       // Heimdal - Suse10, MDK
-      "libgssapi.so.2",       // Heimdal - Gentoo
-      "libgssapi.so.1"        // Heimdal - Suse9, CITI - FC, MDK, Suse10
+    // MIT Kerberos - FC, Suse10, Debian
+    library_names.emplace_back("libgssapi_krb5.so.2");
+    // Heimdal - Suse10, MDK
+    library_names.emplace_back("libgssapi.so.4");
+    // Heimdal - Gentoo
+    library_names.emplace_back("libgssapi.so.2");
+    // Heimdal - Suse9, CITI - FC, MDK, Suse10
+    library_names.emplace_back("libgssapi.so.1");
 #endif
-    };
-    library_names = kDefaultLibraryNames;
-    num_lib_names = std::size(kDefaultLibraryNames);
   }
 
   net_log.BeginEvent(NetLogEventType::AUTH_LIBRARY_LOAD);
 
   // There has to be at least one candidate.
-  DCHECK_NE(0u, num_lib_names);
+  CHECK(!library_names.empty());
 
-  const char* library_name = nullptr;
   base::NativeLibraryLoadError load_error;
 
-  for (size_t i = 0; i < num_lib_names; ++i) {
+  for (const auto& library_name : library_names) {
     load_error = base::NativeLibraryLoadError();
-    library_name = library_names[i];
-    base::FilePath file_path(library_name);
 
     // TODO(asanka): Move library loading to a separate thread.
     //               http://crbug.com/66702
     base::ScopedAllowBlocking scoped_allow_blocking_temporarily;
-    base::NativeLibrary lib = base::LoadNativeLibrary(file_path, &load_error);
+    base::NativeLibrary lib =
+        base::LoadNativeLibrary(library_name, &load_error);
     if (lib) {
-      if (BindMethods(lib, library_name, net_log)) {
+      if (BindMethods(lib, library_name.value(), net_log)) {
         net_log.EndEvent(NetLogEventType::AUTH_LIBRARY_LOAD, [&] {
           return LibraryLoadResultParams(library_name, "");
         });
@@ -416,23 +410,23 @@ base::NativeLibrary GSSAPISharedLibrary::LoadSharedLibrary(
   // library. Doing so also always logs the failure when the GSSAPI library
   // name is explicitly specified.
   net_log.EndEvent(NetLogEventType::AUTH_LIBRARY_LOAD, [&] {
-    return LibraryLoadResultParams(library_name, load_error.ToString());
+    return LibraryLoadResultParams(library_names.back(), load_error.ToString());
   });
   return nullptr;
 }
 
 namespace {
 
-base::Value::Dict BindFailureParams(base::StringPiece library_name,
-                                    base::StringPiece method) {
-  base::Value::Dict params;
+base::DictValue BindFailureParams(std::string_view library_name,
+                                  std::string_view method) {
+  base::DictValue params;
   params.Set("library_name", library_name);
   params.Set("method", method);
   return params;
 }
 
 void* BindUntypedMethod(base::NativeLibrary lib,
-                        base::StringPiece library_name,
+                        std::string_view library_name,
                         const char* method,
                         const NetLogWithSource& net_log) {
   void* ptr = base::GetFunctionPointerFromNativeLibrary(lib, method);
@@ -445,7 +439,7 @@ void* BindUntypedMethod(base::NativeLibrary lib,
 
 template <typename T>
 bool BindMethod(base::NativeLibrary lib,
-                base::StringPiece library_name,
+                std::string_view library_name,
                 const char* method,
                 T* receiver,
                 const NetLogWithSource& net_log) {
@@ -457,7 +451,7 @@ bool BindMethod(base::NativeLibrary lib,
 }  // namespace
 
 bool GSSAPISharedLibrary::BindMethods(base::NativeLibrary lib,
-                                      base::StringPiece name,
+                                      std::string_view name,
                                       const NetLogWithSource& net_log) {
   bool ok = true;
   // It's unlikely for BindMethods() to fail if LoadNativeLibrary() succeeded. A
@@ -479,8 +473,9 @@ bool GSSAPISharedLibrary::BindMethods(base::NativeLibrary lib,
   ok &=
       BindMethod(lib, name, "gss_wrap_size_limit", &wrap_size_limit_, net_log);
 
-  if (LIKELY(ok))
+  if (ok) [[likely]] {
     return true;
+  }
 
   delete_sec_context_ = nullptr;
   display_name_ = nullptr;
@@ -667,11 +662,7 @@ bool HttpAuthGSSAPI::NeedsIdentity() const {
 
 bool HttpAuthGSSAPI::AllowsExplicitCredentials() const {
 #if BUILDFLAG(IS_CHROMEOS)
-  if (base::FeatureList::IsEnabled(features::kKerberosInBrowserRedirect)) {
-    return true;
-  } else {
-    return false;
-  }
+  return true;
 #else
   return false;
 #endif
@@ -684,12 +675,12 @@ void HttpAuthGSSAPI::SetDelegation(DelegationType delegation_type) {
 HttpAuth::AuthorizationResult HttpAuthGSSAPI::ParseChallenge(
     HttpAuthChallengeTokenizer* tok) {
   if (scoped_sec_context_.get() == GSS_C_NO_CONTEXT) {
-    return net::ParseFirstRoundChallenge(HttpAuth::AUTH_SCHEME_NEGOTIATE, tok);
+    return ParseFirstRoundChallenge(HttpAuth::AUTH_SCHEME_NEGOTIATE, tok);
   }
   std::string encoded_auth_token;
-  return net::ParseLaterRoundChallenge(HttpAuth::AUTH_SCHEME_NEGOTIATE, tok,
-                                       &encoded_auth_token,
-                                       &decoded_server_auth_token_);
+  return ParseLaterRoundChallenge(HttpAuth::AUTH_SCHEME_NEGOTIATE, tok,
+                                  &encoded_auth_token,
+                                  &decoded_server_auth_token_);
 }
 
 int HttpAuthGSSAPI::GenerateAuthToken(const AuthCredentials* credentials,
@@ -715,8 +706,7 @@ int HttpAuthGSSAPI::GenerateAuthToken(const AuthCredentials* credentials,
   // Base64 encode data in output buffer and prepend the scheme.
   std::string encode_input(static_cast<char*>(output_token.value),
                            output_token.length);
-  std::string encode_output;
-  base::Base64Encode(encode_input, &encode_output);
+  std::string encode_output = base::Base64Encode(encode_input);
   *auth_token = "Negotiate " + encode_output;
   return OK;
 }
@@ -810,11 +800,11 @@ int MapInitSecContextStatusToError(OM_uint32 major_status) {
   return ERR_UNDOCUMENTED_SECURITY_LIBRARY_STATUS;
 }
 
-base::Value::Dict ImportNameErrorParams(GSSAPILibrary* library,
-                                        base::StringPiece spn,
-                                        OM_uint32 major_status,
-                                        OM_uint32 minor_status) {
-  base::Value::Dict params;
+base::DictValue ImportNameErrorParams(GSSAPILibrary* library,
+                                      std::string_view spn,
+                                      OM_uint32 major_status,
+                                      OM_uint32 minor_status) {
+  base::DictValue params;
   params.Set("spn", spn);
   if (major_status != GSS_S_COMPLETE)
     params.Set("status", GetGssStatusValue(library, "import_name", major_status,
@@ -822,11 +812,11 @@ base::Value::Dict ImportNameErrorParams(GSSAPILibrary* library,
   return params;
 }
 
-base::Value::Dict InitSecContextErrorParams(GSSAPILibrary* library,
-                                            gss_ctx_id_t context,
-                                            OM_uint32 major_status,
-                                            OM_uint32 minor_status) {
-  base::Value::Dict params;
+base::DictValue InitSecContextErrorParams(GSSAPILibrary* library,
+                                          gss_ctx_id_t context,
+                                          OM_uint32 major_status,
+                                          OM_uint32 minor_status) {
+  base::DictValue params;
   if (major_status != GSS_S_COMPLETE)
     params.Set("status", GetGssStatusValue(library, "gss_init_sec_context",
                                            major_status, minor_status));

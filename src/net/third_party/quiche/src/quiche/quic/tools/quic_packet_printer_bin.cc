@@ -26,16 +26,19 @@
 
 // clang-format on
 
+#include <cstdint>
 #include <iostream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "absl/strings/escaping.h"
 #include "absl/strings/string_view.h"
+#include "quiche/quic/core/frames/quic_immediate_ack_frame.h"
 #include "quiche/quic/core/quic_framer.h"
 #include "quiche/quic/core/quic_types.h"
-#include "quiche/quic/core/quic_utils.h"
-#include "quiche/quic/platform/api/quic_flags.h"
 #include "quiche/common/platform/api/quiche_command_line_flags.h"
-#include "quiche/common/quiche_text_utils.h"
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(std::string, quic_version, "",
                                 "If set, specify the QUIC version to use.");
@@ -126,7 +129,7 @@ class QuicPacketPrinter : public QuicFramerVisitorInterface {
     return true;
   }
   bool OnAckFrameEnd(QuicPacketNumber start,
-                     const absl::optional<QuicEcnCounts>& ecn_counts) override {
+                     const std::optional<QuicEcnCounts>& ecn_counts) override {
     std::cerr << "OnAckFrameEnd, start: " << start;
     if (ecn_counts.has_value()) {
       std::cerr << "  ECN counts: " << ecn_counts->ToString();
@@ -201,8 +204,8 @@ class QuicPacketPrinter : public QuicFramerVisitorInterface {
     std::cerr << "OnBlockedFrame: " << frame;
     return true;
   }
-  bool OnMessageFrame(const QuicMessageFrame& frame) override {
-    std::cerr << "OnMessageFrame: " << frame;
+  bool OnDatagramFrame(const QuicDatagramFrame& frame) override {
+    std::cerr << "OnDatagramFrame: " << frame;
     return true;
   }
   bool OnHandshakeDoneFrame(const QuicHandshakeDoneFrame& frame) override {
@@ -213,14 +216,21 @@ class QuicPacketPrinter : public QuicFramerVisitorInterface {
     std::cerr << "OnAckFrequencyFrame: " << frame;
     return true;
   }
+  bool OnImmediateAckFrame(const QuicImmediateAckFrame& frame) override {
+    std::cerr << "OnImmediateAckFrame: " << frame;
+    return true;
+  }
+  bool OnResetStreamAtFrame(const QuicResetStreamAtFrame& frame) override {
+    std::cerr << "OnResetStreamAtFrame: " << frame;
+    return true;
+  }
   void OnPacketComplete() override { std::cerr << "OnPacketComplete\n"; }
   bool IsValidStatelessResetToken(
       const StatelessResetToken& /*token*/) const override {
     std::cerr << "IsValidStatelessResetToken\n";
     return false;
   }
-  void OnAuthenticatedIetfStatelessResetPacket(
-      const QuicIetfStatelessResetPacket& /*packet*/) override {
+  void OnAuthenticatedIetfStatelessResetPacket() override {
     std::cerr << "OnAuthenticatedIetfStatelessResetPacket\n";
   }
   void OnKeyUpdate(KeyUpdateReason reason) override {
@@ -228,6 +238,9 @@ class QuicPacketPrinter : public QuicFramerVisitorInterface {
   }
   void OnDecryptedFirstPacketInKeyPhase() override {
     std::cerr << "OnDecryptedFirstPacketInKeyPhase\n";
+  }
+  void OnSconePacket(uint8_t signal) override {
+    std::cerr << "OnSconePacket: " << static_cast<int>(signal) << "\n";
   }
   std::unique_ptr<QuicDecrypter> AdvanceKeysAndCreateCurrentOneRttDecrypter()
       override {
@@ -266,7 +279,11 @@ int main(int argc, char* argv[]) {
     quiche::QuichePrintCommandLineFlagHelp(usage);
     return 1;
   }
-  std::string hex = absl::HexStringToBytes(args[1]);
+  std::string hex;
+  if (!absl::HexStringToBytes(args[1], &hex)) {
+    std::cerr << "Invalid hex string" << std::endl;
+    return 1;
+  }
   quic::ParsedQuicVersionVector versions = quic::AllSupportedVersions();
   // Fake a time since we're not actually generating acks.
   quic::QuicTime start(quic::QuicTime::Zero());

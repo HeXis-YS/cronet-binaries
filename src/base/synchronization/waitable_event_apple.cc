@@ -11,6 +11,7 @@
 #include <memory>
 
 #include "base/apple/mach_logging.h"
+#include "base/containers/span.h"
 #include "base/files/scoped_file.h"
 #include "base/notreached.h"
 #include "base/posix/eintr_wrapper.h"
@@ -23,7 +24,8 @@ namespace base {
 
 WaitableEvent::WaitableEvent(ResetPolicy reset_policy,
                              InitialState initial_state)
-    : policy_(reset_policy) {
+    : policy_(reset_policy),
+      signal_estimate_(initial_state == InitialState::SIGNALED) {
   mach_port_options_t options{};
   options.flags = MPO_INSERT_SEND_RIGHT;
   options.mpl.mpl_qlimit = 1;
@@ -41,16 +43,16 @@ WaitableEvent::WaitableEvent(ResetPolicy reset_policy,
   }
 }
 
-WaitableEvent::~WaitableEvent() = default;
-
 void WaitableEvent::Reset() {
-  PeekPort(receive_right_->Name(), true);
+  PeekPort(/*dequeue=*/true);
 }
 
 void WaitableEvent::SignalImpl() {
+  // Optimistically declare this event as signaled.
+  signal_estimate_.store(true, std::memory_order_relaxed);
   mach_msg_empty_send_t msg{};
   msg.header.msgh_bits = MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_COPY_SEND);
-  msg.header.msgh_size = sizeof(&msg);
+  msg.header.msgh_size = sizeof(msg);
   msg.header.msgh_remote_port = send_right_.get();
   // If the event is already signaled, this will time out because the queue
   // has a length of one.
@@ -61,8 +63,12 @@ void WaitableEvent::SignalImpl() {
   MACH_CHECK(kr == KERN_SUCCESS || kr == MACH_SEND_TIMED_OUT, kr) << "mach_msg";
 }
 
-bool WaitableEvent::IsSignaled() {
-  return PeekPort(receive_right_->Name(), policy_ == ResetPolicy::AUTOMATIC);
+bool WaitableEvent::IsSignaled() const {
+  return PeekPort(policy_ == ResetPolicy::AUTOMATIC);
+}
+
+bool WaitableEvent::IsDefinitelySignaled() const {
+  return signal_estimate_.load(std::memory_order_relaxed) && IsSignaled();
 }
 
 bool WaitableEvent::TimedWaitImpl(TimeDelta wait_delta) {
@@ -114,6 +120,11 @@ bool WaitableEvent::TimedWaitImpl(TimeDelta wait_delta) {
   }
 
   if (kr == KERN_SUCCESS) {
+    // KERN_SUCCESS only covers AUTOMATIC resets. MANUAL resets are handled in
+    // the next block, as set up above.
+    CHECK_EQ(policy_, ResetPolicy::AUTOMATIC);
+    // The signal has been consumed above, post-facto reset our estimate.
+    signal_estimate_.store(false, std::memory_order_relaxed);
     return true;
   } else if (rcv_size == 0 && kr == MACH_RCV_TOO_LARGE) {
     return true;
@@ -124,10 +135,7 @@ bool WaitableEvent::TimedWaitImpl(TimeDelta wait_delta) {
 }
 
 // static
-size_t WaitableEvent::WaitMany(WaitableEvent** raw_waitables, size_t count) {
-  DCHECK(count) << "Cannot wait on no events";
-  internal::ScopedBlockingCallWithBaseSyncPrimitives scoped_blocking_call(
-      FROM_HERE, BlockingType::MAY_BLOCK);
+size_t WaitableEvent::WaitManyImpl(base::span<WaitableEvent*> raw_waitables) {
   // On macOS 10.11+, using Mach port sets may cause system instability, per
   // https://crbug.com/756102. On macOS 10.12+, a kqueue can be used
   // instead to work around that.
@@ -141,18 +149,18 @@ size_t WaitableEvent::WaitMany(WaitableEvent** raw_waitables, size_t count) {
   const WaitManyPrimitive kPrimitive = KQUEUE;
 #endif
   if (kPrimitive == KQUEUE) {
-    std::vector<kevent64_s> events(count);
-    for (size_t i = 0; i < count; ++i) {
+    std::vector<kevent64_s> events(raw_waitables.size());
+    for (size_t i = 0; i < raw_waitables.size(); ++i) {
       EV_SET64(&events[i], raw_waitables[i]->receive_right_->Name(),
                EVFILT_MACHPORT, EV_ADD, 0, 0, i, 0, 0);
     }
 
-    std::vector<kevent64_s> out_events(count);
+    std::vector<kevent64_s> out_events(raw_waitables.size());
 
     ScopedFD wait_many(kqueue());
     PCHECK(wait_many.is_valid()) << "kqueue";
 
-    const int count_int = checked_cast<int>(count);
+    const int count_int = checked_cast<int>(raw_waitables.size());
     int rv = HANDLE_EINTR(kevent64(wait_many.get(), events.data(), count_int,
                                    out_events.data(), count_int, /*flags=*/0,
                                    /*timeout=*/nullptr));
@@ -168,8 +176,7 @@ size_t WaitableEvent::WaitMany(WaitableEvent** raw_waitables, size_t count) {
 
     if (raw_waitables[triggered]->policy_ == ResetPolicy::AUTOMATIC) {
       // The message needs to be dequeued to reset the event.
-      PeekPort(raw_waitables[triggered]->receive_right_->Name(),
-               /*dequeue=*/true);
+      raw_waitables[triggered]->PeekPort(/*dequeue=*/true);
     }
 
     return triggered;
@@ -187,7 +194,7 @@ size_t WaitableEvent::WaitMany(WaitableEvent** raw_waitables, size_t count) {
       port_set.reset(name);
     }
 
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 0; i < raw_waitables.size(); ++i) {
       kr = mach_port_insert_member(mach_task_self(),
                                    raw_waitables[i]->receive_right_->Name(),
                                    port_set.get());
@@ -205,24 +212,36 @@ size_t WaitableEvent::WaitMany(WaitableEvent** raw_waitables, size_t count) {
                   /*timeout=*/0, /*notify=*/MACH_PORT_NULL);
     MACH_CHECK(kr == MACH_RCV_TOO_LARGE, kr) << "mach_msg";
 
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 0; i < raw_waitables.size(); ++i) {
       WaitableEvent* event = raw_waitables[i];
       if (msg.header.msgh_local_port == event->receive_right_->Name()) {
         if (event->policy_ == ResetPolicy::AUTOMATIC) {
           // The message needs to be dequeued to reset the event.
-          PeekPort(msg.header.msgh_local_port, true);
+          event->PeekPort(/*dequeue=*/true);
         }
         return i;
       }
     }
 
     NOTREACHED();
-    return 0;
   }
 }
 
+bool WaitableEvent::PeekPort(bool dequeue) const {
+  bool result = PeekPortImpl(receive_right_->Name(), dequeue);
+  if (dequeue) {
+    signal_estimate_.store(false, std::memory_order_relaxed);
+  } else {
+    // The cache can drift from the true port state due to concurrent Signal()
+    // and Reset() operations. Update it with the real result to help the
+    // estimate converge back to the true state.
+    signal_estimate_.store(result, std::memory_order_relaxed);
+  }
+  return result;
+}
+
 // static
-bool WaitableEvent::PeekPort(mach_port_t port, bool dequeue) {
+bool WaitableEvent::PeekPortImpl(mach_port_t port, bool dequeue) {
   if (dequeue) {
     mach_msg_empty_rcv_t msg{};
     msg.header.msgh_local_port = port;

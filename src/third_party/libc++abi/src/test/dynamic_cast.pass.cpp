@@ -6,12 +6,6 @@
 //
 //===----------------------------------------------------------------------===//
 
-// PR33425 and PR33487 are not fixed until the dylib shipped with macOS 10.15
-// XFAIL: stdlib=apple-libc++ && target={{.+}}-apple-macosx10.14
-
-// PR33439 isn't fixed until the dylib shipped with macOS 10.14
-// XFAIL: stdlib=apple-libc++ && target={{.+}}-apple-macosx10.{{9|10|11|12|13}}
-
 #include <cassert>
 
 // This test explicitly tests dynamic cast with types that have inaccessible

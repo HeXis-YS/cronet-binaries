@@ -6,6 +6,7 @@
 #define BASE_PROFILER_SUSPENDABLE_THREAD_DELEGATE_MAC_H_
 
 #include <mach/mach.h>
+
 #include <memory>
 #include <vector>
 
@@ -37,7 +38,8 @@ class BASE_EXPORT SuspendableThreadDelegateMac
     mach_port_t thread_port_;
   };
 
-  SuspendableThreadDelegateMac(SamplingProfilerThreadToken thread_token);
+  explicit SuspendableThreadDelegateMac(
+      const SamplingProfilerThreadToken& thread_token);
   ~SuspendableThreadDelegateMac() override;
 
   SuspendableThreadDelegateMac(const SuspendableThreadDelegateMac&) = delete;
@@ -51,10 +53,14 @@ class BASE_EXPORT SuspendableThreadDelegateMac
   PlatformThreadId GetThreadId() const override;
   uintptr_t GetStackBaseAddress() const override;
   bool CanCopyStack(uintptr_t stack_pointer) override;
-  std::vector<uintptr_t*> GetRegistersToRewrite(
-      RegisterContext* thread_context) override;
+  std::vector<uintptr_t> GetRegisters(RegisterContext* thread_context) override;
+  void SetRegisters(RegisterContext* thread_context,
+                    const std::vector<uintptr_t>& registers) override;
 
  private:
+  // Thread ID of thread being profiled.
+  const base::PlatformThreadId thread_id_;
+
   // Weak reference: Mach port for thread being profiled.
   const mach_port_t thread_port_;
 

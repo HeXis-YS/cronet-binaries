@@ -4,7 +4,9 @@
 
 #include "quiche/quic/test_tools/simulator/quic_endpoint.h"
 
+#include <algorithm>
 #include <memory>
+#include <string>
 #include <utility>
 
 #include "quiche/quic/core/crypto/crypto_handshake_message.h"
@@ -41,7 +43,7 @@ QuicEndpoint::QuicEndpoint(Simulator* simulator, std::string name,
                             std::make_unique<quic::test::TaggingEncrypter>(
                                 ENCRYPTION_FORWARD_SECURE));
   connection_->SetEncrypter(ENCRYPTION_INITIAL, nullptr);
-  if (connection_->version().KnowsWhichDecrypterToUse()) {
+  if (connection_->version().IsIetfQuic()) {
     connection_->InstallDecrypter(
         ENCRYPTION_FORWARD_SECURE,
         std::make_unique<quic::test::StrictTaggingDecrypter>(
@@ -72,7 +74,7 @@ QuicEndpoint::QuicEndpoint(Simulator* simulator, std::string name,
   CryptoHandshakeMessage peer_hello;
   peer_hello.SetValue(kICSL,
                       static_cast<uint32_t>(kMaximumIdleTimeoutSecs - 1));
-  peer_hello.SetValue(kMIBS,
+  peer_hello.SetValue(kMIDS,
                       static_cast<uint32_t>(kDefaultMaxStreamsPerConnection));
   QuicConfig config;
   QuicErrorCode error_code = config.ProcessPeerHello(
@@ -80,7 +82,7 @@ QuicEndpoint::QuicEndpoint(Simulator* simulator, std::string name,
       &error);
   QUICHE_DCHECK_EQ(error_code, QUIC_NO_ERROR)
       << "Configuration failed: " << error;
-  if (connection_->version().UsesTls()) {
+  if (connection_->version().IsIetfQuic()) {
     if (connection_->perspective() == Perspective::IS_CLIENT) {
       test::QuicConfigPeer::SetReceivedOriginalConnectionId(
           &config, connection_->connection_id());
@@ -169,9 +171,11 @@ bool QuicEndpoint::AllowSelfAddressChange() const { return false; }
 
 bool QuicEndpoint::OnFrameAcked(const QuicFrame& frame,
                                 QuicTime::Delta ack_delay_time,
-                                QuicTime receive_timestamp) {
+                                QuicTime receive_timestamp,
+                                bool is_retransmission) {
   if (notifier_ != nullptr) {
-    return notifier_->OnFrameAcked(frame, ack_delay_time, receive_timestamp);
+    return notifier_->OnFrameAcked(frame, ack_delay_time, receive_timestamp,
+                                   is_retransmission);
   }
   return false;
 }

@@ -12,15 +12,37 @@
 #include <sys/timerfd.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include <atomic>
+#include <map>
+#include <memory>
 #include <utility>
 
+#include "base/android/input_hint_checker.h"
 #include "base/android/jni_android.h"
 #include "base/android/scoped_java_ref.h"
+#include "base/android/yield_to_looper_checker.h"
+#include "base/check.h"
 #include "base/check_op.h"
+#include "base/message_loop/io_watcher.h"
+#include "base/message_loop/message_pump_wakeup_counter.h"
 #include "base/notreached.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/run_loop.h"
+#include "base/task/task_features.h"
+#include "base/threading/platform_thread.h"
+#include "base/time/time.h"
+#include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
+#include "partition_alloc/buildflags.h"
+
+#if PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC)
+#include "partition_alloc/stack/stack.h"  // nogncheck
+#endif
+
+using base::android::InputHintChecker;
+using base::android::InputHintResult;
+using base::android::YieldToLooperChecker;
 
 namespace base {
 
@@ -28,28 +50,41 @@ namespace {
 
 // https://crbug.com/873588. The stack may not be aligned when the ALooper calls
 // into our code due to the inconsistent ABI on older Android OS versions.
+//
+// https://crbug.com/330761384#comment3. Calls from libutils.so into
+// NonDelayedLooperCallback() and DelayedLooperCallback() confuse aarch64 builds
+// with orderfile instrumentation causing incorrect value in
+// __builtin_return_address(0). Disable instrumentation for them. TODO(pasko):
+// Add these symbols to the orderfile manually or fix the builtin.
 #if defined(ARCH_CPU_X86)
-#define STACK_ALIGN __attribute__((force_align_arg_pointer))
+#define NO_INSTRUMENT_STACK_ALIGN \
+  __attribute__((force_align_arg_pointer, no_instrument_function))
 #else
-#define STACK_ALIGN
+#define NO_INSTRUMENT_STACK_ALIGN __attribute__((no_instrument_function))
 #endif
 
-STACK_ALIGN int NonDelayedLooperCallback(int fd, int events, void* data) {
-  if (events & ALOOPER_EVENT_HANGUP)
+NO_INSTRUMENT_STACK_ALIGN int NonDelayedLooperCallback(int fd,
+                                                       int events,
+                                                       void* data) {
+  if (events & ALOOPER_EVENT_HANGUP) {
     return 0;
+  }
 
   DCHECK(events & ALOOPER_EVENT_INPUT);
-  MessagePumpForUI* pump = reinterpret_cast<MessagePumpForUI*>(data);
+  MessagePumpAndroid* pump = reinterpret_cast<MessagePumpAndroid*>(data);
   pump->OnNonDelayedLooperCallback();
   return 1;  // continue listening for events
 }
 
-STACK_ALIGN int DelayedLooperCallback(int fd, int events, void* data) {
-  if (events & ALOOPER_EVENT_HANGUP)
+NO_INSTRUMENT_STACK_ALIGN int DelayedLooperCallback(int fd,
+                                                    int events,
+                                                    void* data) {
+  if (events & ALOOPER_EVENT_HANGUP) {
     return 0;
+  }
 
   DCHECK(events & ALOOPER_EVENT_INPUT);
-  MessagePumpForUI* pump = reinterpret_cast<MessagePumpForUI*>(data);
+  MessagePumpAndroid* pump = reinterpret_cast<MessagePumpAndroid*>(data);
   pump->OnDelayedLooperCallback();
   return 1;  // continue listening for events
 }
@@ -57,10 +92,276 @@ STACK_ALIGN int DelayedLooperCallback(int fd, int events, void* data) {
 // A bit added to the |non_delayed_fd_| to keep it signaled when we yield to
 // native work below.
 constexpr uint64_t kTryNativeWorkBeforeIdleBit = uint64_t(1) << 32;
+
+// Implements IOWatcher to allow any MessagePumpAndroid thread to watch
+// arbitrary file descriptors for I/O events.
+// NOTE: When attempting to watch the same `fd` for the same `mode`, this
+// implementation of IOWatcher will unregister the previously registered
+// FdWatch.
+class IOWatcherImpl : public IOWatcher {
+ public:
+  explicit IOWatcherImpl(ALooper* looper) : looper_(looper) {}
+
+  ~IOWatcherImpl() override {
+    for (auto& [fd, watches] : watched_fds_) {
+      ALooper_removeFd(looper_, fd);
+      if (auto read_watch = std::exchange(watches.read_watch, nullptr)) {
+        read_watch->Detach();
+      }
+      if (auto write_watch = std::exchange(watches.write_watch, nullptr)) {
+        write_watch->Detach();
+      }
+    }
+  }
+
+  // IOWatcher implementation:
+  std::unique_ptr<IOWatcher::FdWatch> WatchFileDescriptorImpl(
+      int fd,
+      FdWatchDuration duration,
+      FdWatchMode mode,
+      IOWatcher::FdWatcher& watcher,
+      const Location& location) override {
+    const bool is_read =
+        (mode == FdWatchMode::kRead || mode == FdWatchMode::kReadWrite);
+    const bool is_write =
+        (mode == FdWatchMode::kWrite || mode == FdWatchMode::kReadWrite);
+    TRACE_EVENT("base", "MessagePumpAndroid::IOWatcher::WatchFileDescriptor",
+                "fd", fd, "persistent",
+                duration == FdWatchDuration::kPersistent, "write_mode",
+                is_write, "read_mode", is_read);
+    auto& watches = watched_fds_[fd];
+    auto watch = std::make_unique<FdWatchImpl>(*this, fd, duration, watcher);
+    if (is_write) {
+      // Detaches the previous FdWatch if there's an attempt to watch the same
+      // `fd` for the same `mode`. This means the previous watch is no longer
+      // responsible for controlling the lifetime of the active FD watch. The
+      // most common case for this happening is multiple EAGAINs in
+      // channel_posix when handling socket/FD writable callbacks.
+      if (watches.write_watch) {
+        watches.write_watch->Detach();
+      }
+      watches.write_watch = watch.get();
+    }
+    if (is_read) {
+      if (watches.read_watch) {
+        // Analogous to the write scenario.
+        watches.read_watch->Detach();
+      }
+      watches.read_watch = watch.get();
+    }
+
+    const int events = (watches.read_watch ? ALOOPER_EVENT_INPUT : 0) |
+                       (watches.write_watch ? ALOOPER_EVENT_OUTPUT : 0);
+    ALooper_addFd(looper_, fd, 0, events, &OnFdIoEvent, this);
+    return watch;
+  }
+
+ private:
+  // Scopes the maximum lifetime of an FD watch started by WatchFileDescriptor.
+  class FdWatchImpl : public FdWatch {
+   public:
+    FdWatchImpl(IOWatcherImpl& io_watcher,
+                int fd,
+                FdWatchDuration duration,
+                FdWatcher& fd_watcher)
+        : fd_(fd),
+          duration_(duration),
+          fd_watcher_(fd_watcher),
+          io_watcher_(&io_watcher) {}
+
+    ~FdWatchImpl() override {
+      Stop();
+      if (destruction_flag_) {
+        *destruction_flag_ = true;
+      }
+    }
+
+    void set_destruction_flag(bool* flag) { destruction_flag_ = flag; }
+    int fd() const { return fd_; }
+    FdWatcher& fd_watcher() const { return *fd_watcher_; }
+
+    bool is_persistent() const {
+      return duration_ == FdWatchDuration::kPersistent;
+    }
+
+    void Detach() { io_watcher_ = nullptr; }
+
+    void Stop() {
+      if (io_watcher_) {
+        std::exchange(io_watcher_, nullptr)->StopWatching(*this);
+      }
+    }
+
+   private:
+    const int fd_;
+    const FdWatchDuration duration_;
+    raw_ref<FdWatcher> fd_watcher_;
+    raw_ptr<IOWatcherImpl> io_watcher_;
+
+    // If non-null during destruction, the pointee is set to true. Used to
+    // detect reentrant destruction during dispatch.
+    raw_ptr<bool> destruction_flag_ = nullptr;
+  };
+
+  enum class EventResult {
+    kStopWatching,
+    kKeepWatching,
+  };
+
+  static NO_INSTRUMENT_STACK_ALIGN int OnFdIoEvent(int fd,
+                                                   int events,
+                                                   void* data) {
+    switch (static_cast<IOWatcherImpl*>(data)->HandleEvent(fd, events)) {
+      case EventResult::kStopWatching:
+        return 0;
+      case EventResult::kKeepWatching:
+        return 1;
+    }
+  }
+
+  EventResult HandleEvent(int fd, int events) {
+    // NOTE: It is possible for Looper to dispatch one last event for `fd`
+    // *after* we have removed the FD from the Looper - for example if multiple
+    // FDs wake the thread at the same time, and a handler for another FD runs
+    // first and removes the watch for `fd`; this callback will have already
+    // been queued for `fd` and will still run. As such, we must gracefully
+    // tolerate receiving a callback for an FD that is no longer watched.
+    auto it = watched_fds_.find(fd);
+    if (it == watched_fds_.end()) {
+      return EventResult::kStopWatching;
+    }
+
+    auto& watches = it->second;
+    const bool is_readable =
+        events & (ALOOPER_EVENT_INPUT | ALOOPER_EVENT_HANGUP);
+    const bool is_writable =
+        events & (ALOOPER_EVENT_OUTPUT | ALOOPER_EVENT_HANGUP);
+    auto* read_watch = watches.read_watch.get();
+    auto* write_watch = watches.write_watch.get();
+
+    if ((read_watch && is_readable) || (write_watch && is_writable)) {
+      MessagePumpWakeupCounter::GetForCurrentThread().RecordWakeup();
+    }
+
+    // Any event dispatch can stop any number of watches, so we're careful to
+    // set up destruction observation before dispatching anything.
+    bool read_watch_destroyed = false;
+    // Don't use this variable directly, see write_watch_destroyed function
+    // below.
+    bool write_watch_destroyed_helper = false;
+    bool fd_removed = false;
+    if (read_watch) {
+      read_watch->set_destruction_flag(&read_watch_destroyed);
+    }
+    if (write_watch && read_watch != write_watch) {
+      write_watch->set_destruction_flag(&write_watch_destroyed_helper);
+    }
+    auto write_watch_destroyed = [&]() {
+      // Following the rule in the 'if' above, if the objects are the same,
+      // then the observer boolean is read_watch_destroyed for the write_watch
+      if (read_watch == write_watch) {
+        return read_watch_destroyed;
+      }
+      return write_watch_destroyed_helper;
+    };
+    watches.removed_flag = &fd_removed;
+
+    bool did_observe_one_shot_read = false;
+    if (read_watch && is_readable) {
+      DCHECK_EQ(read_watch->fd(), fd);
+      did_observe_one_shot_read = !read_watch->is_persistent();
+      read_watch->fd_watcher().OnFdReadable(fd);
+      if (!read_watch_destroyed && did_observe_one_shot_read) {
+        read_watch->Stop();
+      }
+    }
+
+    // If the read and write watches are the same object, it may have been  a
+    // one-shot watch already consumed by a read above, so we inhibit the
+    // write dispatch.
+    if (read_watch == write_watch && did_observe_one_shot_read) {
+      write_watch = nullptr;
+    }
+
+    if (write_watch && is_writable && !write_watch_destroyed()) {
+      DCHECK_EQ(write_watch->fd(), fd);
+      DCHECK(!(read_watch == write_watch && read_watch_destroyed));
+      const bool is_persistent = write_watch->is_persistent();
+      write_watch->fd_watcher().OnFdWritable(fd);
+      if (!write_watch_destroyed() && !is_persistent) {
+        write_watch->Stop();
+      }
+    }
+
+    if (read_watch && !read_watch_destroyed) {
+      read_watch->set_destruction_flag(nullptr);
+    }
+    if (write_watch && !write_watch_destroyed()) {
+      write_watch->set_destruction_flag(nullptr);
+    }
+
+    if (fd_removed) {
+      return EventResult::kStopWatching;
+    }
+
+    watches.removed_flag = nullptr;
+    return EventResult::kKeepWatching;
+  }
+
+  void StopWatching(FdWatchImpl& watch) {
+    const int fd = watch.fd();
+    auto it = watched_fds_.find(fd);
+    if (it == watched_fds_.end()) {
+      return;
+    }
+
+    WatchPair& watches = it->second;
+    if (watches.read_watch == &watch) {
+      watches.read_watch = nullptr;
+    }
+    if (watches.write_watch == &watch) {
+      watches.write_watch = nullptr;
+    }
+
+    const int remaining_events =
+        (watches.read_watch ? ALOOPER_EVENT_INPUT : 0) |
+        (watches.write_watch ? ALOOPER_EVENT_OUTPUT : 0);
+    if (remaining_events) {
+      ALooper_addFd(looper_, fd, 0, remaining_events, &OnFdIoEvent, this);
+      return;
+    }
+
+    ALooper_removeFd(looper_, fd);
+    if (watches.removed_flag) {
+      *watches.removed_flag = true;
+    }
+    watched_fds_.erase(it);
+  }
+
+ private:
+  const raw_ptr<ALooper> looper_;
+
+  // The set of active FdWatches. Note that each FD may have up to two active
+  // watches only - one for read and one for write. No two FdWatches can watch
+  // the same FD for the same signal. `read_watch` and `write_watch` may point
+  // to the same object.
+  struct WatchPair {
+    raw_ptr<FdWatchImpl> read_watch = nullptr;
+    raw_ptr<FdWatchImpl> write_watch = nullptr;
+
+    // If non-null when this WatchPair is removed, the pointee is set to true.
+    // Used to track reentrant map mutations during dispatch.
+    raw_ptr<bool> removed_flag = nullptr;
+  };
+  std::map<int, WatchPair> watched_fds_;
+};
+
 }  // namespace
 
-MessagePumpForUI::MessagePumpForUI()
-    : env_(base::android::AttachCurrentThread()) {
+MessagePumpAndroid::MessagePumpAndroid()
+    : env_(base::android::AttachCurrentThread()),
+      should_update_pseudo_stack_top_(PlatformThread::CurrentId().raw() ==
+                                      getpid()) {
   // The Android native ALooper uses epoll to poll our file descriptors and wake
   // us up. We use a simple level-triggered eventfd to signal that non-delayed
   // work is available, and a timerfd to signal when delayed work is ready to
@@ -83,8 +384,9 @@ MessagePumpForUI::MessagePumpForUI()
                 &DelayedLooperCallback, reinterpret_cast<void*>(this));
 }
 
-MessagePumpForUI::~MessagePumpForUI() {
+MessagePumpAndroid::~MessagePumpAndroid() {
   DCHECK_EQ(ALooper_forThread(), looper_);
+  io_watcher_.reset();
   ALooper_removeFd(looper_, non_delayed_fd_);
   ALooper_removeFd(looper_, delayed_fd_);
   ALooper_release(looper_);
@@ -94,19 +396,26 @@ MessagePumpForUI::~MessagePumpForUI() {
   close(delayed_fd_);
 }
 
-void MessagePumpForUI::OnDelayedLooperCallback() {
+void MessagePumpAndroid::OnDelayedLooperCallback() {
+  MaybeUpdatePseudoStackTop();
+  OnReturnFromLooper();
   // There may be non-Chromium callbacks on the same ALooper which may have left
   // a pending exception set, and ALooper does not check for this between
   // callbacks. Check here, and if there's already an exception, just skip this
   // iteration without clearing the fd. If the exception ends up being non-fatal
   // then we'll just get called again on the next polling iteration.
-  if (base::android::HasException(env_))
+  if (base::android::HasException(env_)) {
     return;
+  }
 
   // ALooper_pollOnce may call this after Quit() if OnNonDelayedLooperCallback()
   // resulted in Quit() in the same round.
-  if (ShouldQuit())
+  if (ShouldQuit()) {
     return;
+  }
+
+  // Record non-spurious wakeup. Work is guaranteed in DoDelayedLooperWork().
+  MessagePumpWakeupCounter::GetForCurrentThread().RecordWakeup();
 
   // Clear the fd.
   uint64_t value;
@@ -125,37 +434,46 @@ void MessagePumpForUI::OnDelayedLooperCallback() {
   DoDelayedLooperWork();
 }
 
-void MessagePumpForUI::DoDelayedLooperWork() {
+void MessagePumpAndroid::DoDelayedLooperWork() {
   delayed_scheduled_time_.reset();
 
   Delegate::NextWorkInfo next_work_info = delegate_->DoWork();
 
-  if (ShouldQuit())
+  if (ShouldQuit()) {
     return;
+  }
 
   if (next_work_info.is_immediate()) {
     ScheduleWork();
     return;
   }
 
-  DoIdleWork();
-  if (!next_work_info.delayed_run_time.is_max())
+  delegate_->DoIdleWork();
+  if (!next_work_info.delayed_run_time.is_max()) {
     ScheduleDelayedWork(next_work_info);
+  }
 }
 
-void MessagePumpForUI::OnNonDelayedLooperCallback() {
+void MessagePumpAndroid::OnNonDelayedLooperCallback() {
+  MaybeUpdatePseudoStackTop();
+  OnReturnFromLooper();
   // There may be non-Chromium callbacks on the same ALooper which may have left
   // a pending exception set, and ALooper does not check for this between
   // callbacks. Check here, and if there's already an exception, just skip this
   // iteration without clearing the fd. If the exception ends up being non-fatal
   // then we'll just get called again on the next polling iteration.
-  if (base::android::HasException(env_))
+  if (base::android::HasException(env_)) {
     return;
+  }
 
   // ALooper_pollOnce may call this after Quit() if OnDelayedLooperCallback()
   // resulted in Quit() in the same round.
-  if (ShouldQuit())
+  if (ShouldQuit()) {
     return;
+  }
+
+  // Record non-spurious wakeup. Work is guaranteed in DoNonDelayedLooperWork().
+  MessagePumpWakeupCounter::GetForCurrentThread().RecordWakeup();
 
   // We're about to process all the work requested by ScheduleWork().
   // MessagePump users are expected to do their best not to invoke
@@ -172,7 +490,7 @@ void MessagePumpForUI::OnNonDelayedLooperCallback() {
   DoNonDelayedLooperWork(do_idle_work);
 }
 
-void MessagePumpForUI::DoNonDelayedLooperWork(bool do_idle_work) {
+void MessagePumpAndroid::DoNonDelayedLooperWork(bool do_idle_work) {
   // Note: We can't skip DoWork() even if |do_idle_work| is true here (i.e. no
   // additional ScheduleWork() since yielding to native) as delayed tasks might
   // have come in and we need to re-sample |next_work_info|.
@@ -180,74 +498,62 @@ void MessagePumpForUI::DoNonDelayedLooperWork(bool do_idle_work) {
   // Runs all application tasks scheduled to run.
   Delegate::NextWorkInfo next_work_info;
   do {
-    if (ShouldQuit())
+    if (ShouldQuit()) {
       return;
+    }
 
     next_work_info = delegate_->DoWork();
-    // If we are prioritizing native, and the next work would normally run
-    // immediately, skip the next work and let the native work items have a
-    // chance to run. This is useful when user input is waiting for native to
-    // have a chance to run.
-    if (next_work_info.is_immediate() && next_work_info.yield_to_native) {
-      ScheduleWork();
-      return;
+
+    if (is_type_ui_ && next_work_info.is_immediate()) {
+      // To reduce startup ANRs, yield if an embedder signifies that startup is
+      // currently running.
+      if (YieldToLooperChecker::GetInstance().ShouldYield()) {
+        ScheduleWork();
+        return;
+      }
+
+      // As an optimization, yield to the Looper when input events are waiting
+      // to be handled. In some cases input events can remain undetected. Such
+      // "input hint false negatives" happen, for example, during
+      // initialization, in multi-window cases, or when a previous value is
+      // cached to throttle polling the input channel.
+      if (InputHintChecker::HasInput()) {
+        ScheduleWork();
+        return;
+      }
     }
   } while (next_work_info.is_immediate());
 
   // Do not resignal |non_delayed_fd_| if we're quitting (this pump doesn't
   // allow nesting so needing to resume in an outer loop is not an issue
   // either).
-  if (ShouldQuit())
-    return;
-
-  // Before declaring this loop idle, yield to native work items and arrange to
-  // be called again (unless we're already in that second call).
-  if (!do_idle_work) {
-    ScheduleWorkInternal(/*do_idle_work=*/true);
+  if (ShouldQuit()) {
     return;
   }
 
-  // We yielded to native work items already and they didn't generate a
-  // ScheduleWork() request so we can declare idleness. It's possible for a
-  // ScheduleWork() request to come in racily while this method unwinds, this is
-  // fine and will merely result in it being re-invoked shortly after it
-  // returns.
-  // TODO(scheduler-dev): this doesn't account for tasks that don't ever call
-  // SchedulerWork() but still keep the system non-idle (e.g., the Java Handler
-  // API). It would be better to add an API to query the presence of native
-  // tasks instead of relying on yielding once + kTryNativeWorkBeforeIdleBit.
-  DCHECK(do_idle_work);
-
-  if (ShouldQuit())
-    return;
-
-  // At this point, the java looper might not be idle - it's impossible to know
-  // pre-Android-M, so we may end up doing Idle work while java tasks are still
-  // queued up. Note that this won't cause us to fail to run java tasks using
-  // QuitWhenIdle, as the JavaHandlerThread will finish running all currently
-  // scheduled tasks before it quits. Also note that we can't just add an idle
-  // callback to the java looper, as that will fire even if application tasks
-  // are still queued up.
-  DoIdleWork();
+  // Do the idle work.
+  //
+  // At this point, the Java Looper might not be idle. It is possible to skip
+  // idle work if !MessageQueue.isIdle(), but this check is not very accurate
+  // because the MessageQueue does not know about the additional tasks
+  // potentially waiting in the Looper.
+  //
+  // Note that this won't cause us to fail to run java tasks using QuitWhenIdle,
+  // as the JavaHandlerThread will finish running all currently scheduled tasks
+  // before it quits. Also note that we can't just add an idle callback to the
+  // java looper, as that will fire even if application tasks are still queued
+  // up.
+  delegate_->DoIdleWork();
   if (!next_work_info.delayed_run_time.is_max()) {
     ScheduleDelayedWork(next_work_info);
   }
 }
 
-void MessagePumpForUI::DoIdleWork() {
-  if (delegate_->DoIdleWork()) {
-    // If DoIdleWork() resulted in any work, we're not idle yet. We need to pump
-    // the loop here because we may in fact be idle after doing idle work
-    // without any new tasks being queued.
-    ScheduleWork();
-  }
+void MessagePumpAndroid::Run(Delegate* delegate) {
+  NOTREACHED() << "Unexpected call to Run()";
 }
 
-void MessagePumpForUI::Run(Delegate* delegate) {
-  CHECK(false) << "Unexpected call to Run()";
-}
-
-void MessagePumpForUI::Attach(Delegate* delegate) {
+void MessagePumpAndroid::Attach(Delegate* delegate) {
   DCHECK(!quit_);
 
   // Since the Looper is controlled by the UI thread or JavaHandlerThread, we
@@ -259,13 +565,13 @@ void MessagePumpForUI::Attach(Delegate* delegate) {
   run_loop_ = std::make_unique<RunLoop>();
   // Since the RunLoop was just created above, BeforeRun should be guaranteed to
   // return true (it only returns false if the RunLoop has been Quit already).
-  if (!run_loop_->BeforeRun())
-    NOTREACHED();
+  CHECK(run_loop_->BeforeRun());
 }
 
-void MessagePumpForUI::Quit() {
-  if (quit_)
+void MessagePumpAndroid::Quit() {
+  if (quit_) {
     return;
+  }
 
   quit_ = true;
 
@@ -284,11 +590,11 @@ void MessagePumpForUI::Quit() {
   }
 }
 
-void MessagePumpForUI::ScheduleWork() {
+void MessagePumpAndroid::ScheduleWork() {
   ScheduleWorkInternal(/*do_idle_work=*/false);
 }
 
-void MessagePumpForUI::ScheduleWorkInternal(bool do_idle_work) {
+void MessagePumpAndroid::ScheduleWorkInternal(bool do_idle_work) {
   // Write (add) |value| to the eventfd. This tells the Looper to wake up and
   // call our callback, allowing us to run tasks. This also allows us to detect,
   // when we clear the fd, whether additional work was scheduled after we
@@ -309,10 +615,52 @@ void MessagePumpForUI::ScheduleWorkInternal(bool do_idle_work) {
   DPCHECK(ret >= 0);
 }
 
-void MessagePumpForUI::ScheduleDelayedWork(
-    const Delegate::NextWorkInfo& next_work_info) {
-  if (ShouldQuit())
+void MessagePumpAndroid::OnReturnFromLooper() {
+  if (!is_type_ui_) {
     return;
+  }
+}
+
+// Records an approximation of the top of the stack ("pseudo stack top") for
+// conservative stack scanning, which is much cheaper to obtain than
+// `partition_alloc::internal::GetStackTop()`.
+//
+// This is called at the two entry points from the Android Looper into the
+// Chrome native library. Running any native message loop task on the UI thread
+// requires going through one of them first. The Looper starts running before
+// the Chrome native code is even loaded and never returns, so a stack address
+// taken next to it separates the Chrome part of the stack from the Android
+// Framework part below it.
+//
+// The highest address ever observed here is kept, since the depth of the
+// Android Framework frames below us varies between wakeups. The highest address
+// is cached in `pseudo_stack_top_` so that we only notify the StackTopRegistry
+// on the rare occasions when the value actually grows.
+//
+// We restrict this to the main thread. Before the main thread has pumped its
+// first task, the stack top is unset and PartitionAlloc's `StackTopRegistry`
+// will return `nullptr`.
+void MessagePumpAndroid::MaybeUpdatePseudoStackTop() {
+  if (!should_update_pseudo_stack_top_) {
+    return;
+  }
+#if PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC)
+  void* stack_pointer = partition_alloc::internal::GetStackPointer();
+  uintptr_t stack_address = reinterpret_cast<uintptr_t>(stack_pointer);
+  if (stack_address <= pseudo_stack_top_) {
+    return;
+  }
+  pseudo_stack_top_ = stack_address;
+  partition_alloc::internal::StackTopRegistry::Get()
+      .OverwriteCurrentThreadStackTop(stack_pointer);
+#endif  // PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC)
+}
+
+void MessagePumpAndroid::ScheduleDelayedWork(
+    const Delegate::NextWorkInfo& next_work_info) {
+  if (ShouldQuit()) {
+    return;
+  }
 
   if (delayed_scheduled_time_ &&
       *delayed_scheduled_time_ == next_work_info.delayed_run_time) {
@@ -334,7 +682,18 @@ void MessagePumpForUI::ScheduleDelayedWork(
   DPCHECK(ret >= 0);
 }
 
-void MessagePumpForUI::QuitWhenIdle(base::OnceClosure callback) {
+IOWatcher* MessagePumpAndroid::GetIOWatcher() {
+  if (!io_watcher_) {
+    io_watcher_ = std::make_unique<IOWatcherImpl>(looper_);
+  }
+  return io_watcher_.get();
+}
+
+bool MessagePumpAndroid::IsAsyncIOSupported() {
+  return true;
+}
+
+void MessagePumpAndroid::QuitWhenIdle(base::OnceClosure callback) {
   DCHECK(!on_quit_callback_);
   DCHECK(run_loop_);
   on_quit_callback_ = std::move(callback);
@@ -343,11 +702,11 @@ void MessagePumpForUI::QuitWhenIdle(base::OnceClosure callback) {
   ScheduleWork();
 }
 
-MessagePump::Delegate* MessagePumpForUI::SetDelegate(Delegate* delegate) {
+MessagePump::Delegate* MessagePumpAndroid::SetDelegate(Delegate* delegate) {
   return std::exchange(delegate_, delegate);
 }
 
-bool MessagePumpForUI::SetQuit(bool quit) {
+bool MessagePumpAndroid::SetQuit(bool quit) {
   return std::exchange(quit_, quit);
 }
 

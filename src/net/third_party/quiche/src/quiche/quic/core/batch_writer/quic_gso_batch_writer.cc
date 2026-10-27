@@ -6,10 +6,25 @@
 
 #include <time.h>
 
+#include <cstdint>
 #include <ctime>
+#include <memory>
+#include <utility>
 
+#include "quiche/quic/core/batch_writer/quic_batch_writer_base.h"
+#include "quiche/quic/core/batch_writer/quic_batch_writer_buffer.h"
+#include "quiche/quic/core/flow_label.h"
+#include "quiche/quic/core/quic_constants.h"
 #include "quiche/quic/core/quic_linux_socket_utils.h"
-#include "quiche/quic/platform/api/quic_server_stats.h"
+#include "quiche/quic/core/quic_packet_writer.h"
+#include "quiche/quic/core/quic_time.h"
+#include "quiche/quic/core/quic_types.h"
+#include "quiche/quic/platform/api/quic_flag_utils.h"
+#include "quiche/quic/platform/api/quic_flags.h"
+#include "quiche/quic/platform/api/quic_ip_address.h"
+#include "quiche/quic/platform/api/quic_logging.h"
+#include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/common/platform/api/quiche_logging.h"
 
 namespace quic {
 
@@ -29,12 +44,10 @@ QuicGsoBatchWriter::QuicGsoBatchWriter(int fd,
       supports_release_time_(
           GetQuicRestartFlag(quic_support_release_time_for_gso) &&
           QuicLinuxSocketUtils::EnableReleaseTime(fd,
-                                                  clockid_for_release_time)) {
+                                                  clockid_for_release_time)),
+      enobufs_blocked_(GetQuicReloadableFlag(quic_enobufs_blocked)) {
   if (supports_release_time_) {
     QUIC_RESTART_FLAG_COUNT(quic_support_release_time_for_gso);
-    QUIC_LOG_FIRST_N(INFO, 5) << "Release time is enabled.";
-  } else {
-    QUIC_LOG_FIRST_N(INFO, 5) << "Release time is not enabled.";
   }
 }
 
@@ -141,7 +154,8 @@ uint64_t QuicGsoBatchWriter::NowInNanosForReleaseTime() const {
 void QuicGsoBatchWriter::BuildCmsg(QuicMsgHdr* hdr,
                                    const QuicIpAddress& self_address,
                                    uint16_t gso_size, uint64_t release_time,
-                                   QuicEcnCodepoint ecn_codepoint) {
+                                   QuicEcnCodepoint ecn_codepoint,
+                                   uint32_t flow_label) {
   hdr->SetIpInNextCmsg(self_address);
   if (gso_size > 0) {
     *hdr->GetNextCmsgData<uint16_t>(SOL_UDP, UDP_SEGMENT) = gso_size;
@@ -149,8 +163,7 @@ void QuicGsoBatchWriter::BuildCmsg(QuicMsgHdr* hdr,
   if (release_time != 0) {
     *hdr->GetNextCmsgData<uint64_t>(SOL_SOCKET, SO_TXTIME) = release_time;
   }
-  if (ecn_codepoint != ECN_NOT_ECT && GetQuicReloadableFlag(quic_send_ect1)) {
-    QUIC_RELOADABLE_FLAG_COUNT_N(quic_send_ect1, 8, 8);
+  if (ecn_codepoint != ECN_NOT_ECT) {
     if (self_address.IsIPv4()) {
       *hdr->GetNextCmsgData<int>(IPPROTO_IP, IP_TOS) =
           static_cast<int>(ecn_codepoint);
@@ -158,6 +171,11 @@ void QuicGsoBatchWriter::BuildCmsg(QuicMsgHdr* hdr,
       *hdr->GetNextCmsgData<int>(IPPROTO_IPV6, IPV6_TCLASS) =
           static_cast<int>(ecn_codepoint);
     }
+  }
+
+  if (flow_label != 0) {
+    *hdr->GetNextCmsgData<uint32_t>(IPPROTO_IPV6, IPV6_FLOWINFO) =
+        htonl(flow_label & IPV6_FLOWINFO_FLOWLABEL);
   }
 }
 

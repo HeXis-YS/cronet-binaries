@@ -1,0 +1,108 @@
+--- a/src/third_party/perfetto/src/protozero/filtering/BUILD.gn
++++ b/src/third_party/perfetto/src/protozero/filtering/BUILD.gn
+@@ -12,7 +12,6 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-import("../../../gn/fuzzer.gni")
+ import("../../../gn/perfetto_cc_proto_descriptor.gni")
+ import("../../../gn/perfetto_host_executable.gni")
+ import("../../../gn/proto_library.gni")
+@@ -111,97 +110,3 @@
+   ]
+ }
+ 
+-perfetto_proto_library("filter_util_test_messages_@TYPE@") {
+-  testonly = true
+-  sources = [ "filter_util_test_messages.proto" ]
+-  deps = [
+-    "../../../protos/perfetto/common:passthrough_@TYPE@",
+-    "../../../protos/perfetto/proto_filtering:@TYPE@",
+-  ]
+-  import_dirs = [ "${perfetto_protobuf_src_dir}" ]
+-  proto_generators = []
+-  generate_descriptor = "filter_util_test_messages.descriptor"
+-  descriptor_root_source = "filter_util_test_messages.proto"
+-}
+-
+-perfetto_cc_proto_descriptor("gen_cc_filter_util_test_descriptor") {
+-  testonly = true
+-  descriptor_name = "filter_util_test_messages.descriptor"
+-  descriptor_target = ":filter_util_test_messages_descriptor"
+-}
+-
+-perfetto_unittest_source_set("unittests") {
+-  testonly = true
+-  deps = [
+-    ":bytecode_common",
+-    ":bytecode_generator",
+-    ":bytecode_parser",
+-    ":message_filter",
+-    ":string_filter",
+-    "..:protozero",
+-    "../../../gn:default_deps",
+-    "../../../gn:gtest_and_gmock",
+-    "../../../protos/perfetto/trace:lite",
+-    "../../base",
+-    "../../base:test_support",
+-    "../../base/regex",
+-  ]
+-  sources = [
+-    "filter_bytecode_generator_unittest.cc",
+-    "filter_bytecode_parser_unittest.cc",
+-    "message_tokenizer_unittest.cc",
+-    "string_filter_unittest.cc",
+-  ]
+-
+-  # On chromium component build we cannot have a test target depening boh on
+-  # protobuf-full and protobuf-lite. Just skip those targets there.
+-  # See also https://crug.com/1210223 .
+-  if (perfetto_build_standalone || perfetto_build_with_android) {
+-    deps += [
+-      ":filter_util",
+-      ":gen_cc_filter_util_test_descriptor",
+-    ]
+-    sources += [
+-      "filter_util_unittest.cc",
+-      "message_filter_unittest.cc",
+-    ]
+-  }
+-}
+-
+-if (enable_perfetto_benchmarks) {
+-  source_set("benchmarks") {
+-    testonly = true
+-    deps = [
+-      ":message_filter",
+-      ":string_filter",
+-      "../../../gn:benchmark",
+-      "../../../gn:default_deps",
+-      "../../base",
+-      "../../base:test_support",
+-    ]
+-    sources = [
+-      "message_filter_benchmark.cc",
+-      "string_filter_benchmark.cc",
+-    ]
+-  }
+-}
+-
+-perfetto_fuzzer_test("protozero_bytecode_parser_fuzzer") {
+-  sources = [ "filter_bytecode_parser_fuzzer.cc" ]
+-  deps = [
+-    ":bytecode_parser",
+-    "..:protozero",
+-    "../../../gn:default_deps",
+-    "../../base",
+-  ]
+-}
+-
+-perfetto_fuzzer_test("protozero_message_filter_fuzzer") {
+-  sources = [ "message_filter_fuzzer.cc" ]
+-  deps = [
+-    ":message_filter",
+-    "..:protozero",
+-    "../../../gn:default_deps",
+-    "../../base",
+-  ]
+-}

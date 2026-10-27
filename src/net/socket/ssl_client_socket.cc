@@ -8,14 +8,19 @@
 
 #include "base/containers/flat_tree.h"
 #include "base/logging.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/metrics/histogram_macros.h"
 #include "base/observer_list.h"
 #include "base/values.h"
+#include "net/base/features.h"
 #include "net/cert/x509_certificate_net_log_param.h"
 #include "net/log/net_log.h"
 #include "net/log/net_log_event_type.h"
 #include "net/socket/ssl_client_socket_impl.h"
 #include "net/socket/stream_socket.h"
 #include "net/ssl/ssl_client_session_cache.h"
+#include "net/ssl/ssl_connection_status_flags.h"
+#include "net/ssl/ssl_info.h"
 #include "net/ssl/ssl_key_logger.h"
 
 namespace net {
@@ -25,27 +30,160 @@ namespace {
 // Returns true if |first_cert| and |second_cert| represent the same certificate
 // (with the same chain), or if they're both NULL.
 bool AreCertificatesEqual(const scoped_refptr<X509Certificate>& first_cert,
-                          const scoped_refptr<X509Certificate>& second_cert) {
+                          const scoped_refptr<X509Certificate>& second_cert,
+                          bool include_chain = true) {
   return (!first_cert && !second_cert) ||
          (first_cert && second_cert &&
-          first_cert->EqualsIncludingChain(second_cert.get()));
+          (include_chain
+               ? first_cert->EqualsIncludingChain(second_cert.get())
+               : first_cert->EqualsExcludingChain(second_cert.get())));
 }
 
-// Returns a base::Value::Dict value NetLog parameter with the expected format
+// Returns a base::DictValue value NetLog parameter with the expected format
 // for events of type CLEAR_CACHED_CLIENT_CERT.
-base::Value::Dict NetLogClearCachedClientCertParams(
+base::DictValue NetLogClearCachedClientCertParams(
     const net::HostPortPair& host,
     const scoped_refptr<net::X509Certificate>& cert,
     bool is_cleared) {
-  base::Value::Dict dict;
-  dict.Set("host", host.ToString());
-  dict.Set("certificates", cert ? net::NetLogX509CertificateList(cert.get())
-                                : base::Value(base::Value::List()));
-  dict.Set("is_cleared", is_cleared);
-  return dict;
+  return base::DictValue()
+      .Set("host", host.ToString())
+      .Set("certificates", cert ? net::NetLogX509CertificateList(cert.get())
+                                : base::Value(base::ListValue()))
+      .Set("is_cleared", is_cleared);
+}
+
+// Returns a base::DictValue value NetLog parameter with the expected format
+// for events of type CLEAR_MATCHING_CACHED_CLIENT_CERT.
+base::DictValue NetLogClearMatchingCachedClientCertParams(
+    const base::flat_set<net::HostPortPair>& hosts,
+    const scoped_refptr<net::X509Certificate>& cert) {
+  base::ListValue hosts_values;
+  for (const auto& host : hosts) {
+    hosts_values.Append(host.ToString());
+  }
+
+  return base::DictValue()
+      .Set("hosts", base::Value(std::move(hosts_values)))
+      .Set("certificates", cert ? net::NetLogX509CertificateList(cert.get())
+                                : base::Value(base::ListValue()));
 }
 
 }  // namespace
+
+// static
+void SSLClientSocket::RecordSSLConnectResult(
+    SSLClientSocket* ssl_socket,
+    int result,
+    bool is_ech_capable,
+    bool ech_enabled,
+    const std::optional<std::vector<uint8_t>>& ech_retry_configs,
+    bool trust_anchor_ids_from_dns,
+    bool retried_with_trust_anchor_ids,
+    bool trust_anchor_retry_used_mtc_fallback,
+    const LoadTimingInfo::ConnectTiming& connect_timing) {
+  const bool is_ok = result == OK;
+  if (is_ech_capable && ech_enabled) {
+    // These values are persisted to logs. Entries should not be renumbered
+    // and numeric values should never be reused.
+    enum class ECHResult {
+      // The connection succeeded on the initial connection.
+      kSuccessInitial = 0,
+      // The connection failed on the initial connection, without providing
+      // retry configs.
+      kErrorInitial = 1,
+      // The connection succeeded after getting retry configs.
+      kSuccessRetry = 2,
+      // The connection failed after getting retry configs.
+      kErrorRetry = 3,
+      // The connection succeeded after getting a rollback signal.
+      kSuccessRollback = 4,
+      // The connection failed after getting a rollback signal.
+      kErrorRollback = 5,
+      kMaxValue = kErrorRollback,
+    };
+    ECHResult ech_result;
+    if (!ech_retry_configs.has_value()) {
+      ech_result =
+          is_ok ? ECHResult::kSuccessInitial : ECHResult::kErrorInitial;
+    } else if (ech_retry_configs->empty()) {
+      ech_result =
+          is_ok ? ECHResult::kSuccessRollback : ECHResult::kErrorRollback;
+    } else {
+      ech_result = is_ok ? ECHResult::kSuccessRetry : ECHResult::kErrorRetry;
+    }
+    base::UmaHistogramEnumeration("Net.SSL.ECHResult", ech_result);
+  }
+
+  TrustAnchorIDsResult tai_result;
+  if (trust_anchor_ids_from_dns) {
+    if (retried_with_trust_anchor_ids && trust_anchor_retry_used_mtc_fallback) {
+      tai_result = is_ok ? TrustAnchorIDsResult::kDnsSuccessRetryMtcFallback
+                         : TrustAnchorIDsResult::kDnsErrorRetryMtcFallback;
+    } else if (retried_with_trust_anchor_ids) {
+      tai_result = is_ok ? TrustAnchorIDsResult::kDnsSuccessRetry
+                         : TrustAnchorIDsResult::kDnsErrorRetry;
+    } else {
+      tai_result = is_ok ? TrustAnchorIDsResult::kDnsSuccessInitial
+                         : TrustAnchorIDsResult::kDnsErrorInitial;
+    }
+  } else {
+    if (retried_with_trust_anchor_ids && trust_anchor_retry_used_mtc_fallback) {
+      tai_result = is_ok ? TrustAnchorIDsResult::kNoDnsSuccessRetryMtcFallback
+                         : TrustAnchorIDsResult::kNoDnsErrorRetryMtcFallback;
+    } else if (retried_with_trust_anchor_ids) {
+      tai_result = is_ok ? TrustAnchorIDsResult::kNoDnsSuccessRetry
+                         : TrustAnchorIDsResult::kNoDnsErrorRetry;
+    } else {
+      tai_result = is_ok ? TrustAnchorIDsResult::kNoDnsSuccessInitial
+                         : TrustAnchorIDsResult::kNoDnsErrorInitial;
+    }
+  }
+  base::UmaHistogramEnumeration("Net.SSL.TrustAnchorIDsResult", tai_result);
+
+  if (result == OK) {
+    DCHECK(!connect_timing.ssl_start.is_null());
+    CHECK(ssl_socket);
+    base::TimeDelta connect_duration =
+        connect_timing.ssl_end - connect_timing.ssl_start;
+    UMA_HISTOGRAM_CUSTOM_TIMES("Net.SSL_Connection_Latency_2", connect_duration,
+                               base::Milliseconds(1), base::Minutes(1), 100);
+    if (trust_anchor_ids_from_dns) {
+      base::UmaHistogramCustomTimes("Net.SSL_Connection_Latency_TrustAnchorIDs",
+                                    connect_duration, base::Milliseconds(1),
+                                    base::Minutes(1), 100);
+    }
+
+    SSLInfo ssl_info;
+    bool has_ssl_info = ssl_socket->GetSSLInfo(&ssl_info);
+    DCHECK(has_ssl_info);
+
+    SSLVersion version =
+        SSLConnectionStatusToVersion(ssl_info.connection_status);
+    UMA_HISTOGRAM_ENUMERATION("Net.SSLVersion", version,
+                              SSL_CONNECTION_VERSION_MAX);
+
+    uint16_t cipher_suite =
+        SSLConnectionStatusToCipherSuite(ssl_info.connection_status);
+    base::UmaHistogramSparse("Net.SSL_CipherSuite", cipher_suite);
+
+    if (ssl_info.key_exchange_group != 0) {
+      base::UmaHistogramSparse("Net.SSL_KeyExchange.ECDHE",
+                               ssl_info.key_exchange_group);
+    }
+
+    if (ssl_info.server_padding_received) {
+      base::UmaHistogramCustomTimes("Net.SSL_Connection_Latency_ServerPadding",
+                                    connect_duration, base::Milliseconds(1),
+                                    base::Minutes(1), 100);
+    }
+  }
+
+  base::UmaHistogramSparse("Net.SSL_Connection_Error", std::abs(result));
+  if (trust_anchor_ids_from_dns) {
+    base::UmaHistogramSparse("Net.SSL_Connection_Error_TrustAnchorIDs",
+                             std::abs(result));
+  }
+}
 
 SSLClientSocket::SSLClientSocket() = default;
 
@@ -81,18 +219,15 @@ SSLClientContext::SSLClientContext(
     SSLConfigService* ssl_config_service,
     CertVerifier* cert_verifier,
     TransportSecurityState* transport_security_state,
-    CTPolicyEnforcer* ct_policy_enforcer,
     SSLClientSessionCache* ssl_client_session_cache,
     SCTAuditingDelegate* sct_auditing_delegate)
     : ssl_config_service_(ssl_config_service),
       cert_verifier_(cert_verifier),
       transport_security_state_(transport_security_state),
-      ct_policy_enforcer_(ct_policy_enforcer),
       ssl_client_session_cache_(ssl_client_session_cache),
       sct_auditing_delegate_(sct_auditing_delegate) {
   CHECK(cert_verifier_);
   CHECK(transport_security_state_);
-  CHECK(ct_policy_enforcer_);
 
   if (ssl_config_service_) {
     config_ = ssl_config_service_->GetSSLContextConfig();
@@ -108,6 +243,17 @@ SSLClientContext::~SSLClientContext() {
   }
   cert_verifier_->RemoveObserver(this);
   CertDatabase::GetInstance()->RemoveObserver(this);
+}
+
+EchMode SSLClientContext::GetEchMode(std::string_view hostname) const {
+  if (ssl_config_service_) {
+    return ssl_config_service_->GetEchMode(hostname);
+  }
+  return EchMode::kOpportunistic;
+}
+
+bool SSLClientContext::IsEchEnabled(std::string_view hostname) const {
+  return GetEchMode(hostname) != EchMode::kDisabled;
 }
 
 std::unique_ptr<SSLClientSocket> SSLClientContext::CreateSSLClientSocket(
@@ -181,6 +327,9 @@ void SSLClientContext::OnTrustStoreChanged() {
 void SSLClientContext::OnClientCertStoreChanged() {
   base::flat_set<HostPortPair> servers =
       ssl_client_auth_cache_.GetCachedServers();
+  if (servers.empty()) {
+    return;
+  }
   ssl_client_auth_cache_.Clear();
   if (ssl_client_session_cache_) {
     ssl_client_session_cache_->FlushForServers(servers);
@@ -218,6 +367,43 @@ void SSLClientContext::ClearClientCertificateIfNeeded(
   }
 
   NotifySSLConfigForServersChanged({host});
+}
+
+void SSLClientContext::ClearMatchingClientCertificate(
+    const scoped_refptr<net::X509Certificate>& certificate) {
+  CHECK(certificate);
+
+  base::flat_set<HostPortPair> cleared_servers;
+  for (const auto& server : ssl_client_auth_cache_.GetCachedServers()) {
+    scoped_refptr<X509Certificate> cached_certificate;
+    scoped_refptr<SSLPrivateKey> cached_private_key;
+    if (ssl_client_auth_cache_.Lookup(server, &cached_certificate,
+                                      &cached_private_key) &&
+        AreCertificatesEqual(cached_certificate, certificate,
+                             /*include_chain=*/false)) {
+      cleared_servers.insert(cleared_servers.end(), server);
+    }
+  }
+
+  net::NetLog::Get()->AddGlobalEntry(
+      NetLogEventType::CLEAR_MATCHING_CACHED_CLIENT_CERT, [&]() {
+        return NetLogClearMatchingCachedClientCertParams(cleared_servers,
+                                                         certificate);
+      });
+
+  if (cleared_servers.empty()) {
+    return;
+  }
+
+  for (const auto& server_to_clear : cleared_servers) {
+    ssl_client_auth_cache_.Remove(server_to_clear);
+  }
+
+  if (ssl_client_session_cache_) {
+    ssl_client_session_cache_->FlushForServers(cleared_servers);
+  }
+
+  NotifySSLConfigForServersChanged(cleared_servers);
 }
 
 void SSLClientContext::NotifySSLConfigChanged(SSLConfigChangeType change_type) {

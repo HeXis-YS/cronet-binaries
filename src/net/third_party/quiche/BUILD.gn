@@ -24,7 +24,6 @@
 #
 #             (*) only used on platforms where epoll tests are built
 
-import("//build/config/chromeos/ui_mode.gni")
 import("//net/third_party/quiche/src/build/source_list.gni")
 import("//third_party/protobuf/proto_library.gni")
 
@@ -32,11 +31,14 @@ config("quiche_internal_config") {
   cflags = []
   if (is_clang) {
     cflags += [
-      "-Wno-unused-private-field",
-      "-Wno-shadow",
       "-Wno-sign-compare",
+      "-Wno-deprecated-declarations",
     ]
   }
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs = [ "//build/config/compiler:no_exit_time_destructors" ]
 }
 
 config("quiche_config") {
@@ -57,18 +59,16 @@ component("quiche") {
               "overrides/quiche_platform_impl/quiche_export_impl.h",
               "overrides/quiche_platform_impl/quiche_iovec_impl.h",
               "overrides/quiche_platform_impl/quiche_logging_impl.h",
-              "overrides/quiche_platform_impl/quiche_mutex_impl.cc",
-              "overrides/quiche_platform_impl/quiche_mutex_impl.h",
               "overrides/quiche_platform_impl/quiche_reference_counted_impl.h",
               "overrides/quiche_platform_impl/quiche_server_stats_impl.h",
-              "overrides/quiche_platform_impl/quiche_time_utils_impl.cc",
-              "overrides/quiche_platform_impl/quiche_time_utils_impl.h",
+              "overrides/quiche_platform_impl/quiche_stack_trace_impl.cc",
+              "overrides/quiche_platform_impl/quiche_stack_trace_impl.h",
               "overrides/quiche_platform_impl/quiche_url_utils_impl.cc",
               "overrides/quiche_platform_impl/quiche_url_utils_impl.h",
               "src/quiche/common/platform/default/quiche_platform_impl/quiche_flags_impl.cc",
               "src/quiche/common/platform/default/quiche_platform_impl/quiche_flags_impl.h",
-              "src/quiche/common/platform/default/quiche_platform_impl/quiche_prefetch_impl.h",
-              "src/quiche/http2/hpack/hpack_static_table_entries.inc",
+              "src/quiche/common/platform/default/quiche_platform_impl/quiche_time_utils_impl.cc",
+              "src/quiche/common/platform/default/quiche_platform_impl/quiche_time_utils_impl.h",
             ] + quiche_core_hdrs + quiche_core_srcs + binary_http_srcs +
             binary_http_hdrs + oblivious_http_srcs + oblivious_http_hdrs
 
@@ -76,7 +76,7 @@ component("quiche") {
   all_dependent_configs = [ ":quiche_config" ]
 
   deps = [
-    "//net:uri_template",
+    "//net/third_party/uri_template",
     "//third_party/protobuf:protobuf_lite",
     "//third_party/zlib",
   ]
@@ -106,7 +106,7 @@ proto_library("net_quic_proto") {
 
   proto_in_dir = "src"
 
-  deps = [ "//base" ]
+  link_deps = [ "//base" ]
 
   defines = [ "IS_QUICHE_IMPL" ]
 
@@ -121,7 +121,7 @@ proto_library("net_quic_test_tools_proto") {
   cc_include = "net/base/net_export.h"
   component_build_force_source_set = true
 
-  deps = [ "//net:net_export_header" ]
+  link_deps = [ "//net/base:net_export_header" ]
 
   defines = [ "NET_IMPLEMENTATION" ]
 

@@ -30,13 +30,17 @@ bool WaitableEventWatcher::StartWatching(
     scoped_refptr<SequencedTaskRunner> task_runner) {
   DCHECK(task_runner->RunsTasksInCurrentSequence());
   DCHECK(!storage_->dispatch_source ||
-         dispatch_source_testcancel(storage_->dispatch_source));
+         dispatch_source_testcancel(storage_->dispatch_source.get()));
 
   // Keep a reference to the receive right, so that if the event is deleted
   // out from under the watcher, a signal can still be observed.
   receive_right_ = event->receive_right_;
 
-  callback_ = BindOnce(std::move(callback), event);
+  // UnsafeDanglingUntriaged triggered by test:
+  // WaitableEventWatcherDeletionTest.SignalAndDelete
+  // TODO(crbug.com/40061562): Remove `UnsafeDanglingUntriaged`
+  callback_ =
+      BindOnce(std::move(callback), base::UnsafeDanglingUntriaged(event));
 
   // Use the global concurrent queue here, since it is only used to thunk
   // to the real callback on the target task runner.
@@ -53,11 +57,11 @@ bool WaitableEventWatcher::StartWatching(
   dispatch_source_t source = storage_->dispatch_source.get();
   mach_port_t name = receive_right_->Name();
 
-  dispatch_source_set_event_handler(storage_->dispatch_source, ^{
+  dispatch_source_set_event_handler(storage_->dispatch_source.get(), ^{
     // For automatic-reset events, only fire the callback if this watcher
     // can claim/dequeue the event. For manual-reset events, all watchers can
     // be called back.
-    if (auto_reset && !WaitableEvent::PeekPort(name, true)) {
+    if (auto_reset && !WaitableEvent::PeekPortImpl(name, true)) {
       return;
     }
 
@@ -68,7 +72,7 @@ bool WaitableEventWatcher::StartWatching(
     task_runner->PostTask(
         FROM_HERE, BindOnce(&WaitableEventWatcher::InvokeCallback, weak_this));
   });
-  dispatch_resume(storage_->dispatch_source);
+  dispatch_resume(storage_->dispatch_source.get());
 
   return true;
 }
@@ -77,7 +81,7 @@ void WaitableEventWatcher::StopWatching() {
   callback_.Reset();
   receive_right_ = nullptr;
   if (storage_->dispatch_source) {
-    dispatch_source_cancel(storage_->dispatch_source);
+    dispatch_source_cancel(storage_->dispatch_source.get());
     storage_->dispatch_source.reset();
   }
 }

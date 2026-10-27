@@ -11,13 +11,14 @@
 #include <memory>
 #include <string>
 
+#include "base/containers/span.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/host_port_pair.h"
 #include "net/base/net_export.h"
-#include "net/base/proxy_server.h"
+#include "net/base/proxy_chain.h"
 #include "net/http/http_auth_controller.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_request_info.h"
@@ -29,7 +30,8 @@
 #include "net/spdy/spdy_read_queue.h"
 #include "net/spdy/spdy_session.h"
 #include "net/spdy/spdy_stream.h"
-#include "net/third_party/quiche/src/quiche/spdy/core/spdy_protocol.h"
+#include "net/third_party/quiche/src/quiche/common/http/http_header_block.h"
+#include "net/third_party/quiche/src/quiche/http2/core/spdy_protocol.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 
 namespace net {
@@ -47,7 +49,8 @@ class NET_EXPORT_PRIVATE SpdyProxyClientSocket : public ProxyClientSocket,
   // data read/written to the socket will be transferred in data frames. This
   // object will set itself as |spdy_stream|'s delegate.
   SpdyProxyClientSocket(const base::WeakPtr<SpdyStream>& spdy_stream,
-                        const ProxyServer& proxy_server,
+                        const ProxyChain& proxy_chain,
+                        size_t proxy_chain_index,
                         const std::string& user_agent,
                         const HostPortPair& endpoint,
                         const NetLogWithSource& source_net_log,
@@ -73,7 +76,6 @@ class NET_EXPORT_PRIVATE SpdyProxyClientSocket : public ProxyClientSocket,
   bool IsConnectedAndIdle() const override;
   const NetLogWithSource& NetLog() const override;
   bool WasEverUsed() const override;
-  bool WasAlpnNegotiated() const override;
   NextProto GetNegotiatedProtocol() const override;
   bool GetSSLInfo(SSLInfo* ssl_info) override;
   int64_t GetTotalReceivedBytes() const override;
@@ -98,12 +100,12 @@ class NET_EXPORT_PRIVATE SpdyProxyClientSocket : public ProxyClientSocket,
 
   // SpdyStream::Delegate implementation.
   void OnHeadersSent() override;
-  void OnEarlyHintsReceived(const spdy::Http2HeaderBlock& headers) override;
+  void OnEarlyHintsReceived(const quiche::HttpHeaderBlock& headers) override;
   void OnHeadersReceived(
-      const spdy::Http2HeaderBlock& response_headers) override;
+      const quiche::HttpHeaderBlock& response_headers) override;
   void OnDataReceived(std::unique_ptr<SpdyBuffer> buffer) override;
   void OnDataSent() override;
-  void OnTrailers(const spdy::Http2HeaderBlock& trailers) override;
+  void OnTrailers(const quiche::HttpHeaderBlock& trailers) override;
   void OnClose(int status) override;
   bool CanGreaseFrameType() const override;
   NetLogSource source_dependency() const override;
@@ -113,9 +115,14 @@ class NET_EXPORT_PRIVATE SpdyProxyClientSocket : public ProxyClientSocket,
     STATE_DISCONNECTED,
     STATE_GENERATE_AUTH_TOKEN,
     STATE_GENERATE_AUTH_TOKEN_COMPLETE,
+    STATE_CALCULATE_HEADERS,
+    STATE_CALCULATE_HEADERS_COMPLETE,
     STATE_SEND_REQUEST,
     STATE_SEND_REQUEST_COMPLETE,
     STATE_READ_REPLY_COMPLETE,
+    STATE_PROCESS_RESPONSE_HEADERS,
+    STATE_PROCESS_RESPONSE_HEADERS_COMPLETE,
+    STATE_PROCESS_RESPONSE_CODE,
     STATE_OPEN,
     STATE_CLOSED
   };
@@ -126,16 +133,25 @@ class NET_EXPORT_PRIVATE SpdyProxyClientSocket : public ProxyClientSocket,
 
   void OnIOComplete(int result);
 
+  // Callback for proxy_delegate_->OnBeforeTunnelRequest().
+  void OnBeforeTunnelRequestComplete(
+      base::expected<HttpRequestHeaders, Error> result);
+
   int DoLoop(int last_io_result);
   int DoGenerateAuthToken();
   int DoGenerateAuthTokenComplete(int result);
+  int DoCalculateHeaders();
+  int DoCalculateHeadersComplete(int result);
   int DoSendRequest();
   int DoSendRequestComplete(int result);
   int DoReadReplyComplete(int result);
+  int DoProcessResponseHeaders();
+  int DoProcessResponseHeadersComplete(int result);
+  int DoProcessResponseCode();
 
-  // Populates |user_buffer_| with as much read data as possible
+  // Populates `data` with as much read data as possible
   // and returns the number of bytes read.
-  size_t PopulateUserReadBuffer(char* out, size_t len);
+  size_t PopulateUserReadBuffer(base::span<uint8_t> data);
 
   // Called when the peer sent END_STREAM.
   void MaybeSendEndStream();
@@ -155,12 +171,16 @@ class NET_EXPORT_PRIVATE SpdyProxyClientSocket : public ProxyClientSocket,
   HttpRequestInfo request_;
   HttpResponseInfo response_;
 
+  HttpRequestHeaders authorization_headers_;
+  HttpRequestHeaders proxy_delegate_headers_;
+
   // The hostname and port of the endpoint.  This is not necessarily the one
   // specified by the URL, due to Alternate-Protocol or fixed testing ports.
   const HostPortPair endpoint_;
   scoped_refptr<HttpAuthController> auth_;
 
-  const ProxyServer proxy_server_;
+  const ProxyChain proxy_chain_;
+  const size_t proxy_chain_index_;
 
   // This delegate must outlive this proxy client socket.
   const raw_ptr<ProxyDelegate> proxy_delegate_;
@@ -179,9 +199,6 @@ class NET_EXPORT_PRIVATE SpdyProxyClientSocket : public ProxyClientSocket,
 
   // True if the transport socket has ever sent data.
   bool was_ever_used_ = false;
-
-  bool use_fastopen_ = false;
-  bool read_headers_pending_ = false;
 
   const NetLogWithSource net_log_;
   const NetLogSource source_dependency_;

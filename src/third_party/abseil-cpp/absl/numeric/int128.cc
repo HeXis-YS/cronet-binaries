@@ -17,20 +17,22 @@
 #include <stddef.h>
 
 #include <cassert>
+#include <cstdint>
 #include <iomanip>
+#include <ios>
+#include <limits>
 #include <ostream>  // NOLINT(readability/streams)
 #include <sstream>
 #include <string>
 #include <type_traits>
 
+#include "absl/base/attributes.h"
+#include "absl/base/config.h"
 #include "absl/base/optimization.h"
 #include "absl/numeric/bits.h"
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
-
-ABSL_DLL const uint128 kuint128max = MakeUint128(
-    std::numeric_limits<uint64_t>::max(), std::numeric_limits<uint64_t>::max());
 
 namespace {
 
@@ -93,7 +95,7 @@ inline void DivModImpl(uint128 dividend, uint128 divisor, uint128* quotient_ret,
 
 template <typename T>
 uint128 MakeUint128FromFloat(T v) {
-  static_assert(std::is_floating_point<T>::value, "");
+  static_assert(std::is_floating_point_v<T>);
 
   // Rounding behavior is towards zero, same as for built-in types.
 
@@ -117,8 +119,8 @@ uint128 MakeUint128FromFloat(T v) {
 // It is more work, so only use when we need the workaround.
 uint128 MakeUint128FromFloat(long double v) {
   // Go 50 bits at a time, that fits in a double
-  static_assert(std::numeric_limits<double>::digits >= 50, "");
-  static_assert(std::numeric_limits<long double>::digits <= 150, "");
+  static_assert(std::numeric_limits<double>::digits >= 50);
+  static_assert(std::numeric_limits<long double>::digits <= 150);
   // Undefined behavior if v is not finite or cannot fit into uint128.
   assert(std::isfinite(v) && v > -1 && v < std::ldexp(1.0L, 128));
 
@@ -345,55 +347,3 @@ std::ostream& operator<<(std::ostream& os, int128 v) {
 
 ABSL_NAMESPACE_END
 }  // namespace absl
-
-#ifdef ABSL_INTERNAL_NEED_REDUNDANT_CONSTEXPR_DECL
-namespace std {
-constexpr bool numeric_limits<absl::uint128>::is_specialized;
-constexpr bool numeric_limits<absl::uint128>::is_signed;
-constexpr bool numeric_limits<absl::uint128>::is_integer;
-constexpr bool numeric_limits<absl::uint128>::is_exact;
-constexpr bool numeric_limits<absl::uint128>::has_infinity;
-constexpr bool numeric_limits<absl::uint128>::has_quiet_NaN;
-constexpr bool numeric_limits<absl::uint128>::has_signaling_NaN;
-constexpr float_denorm_style numeric_limits<absl::uint128>::has_denorm;
-constexpr bool numeric_limits<absl::uint128>::has_denorm_loss;
-constexpr float_round_style numeric_limits<absl::uint128>::round_style;
-constexpr bool numeric_limits<absl::uint128>::is_iec559;
-constexpr bool numeric_limits<absl::uint128>::is_bounded;
-constexpr bool numeric_limits<absl::uint128>::is_modulo;
-constexpr int numeric_limits<absl::uint128>::digits;
-constexpr int numeric_limits<absl::uint128>::digits10;
-constexpr int numeric_limits<absl::uint128>::max_digits10;
-constexpr int numeric_limits<absl::uint128>::radix;
-constexpr int numeric_limits<absl::uint128>::min_exponent;
-constexpr int numeric_limits<absl::uint128>::min_exponent10;
-constexpr int numeric_limits<absl::uint128>::max_exponent;
-constexpr int numeric_limits<absl::uint128>::max_exponent10;
-constexpr bool numeric_limits<absl::uint128>::traps;
-constexpr bool numeric_limits<absl::uint128>::tinyness_before;
-
-constexpr bool numeric_limits<absl::int128>::is_specialized;
-constexpr bool numeric_limits<absl::int128>::is_signed;
-constexpr bool numeric_limits<absl::int128>::is_integer;
-constexpr bool numeric_limits<absl::int128>::is_exact;
-constexpr bool numeric_limits<absl::int128>::has_infinity;
-constexpr bool numeric_limits<absl::int128>::has_quiet_NaN;
-constexpr bool numeric_limits<absl::int128>::has_signaling_NaN;
-constexpr float_denorm_style numeric_limits<absl::int128>::has_denorm;
-constexpr bool numeric_limits<absl::int128>::has_denorm_loss;
-constexpr float_round_style numeric_limits<absl::int128>::round_style;
-constexpr bool numeric_limits<absl::int128>::is_iec559;
-constexpr bool numeric_limits<absl::int128>::is_bounded;
-constexpr bool numeric_limits<absl::int128>::is_modulo;
-constexpr int numeric_limits<absl::int128>::digits;
-constexpr int numeric_limits<absl::int128>::digits10;
-constexpr int numeric_limits<absl::int128>::max_digits10;
-constexpr int numeric_limits<absl::int128>::radix;
-constexpr int numeric_limits<absl::int128>::min_exponent;
-constexpr int numeric_limits<absl::int128>::min_exponent10;
-constexpr int numeric_limits<absl::int128>::max_exponent;
-constexpr int numeric_limits<absl::int128>::max_exponent10;
-constexpr bool numeric_limits<absl::int128>::traps;
-constexpr bool numeric_limits<absl::int128>::tinyness_before;
-}  // namespace std
-#endif

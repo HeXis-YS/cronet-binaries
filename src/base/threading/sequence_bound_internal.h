@@ -12,7 +12,7 @@
 #include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
-#include "base/functional/callback_helpers.h"
+#include "base/functional/is_callback.h"
 #include "base/location.h"
 #include "base/memory/aligned_memory.h"
 #include "base/memory/raw_ptr.h"
@@ -49,19 +49,20 @@ struct CrossThreadTraits {
                                         std::move(reply));
   }
 
-  template <typename TaskReturnType, typename ReplyArgType>
+  template <typename TaskReturnType, typename... ReplyArgTypes>
   static inline bool PostTaskAndReplyWithResult(
       SequencedTaskRunner& task_runner,
       const Location& location,
       OnceCallback<TaskReturnType()>&& task,
-      OnceCallback<void(ReplyArgType)>&& reply) {
+      OnceCallback<void(ReplyArgTypes...)>&& reply) {
     return task_runner.PostTaskAndReplyWithResult(location, std::move(task),
                                                   std::move(reply));
   }
 
   // Accept RepeatingCallback here since it's convertible to a OnceCallback.
   template <template <typename> class CallbackType>
-  using EnableIfIsCrossThreadTask = EnableIfIsBaseCallback<CallbackType>;
+  static constexpr bool IsCrossThreadTask =
+      IsBaseCallback<CallbackType<void()>>;
 };
 
 template <typename T, typename CrossThreadTraits>
@@ -84,7 +85,7 @@ class Storage {
   template <typename... Args>
   NO_SANITIZE("cfi-unrelated-cast")
   void Construct(SequencedTaskRunner& task_runner, Args&&... args) {
-    // TODO(https://crbug.com/1382549): Use universal forwarding and assert that
+    // TODO(crbug.com/40245687): Use universal forwarding and assert that
     // T is constructible from args for better error messages.
     DCHECK(!alloc_);
     DCHECK(!ptr_);
@@ -165,7 +166,7 @@ struct Storage<std::unique_ptr<T>, CrossThreadTraits> {
 
   template <typename U>
   void Construct(SequencedTaskRunner& task_runner, std::unique_ptr<U> arg) {
-    // TODO(https://crbug.com/1382549): Use universal forwarding and assert that
+    // TODO(crbug.com/40245687): Use universal forwarding and assert that
     // there is one arg that is a unique_ptr for better error messages.
     DCHECK(!ptr_);
 

@@ -6,9 +6,9 @@
 #define NET_DNS_PUBLIC_HOST_RESOLVER_SOURCE_H_
 
 #include <iterator>
+#include <optional>
 
 #include "base/values.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace net {
 
@@ -44,11 +44,11 @@ enum class HostResolverSource {
 
 base::Value ToValue(HostResolverSource source);
 
-// absl::nullopt if `value` is malformed for deserialization.
-absl::optional<HostResolverSource> HostResolverSourceFromValue(
+// std::nullopt if `value` is malformed for deserialization.
+std::optional<HostResolverSource> HostResolverSourceFromValue(
     const base::Value& value);
 
-const HostResolverSource kHostResolverSources[] = {
+inline const HostResolverSource kHostResolverSources[] = {
     HostResolverSource::ANY, HostResolverSource::SYSTEM,
     HostResolverSource::DNS, HostResolverSource::MULTICAST_DNS,
     HostResolverSource::LOCAL_ONLY};

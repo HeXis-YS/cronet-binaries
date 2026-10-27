@@ -41,7 +41,10 @@
 
 #include <__assert>
 #include <__config>
+#include <bit>
 #include <charconv>
+#include <cstdint>
+#include <cstddef>
 
 #include "include/ryu/common.h"
 #include "include/ryu/d2fixed.h"
@@ -86,7 +89,7 @@ inline constexpr uint64_t __FLOAT_POW5_SPLIT[47] = {
 [[nodiscard]] _LIBCPP_HIDE_FROM_ABI inline uint32_t __pow5Factor(uint32_t __value) {
   uint32_t __count = 0;
   for (;;) {
-    _LIBCPP_ASSERT_UNCATEGORIZED(__value != 0, "");
+    _LIBCPP_ASSERT_INTERNAL(__value != 0, "");
     const uint32_t __q = __value / 5;
     const uint32_t __r = __value % 5;
     if (__r != 0) {
@@ -105,14 +108,14 @@ inline constexpr uint64_t __FLOAT_POW5_SPLIT[47] = {
 
 // Returns true if __value is divisible by 2^__p.
 [[nodiscard]] _LIBCPP_HIDE_FROM_ABI inline bool __multipleOfPowerOf2(const uint32_t __value, const uint32_t __p) {
-  _LIBCPP_ASSERT_UNCATEGORIZED(__value != 0, "");
-  _LIBCPP_ASSERT_UNCATEGORIZED(__p < 32, "");
+  _LIBCPP_ASSERT_INTERNAL(__value != 0, "");
+  _LIBCPP_ASSERT_INTERNAL(__p < 32, "");
   // __builtin_ctz doesn't appear to be faster here.
   return (__value & ((1u << __p) - 1)) == 0;
 }
 
 [[nodiscard]] _LIBCPP_HIDE_FROM_ABI inline uint32_t __mulShift(const uint32_t __m, const uint64_t __factor, const int32_t __shift) {
-  _LIBCPP_ASSERT_UNCATEGORIZED(__shift > 32, "");
+  _LIBCPP_ASSERT_INTERNAL(__shift > 32, "");
 
   // The casts here help MSVC to avoid calls to the __allmul library
   // function.
@@ -134,7 +137,7 @@ inline constexpr uint64_t __FLOAT_POW5_SPLIT[47] = {
 #else // ^^^ 32-bit ^^^ / vvv 64-bit vvv
   const uint64_t __sum = (__bits0 >> 32) + __bits1;
   const uint64_t __shiftedSum = __sum >> (__shift - 32);
-  _LIBCPP_ASSERT_UNCATEGORIZED(__shiftedSum <= UINT32_MAX, "");
+  _LIBCPP_ASSERT_INTERNAL(__shiftedSum <= UINT32_MAX, "");
   return static_cast<uint32_t>(__shiftedSum);
 #endif // ^^^ 64-bit ^^^
 }
@@ -309,8 +312,8 @@ struct __floating_decimal_32 {
   // Performance note: Long division appears to be faster than losslessly widening float to double and calling
   // __d2fixed_buffered_n(). If __f2fixed_buffered_n() is implemented, it might be faster than long division.
 
-  _LIBCPP_ASSERT_UNCATEGORIZED(_Exponent2 > 0, "");
-  _LIBCPP_ASSERT_UNCATEGORIZED(_Exponent2 <= 104, ""); // because __ieeeExponent <= 254
+  _LIBCPP_ASSERT_INTERNAL(_Exponent2 > 0, "");
+  _LIBCPP_ASSERT_INTERNAL(_Exponent2 <= 104, ""); // because __ieeeExponent <= 254
 
   // Manually represent _Mantissa2 * 2^_Exponent2 as a large integer. _Mantissa2 is always 24 bits
   // (due to the implicit bit), while _Exponent2 indicates a shift of at most 104 bits.
@@ -328,7 +331,7 @@ struct __floating_decimal_32 {
 
   // _Maxidx is the index of the most significant nonzero element.
   uint32_t _Maxidx = ((24 + static_cast<uint32_t>(_Exponent2) + 31) / 32) - 1;
-  _LIBCPP_ASSERT_UNCATEGORIZED(_Maxidx < _Data_size, "");
+  _LIBCPP_ASSERT_INTERNAL(_Maxidx < _Data_size, "");
 
   const uint32_t _Bit_shift = static_cast<uint32_t>(_Exponent2) % 32;
   if (_Bit_shift <= 8) { // _Mantissa2's 24 bits don't cross an element boundary
@@ -388,9 +391,9 @@ struct __floating_decimal_32 {
     }
   }
 
-  _LIBCPP_ASSERT_UNCATEGORIZED(_Data[0] != 0, "");
+  _LIBCPP_ASSERT_INTERNAL(_Data[0] != 0, "");
   for (uint32_t _Idx = 1; _Idx < _Data_size; ++_Idx) {
-    _LIBCPP_ASSERT_UNCATEGORIZED(_Data[_Idx] == 0, "");
+    _LIBCPP_ASSERT_INTERNAL(_Data[_Idx] == 0, "");
   }
 
   const uint32_t _Data_olength = _Data[0] >= 1000000000 ? 10 : __decimalLength9(_Data[0]);
@@ -533,8 +536,7 @@ struct __floating_decimal_32 {
         static constexpr uint32_t _Max_shifted_mantissa[11] = {
           16777215, 3355443, 671088, 134217, 26843, 5368, 1073, 214, 42, 8, 1 };
 
-        unsigned long _Trailing_zero_bits;
-        (void) _BitScanForward(&_Trailing_zero_bits, __v.__mantissa); // __v.__mantissa is guaranteed nonzero
+        unsigned long _Trailing_zero_bits = std::countr_zero(__v.__mantissa); // __v.__mantissa is guaranteed nonzero
         const uint32_t _Shifted_mantissa = __v.__mantissa >> _Trailing_zero_bits;
         _Can_use_ryu = _Shifted_mantissa <= _Max_shifted_mantissa[_Ryu_exponent];
       }

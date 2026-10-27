@@ -11,13 +11,14 @@
 #include <list>
 #include <string>
 #include <utility>
-#include <vector>
 
 #include "absl/base/attributes.h"
+#include "absl/container/inlined_vector.h"
 #include "absl/strings/string_view.h"
 #include "quiche/common/http/http_header_storage.h"
 #include "quiche/common/platform/api/quiche_export.h"
 #include "quiche/common/platform/api/quiche_logging.h"
+#include "quiche/common/quiche_callbacks.h"
 #include "quiche/common/quiche_linked_hash_map.h"
 #include "quiche/common/quiche_text_utils.h"
 
@@ -73,6 +74,7 @@ class QUICHE_EXPORT HttpHeaderBlock {
 
     absl::string_view value() const { return as_pair().second; }
     const std::pair<absl::string_view, absl::string_view>& as_pair() const;
+    absl::Span<const absl::string_view> fragments() const;
 
     // Size estimate including separators. Used when keys are erased from
     // HttpHeaderBlock.
@@ -84,7 +86,8 @@ class QUICHE_EXPORT HttpHeaderBlock {
     absl::string_view ConsolidatedValue() const;
 
     mutable HttpHeaderStorage* storage_;
-    mutable std::vector<absl::string_view> fragments_;
+    mutable Fragments fragments_;
+    mutable absl::string_view consolidated_;
     // The first element is the key; the second is the consolidated value.
     mutable std::pair<absl::string_view, absl::string_view> pair_;
     size_t size_ = 0;
@@ -98,6 +101,11 @@ class QUICHE_EXPORT HttpHeaderBlock {
 
  public:
   typedef std::pair<absl::string_view, absl::string_view> value_type;
+
+  enum class InsertResult {
+    kInserted,
+    kReplaced,
+  };
 
   // Provides iteration over a sequence of std::pair<absl::string_view,
   // absl::string_view>, even though the underlying MapType::value_type is
@@ -191,9 +199,10 @@ class QUICHE_EXPORT HttpHeaderBlock {
 
   // The next few methods copy data into our backing storage.
 
-  // If key already exists in the block, replaces the value of that key. Else
-  // adds a new header to the end of the block.
-  void insert(const value_type& value);
+  // If key already exists in the block, replaces the value of that key and
+  // returns `kReplaced`. Else adds a new header to the end of the block and
+  // returns `kInserted`.
+  InsertResult insert(const value_type& value);
 
   // If a header with the key is already present, then append the value to the
   // existing header value, NUL ("\0") separated unless the key is cookie, in
@@ -243,6 +252,12 @@ class QUICHE_EXPORT HttpHeaderBlock {
 
   // Allows either lookup or mutation of the value associated with a key.
   ABSL_MUST_USE_RESULT ValueProxy operator[](const absl::string_view key);
+
+  // The function is invoked on each (name, value) pair, where individual value
+  // fragments receive their own invocation.
+  void ForEach(
+      quiche::UnretainedCallback<void(absl::string_view, absl::string_view)> fn)
+      const;
 
   size_t TotalBytesUsed() const { return key_size_ + value_size_; }
 

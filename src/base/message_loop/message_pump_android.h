@@ -6,39 +6,49 @@
 #define BASE_MESSAGE_LOOP_MESSAGE_PUMP_ANDROID_H_
 
 #include <jni.h>
-#include <memory>
+#include <stdint.h>
 
-#include "base/android/scoped_java_ref.h"
+#include <memory>
+#include <optional>
+
 #include "base/base_export.h"
-#include "base/compiler_specific.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/message_loop/message_pump.h"
 #include "base/time/time.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 struct ALooper;
 
 namespace base {
 
+class IOWatcher;
 class RunLoop;
 
-// This class implements a MessagePump needed for TYPE_UI MessageLoops on
-// OS_ANDROID platform.
-class BASE_EXPORT MessagePumpForUI : public MessagePump {
+// This class implements a MessagePump needed for MessagePumpType::UI and
+// MessagePumpType::JAVA MessageLoops on OS_ANDROID platform.
+//
+// It works by registering two file descriptors for the Looper to additionally
+// poll: one for delayed work and one for non-delayed work. For queueing
+// immediate work within the Looper it writes to the eventfd(2). For delayed
+// work it performs timerfd_settime(2).
+//
+// See: https://developer.android.com/ndk/reference/group/looper.
+class BASE_EXPORT MessagePumpAndroid : public MessagePump {
  public:
-  MessagePumpForUI();
+  MessagePumpAndroid();
 
-  MessagePumpForUI(const MessagePumpForUI&) = delete;
-  MessagePumpForUI& operator=(const MessagePumpForUI&) = delete;
+  MessagePumpAndroid(const MessagePumpAndroid&) = delete;
+  MessagePumpAndroid& operator=(const MessagePumpAndroid&) = delete;
 
-  ~MessagePumpForUI() override;
+  ~MessagePumpAndroid() override;
 
   void Run(Delegate* delegate) override;
   void Quit() override;
   void ScheduleWork() override;
   void ScheduleDelayedWork(
       const Delegate::NextWorkInfo& next_work_info) override;
+  IOWatcher* GetIOWatcher() override;
+  bool IsAsyncIOSupported() override;
 
   // Attaches |delegate| to this native MessagePump. |delegate| will from then
   // on be invoked by the native loop to process application tasks.
@@ -59,7 +69,9 @@ class BASE_EXPORT MessagePumpForUI : public MessagePump {
   // These functions are only public so that the looper callbacks can call them,
   // and should not be called from outside this class.
   void OnDelayedLooperCallback();
-  void OnNonDelayedLooperCallback();
+  virtual void OnNonDelayedLooperCallback();  // Overridden for testing.
+
+  void set_is_type_ui(bool is_type_ui) { is_type_ui_ = is_type_ui; }
 
  protected:
   Delegate* SetDelegate(Delegate* delegate);
@@ -69,7 +81,13 @@ class BASE_EXPORT MessagePumpForUI : public MessagePump {
 
  private:
   void ScheduleWorkInternal(bool do_idle_work);
-  void DoIdleWork();
+
+  void OnReturnFromLooper();
+
+  // Records the current stack pointer as the "pseudo stack top" for
+  // conservative stack scanning if this pump runs on the main thread.
+  // See message_pump_android.cc for more details.
+  void MaybeUpdatePseudoStackTop();
 
   // Unlike other platforms, we don't control the message loop as it's
   // controlled by the Android Looper, so we can't run a RunLoop to keep the
@@ -91,7 +109,7 @@ class BASE_EXPORT MessagePumpForUI : public MessagePump {
   // delayed task. This avoids redundantly scheduling |delayed_fd_| with the
   // same timeout when subsequent work phases all go idle on the same pending
   // delayed task; nullopt if no wakeup is currently scheduled.
-  absl::optional<TimeTicks> delayed_scheduled_time_;
+  std::optional<TimeTicks> delayed_scheduled_time_;
 
   // If set, a callback to fire when the message pump is quit.
   base::OnceClosure on_quit_callback_;
@@ -107,6 +125,21 @@ class BASE_EXPORT MessagePumpForUI : public MessagePump {
 
   // The JNIEnv* for this thread, used to check for pending exceptions.
   raw_ptr<JNIEnv> env_;
+
+  // Whether this message serves a MessagePumpType::UI, and therefore can
+  // consult with the input hint living on the UI thread.
+  bool is_type_ui_ = false;
+
+  // Whether this message pump is running on the main thread, and therefore
+  // should update the pseudo stack top for conservative stack scanning.
+  const bool should_update_pseudo_stack_top_;
+
+  // The highest stack address observed by MaybeUpdatePseudoStackTop() so far,
+  // or 0 if none. Only used when PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC)
+  [[maybe_unused]] uintptr_t pseudo_stack_top_ = 0;
+
+  // The IOWatcher for this thread, lazily initialized as needed.
+  std::unique_ptr<IOWatcher> io_watcher_;
 };
 
 }  // namespace base

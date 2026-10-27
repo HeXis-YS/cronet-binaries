@@ -7,9 +7,10 @@
 
 #include <resolv.h>
 
+#include <optional>
+
 #include "build/build_config.h"
 #include "net/base/net_export.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace net {
 
@@ -31,7 +32,7 @@ class NET_EXPORT ScopedResState {
   virtual const struct __res_state& state() const;
 
  private:
-#if !BUILDFLAG(IS_OPENBSD) && !BUILDFLAG(IS_FUCHSIA) && !defined(__MUSL__)
+#if !BUILDFLAG(IS_OPENBSD) && !BUILDFLAG(IS_FUCHSIA)
   struct __res_state res_;
 #endif  // !BUILDFLAG(IS_OPENBSD) && !BUILDFLAG(IS_FUCHSIA)
 

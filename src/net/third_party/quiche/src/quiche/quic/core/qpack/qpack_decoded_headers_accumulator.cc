@@ -4,18 +4,23 @@
 
 #include "quiche/quic/core/qpack/qpack_decoded_headers_accumulator.h"
 
+#include <utility>
+
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/qpack/qpack_decoder.h"
 #include "quiche/quic/core/qpack/qpack_header_table.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
 #include "quiche/quic/platform/api/quic_flags.h"
+#include "quiche/common/platform/api/quiche_flag_utils.h"
+#include "quiche/common/platform/api/quiche_flags.h"
 
 namespace quic {
 
 QpackDecodedHeadersAccumulator::QpackDecodedHeadersAccumulator(
     QuicStreamId id, QpackDecoder* qpack_decoder, Visitor* visitor,
     size_t max_header_list_size)
-    : decoder_(qpack_decoder->CreateProgressiveDecoder(id, this)),
+    : decoder_(qpack_decoder->CreateProgressiveDecoder(id, max_header_list_size,
+                                                       this)),
       visitor_(visitor),
       max_header_list_size_(max_header_list_size),
       uncompressed_header_bytes_including_overhead_(0),
@@ -24,7 +29,6 @@ QpackDecodedHeadersAccumulator::QpackDecodedHeadersAccumulator(
       header_list_size_limit_exceeded_(false),
       headers_decoded_(false),
       error_detected_(false) {
-  quic_header_list_.OnHeaderBlockStart();
 }
 
 void QpackDecodedHeadersAccumulator::OnHeaderDecoded(absl::string_view name,

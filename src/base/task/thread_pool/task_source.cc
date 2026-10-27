@@ -12,8 +12,9 @@
 #include "base/task/task_features.h"
 #include "base/task/thread_pool/task_tracker.h"
 
-namespace base {
-namespace internal {
+namespace base::internal {
+
+ExecutionEnvironment::~ExecutionEnvironment() = default;
 
 TaskSource::Transaction::Transaction(TaskSource* task_source)
     : task_source_(task_source) {
@@ -32,9 +33,16 @@ TaskSource::Transaction::~Transaction() {
 }
 
 void TaskSource::Transaction::UpdatePriority(TaskPriority priority) {
+  DCHECK(!task_source_->traits_.inherit_thread_type());
   task_source_->traits_.UpdatePriority(priority);
-  task_source_->priority_racy_.store(task_source_->traits_.priority(),
-                                     std::memory_order_relaxed);
+  task_source_->thread_type_racy_.store(TaskPriorityToThreadType(priority),
+                                        std::memory_order_relaxed);
+}
+
+ThreadType TaskSource::Transaction::thread_type() const {
+  return EffectiveThreadType(task_source_->traits_,
+                             task_source_->originating_thread_type_,
+                             task_source_->inherit_by_default_);
 }
 
 void TaskSource::Transaction::Release() NO_THREAD_SAFETY_ANALYSIS {
@@ -61,16 +69,16 @@ void TaskSource::ClearDelayedHeapHandle() {
 }
 
 TaskSource::TaskSource(const TaskTraits& traits,
-                       TaskRunner* task_runner,
-                       TaskSourceExecutionMode execution_mode)
+                       TaskSourceExecutionMode execution_mode,
+                       ThreadType originating_thread_type,
+                       bool inherit_by_default)
     : traits_(traits),
-      priority_racy_(traits.priority()),
-      task_runner_(task_runner),
-      execution_mode_(execution_mode) {
-  DCHECK(task_runner_ ||
-         execution_mode_ == TaskSourceExecutionMode::kParallel ||
-         execution_mode_ == TaskSourceExecutionMode::kJob);
-}
+      thread_type_racy_(EffectiveThreadType(traits,
+                                            originating_thread_type,
+                                            inherit_by_default)),
+      originating_thread_type_(originating_thread_type),
+      inherit_by_default_(inherit_by_default),
+      execution_mode_(execution_mode) {}
 
 TaskSource::~TaskSource() {
   // If this fails, a Transaction was likely held while releasing a reference to
@@ -86,7 +94,9 @@ TaskSource::Transaction TaskSource::BeginTransaction() {
 
 void TaskSource::ClearForTesting() {
   auto task = Clear(nullptr);
-  std::move(task.task).Run();
+  if (task) {
+    std::move(task->task).Run();
+  }
 }
 
 RegisteredTaskSource::RegisteredTaskSource() = default;
@@ -119,8 +129,9 @@ scoped_refptr<TaskSource> RegisteredTaskSource::Unregister() {
 #if DCHECK_IS_ON()
   DCHECK_EQ(run_step_, State::kInitial);
 #endif  // DCHECK_IS_ON()
-  if (task_source_ && task_tracker_)
+  if (task_source_ && task_tracker_) {
     return task_tracker_->UnregisterTaskSource(std::move(task_source_));
+  }
   return std::move(task_source_);
 }
 
@@ -139,8 +150,9 @@ TaskSource::RunStatus RegisteredTaskSource::WillRunTask() {
   TaskSource::RunStatus run_status = task_source_->WillRunTask();
 #if DCHECK_IS_ON()
   DCHECK_EQ(run_step_, State::kInitial);
-  if (run_status != TaskSource::RunStatus::kDisallowed)
+  if (run_status != TaskSource::RunStatus::kDisallowed) {
     run_step_ = State::kReady;
+  }
 #endif  // DCHECK_IS_ON()
   return run_status;
 }
@@ -153,7 +165,8 @@ Task RegisteredTaskSource::TakeTask(TaskSource::Transaction* transaction) {
   return task_source_->TakeTask(transaction);
 }
 
-Task RegisteredTaskSource::Clear(TaskSource::Transaction* transaction) {
+std::optional<Task> RegisteredTaskSource::Clear(
+    TaskSource::Transaction* transaction) {
   DCHECK(!transaction || transaction->task_source() == get());
   return task_source_->Clear(transaction);
 }
@@ -220,5 +233,4 @@ TaskSourceAndTransaction TaskSourceAndTransaction::FromTaskSource(
                                   std::move(transaction));
 }
 
-}  // namespace internal
-}  // namespace base
+}  // namespace base::internal

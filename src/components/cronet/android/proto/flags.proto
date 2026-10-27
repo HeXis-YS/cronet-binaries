@@ -18,9 +18,18 @@ message FlagValue {
   // A possible value for this flag, along with a set of constraints that have
   // to be met for that value to be used.
   message ConstrainedValue {
-    // App selector: only apply this value to applications whose package ID
-    // matches the value of this field, e.g. "com.google.foo".
-    // If not set, matches all apps.
+    // App selector:
+    // * If not set, matches all apps.
+    // * If the value ends with a dot (.), it matches any application whose
+    //   package ID starts with this value. For example, "com.google." matches
+    //   "com.google.foo" and "com.google.bar".
+    //   Note: the prefix matching (ending with a dot) was introduced in March
+    //   2026 (https://crrev.com/c/7603018). Older versions of Cronet do not
+    //   support prefix matching. These versions will attempt to do an exact
+    //   match, and since app IDs cannot end with a dot, no match can ever
+    //   occur.
+    // * Otherwise, matches only applications whose package ID equals the value
+    //   of this field, e.g. "com.google.foo".
     optional string app_id = 1;
 
     // Only apply this value to client libraries running at least this version.
@@ -37,6 +46,22 @@ message FlagValue {
     //
     // If not set, matches all versions. The empty string is not a valid value.
     optional string min_version = 2;
+
+    // If set to true, Cronet will consider this flag value even if telemetry is
+    // disabled. By default, flags are NOT applied if telemetry is disabled, to
+    // avoid "blindly" pushing flags to apps that cannot tell us about
+    // regressions in Cronet metrics.
+    //
+    // Note that in the case of the Cronet API layer, if the app does not
+    // explicitly opt in or out of telemetry through its manifest, then it is
+    // not possible to know in advance if telemetry is going to be enabled or
+    // disabled, because that depends on the source which is not yet known. In
+    // this case, we use a heuristic where we treat telemetry as disabled if the
+    // app happens to bundle native Cronet.
+    //
+    // Note: this field was introduced in July 2025; older versions of Cronet
+    // will not honor this flag, and will behave as if it is set to true.
+    optional bool apply_even_if_cronet_telemetry_disabled = 8;
 
     // If none of these fields are set, the flag is deemed to be unset.
     oneof value {

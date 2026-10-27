@@ -1,0 +1,109 @@
+--- a/src/third_party/perfetto/src/tracing/service/BUILD.gn
++++ b/src/third_party/perfetto/src/tracing/service/BUILD.gn
+@@ -12,7 +12,6 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-import("../../../gn/fuzzer.gni")
+ import("../../../gn/perfetto.gni")
+ import("../../../gn/test.gni")
+ 
+@@ -128,98 +127,3 @@
+   }
+ }
+ 
+-perfetto_unittest_source_set("unittests") {
+-  testonly = true
+-  deps = [
+-    ":service",
+-    "../../../gn:default_deps",
+-    "../../../gn:gtest_and_gmock",
+-    "../../../protos/perfetto/common:semantic_type_cpp",
+-    "../../../protos/perfetto/config/protovm:cpp",
+-    "../../../protos/perfetto/protovm:cpp",
+-    "../../../protos/perfetto/trace:cpp",
+-    "../../../protos/perfetto/trace:zero",
+-    "../../../protos/perfetto/trace/ftrace:cpp",
+-    "../../../protos/perfetto/trace/perfetto:cpp",
+-    "../../../src/protozero/filtering:bytecode_generator",
+-    "../../base",
+-    "../../base:test_support",
+-    "../core",
+-    "../test:test_support",
+-  ]
+-
+-  if (enable_perfetto_zlib) {
+-    deps += [
+-      ":zlib_compressor",
+-      "../../../gn:zlib",
+-    ]
+-  }
+-
+-  if (enable_perfetto_zstd) {
+-    deps += [
+-      ":zstd_compressor",
+-      "../../../gn:zstd",
+-    ]
+-  }
+-
+-  sources = [
+-    "histogram_unittest.cc",
+-    "packet_stream_validator_unittest.cc",
+-    "trace_buffer_v1_unittest.cc",
+-    "trace_buffer_v2_unittest.cc",
+-  ]
+-
+-  if (enable_perfetto_zlib || enable_perfetto_zstd) {
+-    deps += [ ":packet_compressor_common" ]
+-    sources += [ "compressor_unittest.cc" ]
+-  }
+-
+-  # These tests rely on test_task_runner.h which
+-  # has no Windows implementation.
+-  if (!is_win) {
+-    sources += [ "tracing_service_impl_unittest.cc" ]
+-  }
+-}
+-
+-if (enable_perfetto_benchmarks) {
+-  source_set("benchmarks") {
+-    testonly = true
+-    deps = [
+-      ":service",
+-      "../../../gn:benchmark",
+-      "../../../gn:default_deps",
+-      "../../../protos/perfetto/trace:zero",
+-      "../../../protos/perfetto/trace/ftrace:zero",
+-      "../../../protos/perfetto/trace/track_event:zero",
+-      "../../../protos/third_party/android/art:art_heap_graph_zero",
+-      "../../protozero",
+-      "../core",
+-      "../test:test_support",
+-    ]
+-    sources = [
+-      "compression_benchmark.cc",
+-      "packet_stream_validator_benchmark.cc",
+-      "trace_buffer_benchmark.cc",
+-    ]
+-    if (enable_perfetto_zlib) {
+-      deps += [
+-        ":zlib_compressor",
+-        "../../../gn:zlib",
+-      ]
+-    }
+-    if (enable_perfetto_zstd) {
+-      deps += [
+-        ":zstd_compressor",
+-        "../../../gn:zstd",
+-      ]
+-    }
+-  }
+-}
+-
+-perfetto_fuzzer_test("packet_stream_validator_fuzzer") {
+-  sources = [ "packet_stream_validator_fuzzer.cc" ]
+-  deps = [
+-    ":service",
+-    "../../../gn:default_deps",
+-  ]
+-}

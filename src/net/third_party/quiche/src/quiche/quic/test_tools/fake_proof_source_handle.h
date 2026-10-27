@@ -5,8 +5,20 @@
 #ifndef QUICHE_QUIC_TEST_TOOLS_FAKE_PROOF_SOURCE_HANDLE_H_
 #define QUICHE_QUIC_TEST_TOOLS_FAKE_PROOF_SOURCE_HANDLE_H_
 
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "absl/base/nullability.h"
+#include "absl/strings/string_view.h"
+#include "openssl/base.h"
 #include "quiche/quic/core/crypto/proof_source.h"
 #include "quiche/quic/core/quic_connection_id.h"
+#include "quiche/quic/core/quic_types.h"
+#include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/common/quiche_callbacks.h"
 
 namespace quic {
 namespace test {
@@ -31,11 +43,15 @@ class FakeProofSourceHandle : public ProofSourceHandle {
   };
 
   // |delegate| must do cert selection and signature synchronously.
-  // |dealyed_ssl_config| is the config passed to OnSelectCertificateDone.
+  // |delayed_ssl_config| is the config passed to OnSelectCertificateDone.
+  // |pending_callback| is called when a pending operation is started, so that
+  // CompletePendingOperation() can be scheduled on a thread.
   FakeProofSourceHandle(
-      ProofSource* delegate, ProofSourceHandleCallback* callback,
+      ProofSource* absl_nonnull delegate,
+      ProofSourceHandleCallback* absl_nonnull callback,
       Action select_cert_action, Action compute_signature_action,
-      QuicDelayedSSLConfig dealyed_ssl_config = QuicDelayedSSLConfig());
+      QuicDelayedSSLConfig delayed_ssl_config = QuicDelayedSSLConfig(),
+      quiche::SingleUseCallback<void()> pending_callback = nullptr);
 
   ~FakeProofSourceHandle() override = default;
 
@@ -46,11 +62,12 @@ class FakeProofSourceHandle : public ProofSourceHandle {
       const QuicSocketAddress& client_address,
       const QuicConnectionId& original_connection_id,
       absl::string_view ssl_capabilities, const std::string& hostname,
-      absl::string_view client_hello, const std::string& alpn,
-      absl::optional<std::string> alps,
+      const SSL_CLIENT_HELLO& client_hello, const std::string& alpn,
+      std::optional<std::string> alps,
       const std::vector<uint8_t>& quic_transport_params,
-      const absl::optional<std::vector<uint8_t>>& early_data_context,
-      const QuicSSLConfig& ssl_config) override;
+      const std::optional<std::vector<uint8_t>>& early_data_context,
+      const QuicSSLConfig& ssl_config,
+      bool disable_alps_explicit_codepoint) override;
 
   QuicAsyncStatus ComputeSignature(const QuicSocketAddress& server_address,
                                    const QuicSocketAddress& client_address,
@@ -70,34 +87,34 @@ class FakeProofSourceHandle : public ProofSourceHandle {
                    QuicSocketAddress client_address,
                    QuicConnectionId original_connection_id,
                    absl::string_view ssl_capabilities, std::string hostname,
-                   absl::string_view client_hello, std::string alpn,
-                   absl::optional<std::string> alps,
+                   std::string alpn, std::optional<std::string> alps,
                    std::vector<uint8_t> quic_transport_params,
-                   absl::optional<std::vector<uint8_t>> early_data_context,
-                   QuicSSLConfig ssl_config)
+                   std::optional<std::vector<uint8_t>> early_data_context,
+                   QuicSSLConfig ssl_config,
+                   bool disable_alps_explicit_codepoint)
         : server_address(server_address),
           client_address(client_address),
           original_connection_id(original_connection_id),
           ssl_capabilities(ssl_capabilities),
           hostname(hostname),
-          client_hello(client_hello),
           alpn(alpn),
           alps(alps),
           quic_transport_params(quic_transport_params),
           early_data_context(early_data_context),
-          ssl_config(ssl_config) {}
+          ssl_config(ssl_config),
+          disable_alps_explicit_codepoint(disable_alps_explicit_codepoint) {}
 
     QuicSocketAddress server_address;
     QuicSocketAddress client_address;
     QuicConnectionId original_connection_id;
     std::string ssl_capabilities;
     std::string hostname;
-    std::string client_hello;
     std::string alpn;
-    absl::optional<std::string> alps;
+    std::optional<std::string> alps;
     std::vector<uint8_t> quic_transport_params;
-    absl::optional<std::vector<uint8_t>> early_data_context;
+    std::optional<std::vector<uint8_t>> early_data_context;
     QuicSSLConfig ssl_config;
+    bool disable_alps_explicit_codepoint;
   };
 
   struct ComputeSignatureArgs {
@@ -148,7 +165,7 @@ class FakeProofSourceHandle : public ProofSourceHandle {
     SelectCertOperation(ProofSource* delegate,
                         ProofSourceHandleCallback* callback, Action action,
                         SelectCertArgs args,
-                        QuicDelayedSSLConfig dealyed_ssl_config);
+                        QuicDelayedSSLConfig delayed_ssl_config);
 
     ~SelectCertOperation() override = default;
 
@@ -156,7 +173,7 @@ class FakeProofSourceHandle : public ProofSourceHandle {
 
    private:
     const SelectCertArgs args_;
-    const QuicDelayedSSLConfig dealyed_ssl_config_;
+    const QuicDelayedSSLConfig delayed_ssl_config_;
   };
 
   class ComputeSignatureOperation : public PendingOperation {
@@ -177,19 +194,22 @@ class FakeProofSourceHandle : public ProofSourceHandle {
   int NumPendingOperations() const;
 
   bool closed_ = false;
-  ProofSource* delegate_;
-  ProofSourceHandleCallback* callback_;
+  ProofSource* absl_nonnull delegate_;
+  ProofSourceHandleCallback* absl_nonnull callback_;
   // Action for the next select cert operation.
   Action select_cert_action_ = Action::DELEGATE_SYNC;
   // Action for the next compute signature operation.
   Action compute_signature_action_ = Action::DELEGATE_SYNC;
-  const QuicDelayedSSLConfig dealyed_ssl_config_;
-  absl::optional<SelectCertOperation> select_cert_op_;
-  absl::optional<ComputeSignatureOperation> compute_signature_op_;
+  const QuicDelayedSSLConfig delayed_ssl_config_;
+  std::optional<SelectCertOperation> select_cert_op_;
+  std::optional<ComputeSignatureOperation> compute_signature_op_;
 
   // Save all the select cert and compute signature args for tests to inspect.
   std::vector<SelectCertArgs> all_select_cert_args_;
   std::vector<ComputeSignatureArgs> all_compute_signature_args_;
+
+  // Called when SelectCertificate() returns PENDING.
+  quiche::SingleUseCallback<void()> pending_callback_;
 };
 
 }  // namespace test

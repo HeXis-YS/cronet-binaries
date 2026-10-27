@@ -4,8 +4,12 @@
 
 #include "quiche/quic/core/crypto/web_transport_fingerprint_proof_verifier.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "absl/strings/escaping.h"
 #include "absl/strings/match.h"
@@ -14,10 +18,13 @@
 #include "absl/strings/string_view.h"
 #include "openssl/sha.h"
 #include "quiche/quic/core/crypto/certificate_view.h"
+#include "quiche/quic/core/crypto/proof_verifier.h"
 #include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_utils.h"
+#include "quiche/quic/core/quic_versions.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
+#include "quiche/quic/platform/api/quic_logging.h"
 #include "quiche/common/quiche_text_utils.h"
 
 namespace quic {
@@ -39,6 +46,12 @@ void NormalizeFingerprint(CertificateFingerprint& fingerprint) {
 
 constexpr char CertificateFingerprint::kSha256[];
 constexpr char WebTransportHash::kSha256[];
+
+WebTransportFingerprintProofVerifier::Details::Details(
+    Status status, absl::string_view cert, const CertificateView& parsed_cert)
+    : status_(status),
+      cert_(cert),
+      spki_sha256_hash_(RawSha256(parsed_cert.raw_spki())) {}
 
 ProofVerifyDetails* WebTransportFingerprintProofVerifier::Details::Clone()
     const {
@@ -83,8 +96,13 @@ bool WebTransportFingerprintProofVerifier::AddFingerprint(
 
   std::string normalized =
       absl::StrReplaceAll(fingerprint.fingerprint, {{":", ""}});
-  hashes_.push_back(WebTransportHash{fingerprint.algorithm,
-                                     absl::HexStringToBytes(normalized)});
+  std::string normalized_bytes;
+  if (!absl::HexStringToBytes(normalized, &normalized_bytes)) {
+    QUIC_DLOG(WARNING) << "Fingerprint hexadecimal is invalid";
+    return false;
+  }
+  hashes_.push_back(
+      WebTransportHash{fingerprint.algorithm, std::move(normalized_bytes)});
   return true;
 }
 
@@ -120,20 +138,14 @@ QuicAsyncStatus WebTransportFingerprintProofVerifier::VerifyProof(
 
 QuicAsyncStatus WebTransportFingerprintProofVerifier::VerifyCertChain(
     const std::string& /*hostname*/, const uint16_t /*port*/,
-    const std::vector<std::string>& certs, const std::string& /*ocsp_response*/,
-    const std::string& /*cert_sct*/, const ProofVerifyContext* /*context*/,
-    std::string* error_details, std::unique_ptr<ProofVerifyDetails>* details,
-    uint8_t* /*out_alert*/,
+    const std::vector<absl::string_view>& certs,
+    const std::string& /*ocsp_response*/, const std::string& /*cert_sct*/,
+    const ProofVerifyContext* /*context*/, std::string* error_details,
+    std::unique_ptr<ProofVerifyDetails>* details, uint8_t* /*out_alert*/,
     std::unique_ptr<ProofVerifierCallback> /*callback*/) {
   if (certs.empty()) {
     *details = std::make_unique<Details>(Status::kInternalError);
     *error_details = "No certificates provided";
-    return QUIC_FAILURE;
-  }
-
-  if (!HasKnownFingerprint(certs[0])) {
-    *details = std::make_unique<Details>(Status::kUnknownFingerprint);
-    *error_details = "Certificate does not match any fingerprint";
     return QUIC_FAILURE;
   }
 
@@ -145,8 +157,16 @@ QuicAsyncStatus WebTransportFingerprintProofVerifier::VerifyCertChain(
     return QUIC_FAILURE;
   }
 
+  if (!HasKnownFingerprint(certs[0])) {
+    *details =
+        std::make_unique<Details>(Status::kUnknownFingerprint, certs[0], *view);
+    *error_details = "Certificate does not match any fingerprint";
+    return QUIC_FAILURE;
+  }
+
   if (!HasValidExpiry(*view)) {
-    *details = std::make_unique<Details>(Status::kExpiryTooLong);
+    *details =
+        std::make_unique<Details>(Status::kExpiryTooLong, certs[0], *view);
     *error_details =
         absl::StrCat("Certificate expiry exceeds the configured limit of ",
                      max_validity_days_, " days");
@@ -154,21 +174,23 @@ QuicAsyncStatus WebTransportFingerprintProofVerifier::VerifyCertChain(
   }
 
   if (!IsWithinValidityPeriod(*view)) {
-    *details = std::make_unique<Details>(Status::kExpired);
+    *details = std::make_unique<Details>(Status::kExpired, certs[0], *view);
     *error_details =
         "Certificate has expired or has validity listed in the future";
     return QUIC_FAILURE;
   }
 
   if (!IsKeyTypeAllowedByPolicy(*view)) {
-    *details = std::make_unique<Details>(Status::kDisallowedKeyAlgorithm);
+    *details = std::make_unique<Details>(Status::kDisallowedKeyAlgorithm,
+                                         certs[0], *view);
     *error_details =
         absl::StrCat("Certificate uses a disallowed public key type (",
                      PublicKeyTypeToString(view->public_key_type()), ")");
     return QUIC_FAILURE;
   }
 
-  *details = std::make_unique<Details>(Status::kValidCertificate);
+  *details =
+      std::make_unique<Details>(Status::kValidCertificate, certs[0], *view);
   return QUIC_SUCCESS;
 }
 

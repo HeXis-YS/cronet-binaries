@@ -5,37 +5,24 @@
 #ifndef NET_HTTP_TRANSPORT_SECURITY_STATE_SOURCE_H_
 #define NET_HTTP_TRANSPORT_SECURITY_STATE_SOURCE_H_
 
+// Note that this include list also includes all the headers for types used
+// in the generated output of transport_security_state_static.template.
+
 #include <stddef.h>
 #include <stdint.h>
 
+#include "base/containers/span.h"
 #include "base/memory/raw_ptr_exclusion.h"
-#include "net/base/net_export.h"
 
 namespace net {
 
-// kNoReportURI is a placeholder for when a pinset does not have a report URI.
-NET_EXPORT_PRIVATE extern const char kNoReportURI[];
-
 struct TransportSecurityStateSource {
-  struct Pinset {
-    // This field is not a raw_ptr<> because it was filtered by the rewriter
-    // for: #global-scope
-    RAW_PTR_EXCLUSION const char* const* const accepted_pins;
-    // This field is not a raw_ptr<> because it was filtered by the rewriter
-    // for: #global-scope
-    RAW_PTR_EXCLUSION const char* const* const rejected_pins;
-    const char* const report_uri;
-  };
-
-  const uint8_t* huffman_tree;
-  size_t huffman_tree_size;
-  const uint8_t* preloaded_data;
+  // RAW_PTR_EXCLUSION: huffman_tree always points to static data.
+  RAW_PTR_EXCLUSION const base::span<const uint8_t> huffman_tree;
+  // RAW_PTR_EXCLUSION: preloaded_data always points to static data.
+  RAW_PTR_EXCLUSION const base::span<const uint8_t> preloaded_data;
   size_t preloaded_bits;
   size_t root_position;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #global-scope
-  RAW_PTR_EXCLUSION const Pinset* pinsets;
-  size_t pinsets_count;
 };
 
 }  // namespace net

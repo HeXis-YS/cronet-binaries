@@ -5,12 +5,14 @@
 #ifndef QUICHE_QUIC_CORE_CRYPTO_CRYPTO_HANDSHAKE_H_
 #define QUICHE_QUIC_CORE_CRYPTO_CRYPTO_HANDSHAKE_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "quiche/quic/core/quic_packets.h"
-#include "quiche/quic/platform/api/quic_export.h"
+#include "quiche/quic/core/quic_tag.h"
+#include "quiche/common/platform/api/quiche_export.h"
+#include "quiche/common/platform/api/quiche_reference_counted.h"
 
 namespace quic {
 
@@ -149,6 +151,9 @@ struct QUICHE_EXPORT QuicCryptoNegotiatedParameters
   // connections not using TLS, or if the TLS handshake is not finished yet.
   uint16_t cipher_suite = 0;
   uint16_t key_exchange_group = 0;
+  // The signature algorithm that the server used to sign messages during the
+  // TLS handshake.
+  uint16_t signature_algorithm_used = 0;
   uint16_t peer_signature_algorithm = 0;
   bool encrypted_client_hello = false;
 

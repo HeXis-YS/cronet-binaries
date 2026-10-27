@@ -11,6 +11,8 @@
 
 #import <Cocoa/Cocoa.h>
 
+#import "base/compiler_specific.h"
+
 @interface AppDelegate : NSObject <NSApplicationDelegate>
 @end
 
@@ -98,7 +100,12 @@
   // It is important to write this dictionary to the named pipe non-atomically,
   // as otherwise the write would replace the named pipe with a regular file
   // rather than writing to the pipe.
-  [event_dict writeToURL:_fifo_url atomically:NO];
+  NSData* plist_data = [NSPropertyListSerialization
+      dataWithPropertyList:event_dict
+                    format:NSPropertyListXMLFormat_v1_0
+                   options:0
+                     error:nil];
+  [plist_data writeToURL:_fifo_url options:0 error:nil];
 }
 
 @end
@@ -107,9 +114,12 @@ __attribute__((visibility("default"))) int main(int argc, char** argv) {
   [NSApplication sharedApplication];
 
   NSMutableArray* command_line = [[NSMutableArray alloc] initWithCapacity:argc];
-  for (int i = 0; i < argc; ++i) {
-    [command_line addObject:[NSString stringWithUTF8String:argv[i]]];
-  }
+  // SAFETY: Standard C++ main contract.
+  UNSAFE_BUFFERS({
+    for (int i = 0; i < argc; ++i) {
+      [command_line addObject:[NSString stringWithUTF8String:argv[i]]];
+    }
+  });
 
   AppDelegate* delegate =
       [[AppDelegate alloc] initWithCommandLine:command_line];

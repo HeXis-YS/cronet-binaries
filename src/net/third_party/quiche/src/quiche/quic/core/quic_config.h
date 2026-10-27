@@ -7,15 +7,22 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 
-#include "absl/types/optional.h"
 #include "quiche/quic/core/crypto/transport_parameters.h"
 #include "quiche/quic/core/quic_connection_id.h"
-#include "quiche/quic/core/quic_packets.h"
+#include "quiche/quic/core/quic_error_codes.h"
+#include "quiche/quic/core/quic_tag.h"
 #include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_types.h"
-#include "quiche/quic/platform/api/quic_export.h"
+#include "quiche/quic/core/quic_versions.h"
+#include "quiche/quic/platform/api/quic_flag_utils.h"
+#include "quiche/quic/platform/api/quic_flags.h"
+#include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/common/platform/api/quiche_export.h"
+#include "quiche/common/quiche_ip_address_family.h"
 
 namespace quic {
 
@@ -246,11 +253,24 @@ class QUICHE_EXPORT QuicConfig {
 
   void SetConnectionOptionsToSend(const QuicTagVector& connection_options);
 
+  void AddConnectionOptionsToSend(const QuicTagVector& connection_options);
+
   bool HasReceivedConnectionOptions() const;
+
+  // Sets the data length to be sent for transport parameter 'discard'. The data
+  // to send in the transport parameter will be all zeros. Negative values means
+  // do not send.
+  void SetDiscardLengthToSend(int32_t discard_length);
+
+  int32_t GetDiscardLengthReceived() const { return discard_length_received_; }
 
   void SetGoogleHandshakeMessageToSend(std::string message);
 
-  const absl::optional<std::string>& GetReceivedGoogleHandshakeMessage() const;
+  const std::optional<std::string>& GetReceivedGoogleHandshakeMessage() const;
+
+  void SetDebuggingSniToSend(const std::string& debugging_sni);
+
+  const std::optional<std::string>& GetReceivedDebuggingSni() const;
 
   // Sets initial received connection options.  All received connection options
   // will be initialized with these fields. Initial received options may only be
@@ -329,6 +349,18 @@ class QUICHE_EXPORT QuicConfig {
   size_t max_undecryptable_packets() const {
     return max_undecryptable_packets_;
   }
+
+  void set_scone_packet_interval(QuicTimeDelta interval) {
+    scone_packet_interval_ = interval;
+  }
+
+  QuicTimeDelta scone_packet_interval() const { return scone_packet_interval_; }
+
+  void set_parse_scone_packets(bool parse_scone_packets) {
+    parse_scone_packets_ = parse_scone_packets;
+  }
+
+  bool parse_scone_packets() const { return parse_scone_packets_; }
 
   // Peer's connection id length, in bytes. Only used in Q043 and Q046.
   bool HasSetBytesForConnectionIdToSend() const;
@@ -413,10 +445,39 @@ class QUICHE_EXPORT QuicConfig {
   bool HasReceivedPreferredAddressConnectionIdAndToken() const;
   const std::pair<QuicConnectionId, StatelessResetToken>&
   ReceivedPreferredAddressConnectionIdAndToken() const;
-  absl::optional<QuicSocketAddress> GetPreferredAddressToSend(
+  std::optional<QuicSocketAddress> GetPreferredAddressToSend(
       quiche::IpAddressFamily address_family) const;
   void ClearAlternateServerAddressToSend(
       quiche::IpAddressFamily address_family);
+
+  // Sets the alternate server addresses to be used for a server behind a
+  // DNAT. The `to_send` address will be sent to the client, and the
+  // `mapped` address will be the corresponding internal address. Server-only.
+  void SetIPv4AlternateServerAddressForDNat(
+      const QuicSocketAddress& alternate_server_address_ipv4_to_send,
+      const QuicSocketAddress& mapped_alternate_server_address_ipv4);
+  void SetIPv6AlternateServerAddressForDNat(
+      const QuicSocketAddress& alternate_server_address_ipv6_to_send,
+      const QuicSocketAddress& mapped_alternate_server_address_ipv6);
+
+  // Returns the address the the server will receive packest from
+  // when the client is sending to the preferred address. Will be
+  // the mapped address, if present, or the alternate address otherwise.
+  std::optional<QuicSocketAddress> GetMappedAlternativeServerAddress(
+      quiche::IpAddressFamily address_family) const;
+
+  // Returns true if this config supports server preferred address,
+  // either via the kSPAD connection option or the QUIC protocol flag
+  // quic_always_support_server_preferred_address.
+  bool SupportsServerPreferredAddress(Perspective perspective) const;
+
+  // Returns true if this config supports reliable stream reset.
+  void SetReliableStreamReset(bool reliable_stream_reset);
+  bool SupportsReliableStreamReset() const;
+
+  // Whether the spin bit is enabled.
+  void set_enable_spin_bit(bool enable);
+  bool enable_spin_bit() const;
 
   // Original destination connection ID.
   void SetOriginalConnectionIdToSend(
@@ -442,12 +503,13 @@ class QUICHE_EXPORT QuicConfig {
   uint32_t ReceivedMaxAckDelayMs() const;
 
   // Manage the IETF QUIC extension Min Ack Delay transport parameter.
-  // An endpoint uses min_ack_delay to advsertise its support for
+  // An endpoint uses min_ack_delay to advertise its support for
   // AckFrequencyFrame sent by peer.
-  void SetMinAckDelayMs(uint32_t min_ack_delay_ms);
-  uint32_t GetMinAckDelayToSendMs() const;
-  bool HasReceivedMinAckDelayMs() const;
-  uint32_t ReceivedMinAckDelayMs() const;
+  void SetMinAckDelayDraft10Ms(uint64_t min_ack_delay_ms);
+  bool HasMinAckDelayDraft10ToSend() const;
+  uint64_t GetMinAckDelayDraft10ToSendMs() const;
+  bool HasReceivedMinAckDelayDraft10Ms() const;
+  uint32_t ReceivedMinAckDelayDraft10Ms() const;
 
   void SetAckDelayExponentToSend(uint32_t exponent);
   uint32_t GetAckDelayExponentToSend() const;
@@ -483,6 +545,13 @@ class QUICHE_EXPORT QuicConfig {
       const QuicConnectionId& retry_source_connection_id);
   bool HasReceivedRetrySourceConnectionId() const;
   QuicConnectionId ReceivedRetrySourceConnectionId() const;
+
+  uint64_t peer_reordering_threshold() const {
+    return peer_reordering_threshold_;
+  }
+  void set_peer_reordering_threshold(uint64_t peer_reordering_threshold) {
+    peer_reordering_threshold_ = peer_reordering_threshold;
+  }
 
   bool negotiated() const;
 
@@ -552,7 +621,7 @@ class QUICHE_EXPORT QuicConfig {
   // Note that received_max_idle_timeout_ is only populated if we receive the
   // peer's value, which isn't guaranteed in IETF QUIC as sending is optional.
   QuicTime::Delta max_idle_timeout_to_send_;
-  absl::optional<QuicTime::Delta> received_max_idle_timeout_;
+  std::optional<QuicTime::Delta> received_max_idle_timeout_;
   // Maximum number of dynamic streams that a Google QUIC connection
   // can support or the maximum number of bidirectional streams that
   // an IETF QUIC connection can support.
@@ -605,9 +674,17 @@ class QUICHE_EXPORT QuicConfig {
   // Note that when QUIC_CRYPTO is in use, only one of the addresses is sent.
   QuicFixedSocketAddress alternate_server_address_ipv6_;
   QuicFixedSocketAddress alternate_server_address_ipv4_;
+
+  // When a server is behind DNAT, the addresses it sends to the client will
+  // not be the source address recevied in packets from the client. These
+  // two optional members capture the internal addresses which map to
+  // the addresses sent on the wire.
+  std::optional<QuicSocketAddress> mapped_alternate_server_address_ipv6_;
+  std::optional<QuicSocketAddress> mapped_alternate_server_address_ipv4_;
+
   // Connection Id data to send from the server or receive at the client as part
   // of the preferred address transport parameter.
-  absl::optional<std::pair<QuicConnectionId, StatelessResetToken>>
+  std::optional<std::pair<QuicConnectionId, StatelessResetToken>>
       preferred_address_connection_id_and_token_;
 
   // Stateless reset token used in IETF public reset packet.
@@ -625,9 +702,10 @@ class QUICHE_EXPORT QuicConfig {
   // Uses the max_ack_delay transport parameter in IETF QUIC.
   QuicFixedUint32 max_ack_delay_ms_;
 
-  // Minimum ack delay. Used to enable sender control of max_ack_delay.
-  // Uses the min_ack_delay transport parameter in IETF QUIC extension.
-  QuicFixedUint32 min_ack_delay_ms_;
+  // Minimum ack delay. Used to enable sender control of min_ack_delay.
+  // Uses the min_ack_delay transport parameter in IETF QUIC extension,
+  // draft-10 through -11.
+  QuicFixedUint62 min_ack_delay_ms_draft10_;
 
   // The sent exponent is the exponent that this node uses when serializing an
   // ACK frame (and the peer should use when deserializing the frame);
@@ -652,29 +730,60 @@ class QUICHE_EXPORT QuicConfig {
   // Initial packet sent by the client.
   // Uses the original_destination_connection_id transport parameter in
   // IETF QUIC.
-  absl::optional<QuicConnectionId> original_destination_connection_id_to_send_;
-  absl::optional<QuicConnectionId> received_original_destination_connection_id_;
+  std::optional<QuicConnectionId> original_destination_connection_id_to_send_;
+  std::optional<QuicConnectionId> received_original_destination_connection_id_;
 
   // The value that the endpoint included in the Source Connection ID field of
   // the first Initial packet it sent.
   // Uses the initial_source_connection_id transport parameter in IETF QUIC.
-  absl::optional<QuicConnectionId> initial_source_connection_id_to_send_;
-  absl::optional<QuicConnectionId> received_initial_source_connection_id_;
+  std::optional<QuicConnectionId> initial_source_connection_id_to_send_;
+  std::optional<QuicConnectionId> received_initial_source_connection_id_;
 
   // The value that the server included in the Source Connection ID field of a
   // Retry packet it sent.
   // Uses the retry_source_connection_id transport parameter in IETF QUIC.
-  absl::optional<QuicConnectionId> retry_source_connection_id_to_send_;
-  absl::optional<QuicConnectionId> received_retry_source_connection_id_;
+  std::optional<QuicConnectionId> retry_source_connection_id_to_send_;
+  std::optional<QuicConnectionId> received_retry_source_connection_id_;
 
   // Custom transport parameters that can be sent and received in the TLS
   // handshake.
   TransportParameters::ParameterMap custom_transport_parameters_to_send_;
   TransportParameters::ParameterMap received_custom_transport_parameters_;
 
+  // Length of the data to send in the 'discard' transport parameter. Negative
+  // values means do not send.
+  int32_t discard_length_to_send_ = -1;
+
+  // Length of the receive data in the 'discard' transport parameter. Negative
+  // values means 'discard' data not received.
+  int32_t discard_length_received_ = -1;
+
+  // A hardcoded value for reordering threshold, as if the peer had sent an
+  // ACK_FREQUENCY frame with that value.
+  uint64_t peer_reordering_threshold_ = 1;
+
   // Google internal handshake message.
-  absl::optional<std::string> google_handshake_message_to_send_;
-  absl::optional<std::string> received_google_handshake_message_;
+  std::optional<std::string> google_handshake_message_to_send_;
+  std::optional<std::string> received_google_handshake_message_;
+
+  // Debugging Server Name Indication. These fields are used to send and get the
+  // SNI in the transport parameters from client to the server for
+  // debugging purposes only.
+  std::optional<std::string> debugging_sni_to_send_;
+  std::optional<std::string> received_debugging_sni_;
+
+  // SCONE send interval in seconds. Zero means no SCONE packets will be sent.
+  QuicTimeDelta scone_packet_interval_ = QuicTimeDelta::Zero();
+  // If true, can process incoming SCONE packets. Should only be set to true by
+  // applications that can take the bandwidth report and pass it back to the
+  // peer.
+  bool parse_scone_packets_;
+
+  // Support for RESET_STREAM_AT frame.
+  bool reliable_stream_reset_;
+
+  // Whether the spin bit is enabled.
+  bool enable_spin_bit_;
 };
 
 }  // namespace quic

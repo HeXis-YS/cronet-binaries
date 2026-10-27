@@ -30,18 +30,17 @@
 #ifndef BASE_MESSAGE_LOOP_MESSAGE_PUMP_APPLE_H_
 #define BASE_MESSAGE_LOOP_MESSAGE_PUMP_APPLE_H_
 
-#include "base/message_loop/message_pump.h"
-
 #include <CoreFoundation/CoreFoundation.h>
 
 #include <memory>
+#include <optional>
 
 #include "base/apple/scoped_cftyperef.h"
 #include "base/containers/stack.h"
 #include "base/memory/raw_ptr.h"
+#include "base/message_loop/message_pump.h"
 #include "base/run_loop.h"
 #include "build/build_config.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 #if defined(__OBJC__)
 #if BUILDFLAG(IS_IOS)
@@ -49,8 +48,8 @@
 #else
 #import <AppKit/AppKit.h>
 
-// Clients must subclass NSApplication and implement this protocol if they use
-// MessagePumpMac.
+// Clients must subclass NSApplication and implement this protocol if they want
+// message_pump_apple::Create() to return a MessagePumpCrApplication instance.
 @protocol CrAppProtocol
 // Must return true if -[NSApplication sendEvent:] is currently on the stack.
 // See the comment for |CreateAutoreleasePool()| in the cc file for why this is
@@ -67,6 +66,7 @@ class BASE_EXPORT MessagePumpCFRunLoopBase : public MessagePump {
   MessagePumpCFRunLoopBase(const MessagePumpCFRunLoopBase&) = delete;
   MessagePumpCFRunLoopBase& operator=(const MessagePumpCFRunLoopBase&) = delete;
 
+  // Initializes features for this class. See `base::features::Init()`.
   static void InitializeFeatures();
 
   // MessagePump:
@@ -75,7 +75,7 @@ class BASE_EXPORT MessagePumpCFRunLoopBase : public MessagePump {
   void ScheduleWork() override;
   void ScheduleDelayedWork(
       const Delegate::NextWorkInfo& next_work_info) override;
-  TimeTicks AjdustDelayedRunTime(TimeTicks earliest_time,
+  TimeTicks AdjustDelayedRunTime(TimeTicks earliest_time,
                                  TimeTicks run_time,
                                  TimeTicks latest_time) override;
 
@@ -93,10 +93,7 @@ class BASE_EXPORT MessagePumpCFRunLoopBase : public MessagePump {
   friend class OptionalAutoreleasePool;
   friend class TestMessagePumpCFRunLoopBase;
 
-  // Tasks will be pumped in the run loop modes described by
-  // |initial_mode_mask|, which maps bits to the index of an internal array of
-  // run loop mode identifiers.
-  explicit MessagePumpCFRunLoopBase(int initial_mode_mask);
+  MessagePumpCFRunLoopBase();
   ~MessagePumpCFRunLoopBase() override;
 
   // Subclasses should implement the work they need to do in MessagePump::Run
@@ -115,7 +112,7 @@ class BASE_EXPORT MessagePumpCFRunLoopBase : public MessagePump {
   void OnDidQuit();
 
   // Accessors for private data members to be used by subclasses.
-  CFRunLoopRef run_loop() const { return run_loop_; }
+  CFRunLoopRef run_loop() const { return run_loop_.get(); }
   int nesting_level() const { return nesting_level_; }
   int run_nesting_level() const { return run_nesting_level_; }
   bool keep_running() const { return keep_running_; }
@@ -135,21 +132,17 @@ class BASE_EXPORT MessagePumpCFRunLoopBase : public MessagePump {
   // current autorelease pool.
   virtual bool ShouldCreateAutoreleasePool();
 
-  // Enable and disable entries in |enabled_modes_| to match |mode_mask|.
-  void SetModeMask(int mode_mask);
-
-  // Get the current mode mask from |enabled_modes_|.
-  int GetModeMask() const;
-
  protected:
+  // Observer callback called when the run loop starts and stops, at the
+  // beginning and end of calls to CFRunLoopRun.  This is used to maintain
+  // |nesting_level_|.  Associated with |enter_exit_observer_|.
+  static void EnterExitObserver(CFRunLoopObserverRef observer,
+                                CFRunLoopActivity activity,
+                                void* info);
+
   raw_ptr<Delegate> delegate() { return delegate_; }
 
  private:
-  class ScopedModeEnabler;
-
-  // The maximum number of run loop modes that can be monitored.
-  static constexpr int kNumModes = 4;
-
   // Timer callback scheduled by ScheduleDelayedWork.  This does not do any
   // work, but it signals |work_source_| so that delayed work can be performed
   // within the appropriate priority constraints.
@@ -203,13 +196,6 @@ class BASE_EXPORT MessagePumpCFRunLoopBase : public MessagePump {
                                 CFRunLoopActivity activity,
                                 void* info);
 
-  // Observer callback called when the run loop starts and stops, at the
-  // beginning and end of calls to CFRunLoopRun.  This is used to maintain
-  // |nesting_level_|.  Associated with |enter_exit_observer_|.
-  static void EnterExitObserver(CFRunLoopObserverRef observer,
-                                CFRunLoopActivity activity,
-                                void* info);
-
   // Called by EnterExitObserver after performing maintenance on
   // |nesting_level_|. This allows subclasses an opportunity to perform
   // additional processing on the basis of run loops starting and stopping.
@@ -223,9 +209,6 @@ class BASE_EXPORT MessagePumpCFRunLoopBase : public MessagePump {
 
   // The thread's run loop.
   apple::ScopedCFTypeRef<CFRunLoopRef> run_loop_;
-
-  // The enabled modes. Posted tasks may run in any non-null entry.
-  std::unique_ptr<ScopedModeEnabler> enabled_modes_[kNumModes];
 
   // The timer, sources, and observers are described above alongside their
   // callbacks.
@@ -273,8 +256,14 @@ class BASE_EXPORT MessagePumpCFRunLoopBase : public MessagePump {
   // determined the loop is not processing a native event but the depth of the
   // stack should match |nesting_level_| at all times. A nullopt is also used
   // as a stand-in during delegateless operation.
-  base::stack<absl::optional<base::MessagePump::Delegate::ScopedDoWorkItem>>
+  base::stack<std::optional<base::MessagePump::Delegate::ScopedDoWorkItem>>
       stack_;
+
+  // Tracks the nesting levels that have called PreWaitObserver (and thus popped
+  // the work item scope) but have not yet called AfterWaitObserver (to push a
+  // new scope). This is used to suppress spurious AfterWaitObserver calls that
+  // can happen when a nested loop starts inside PreWaitObserver.
+  base::stack<int> sleeping_nesting_levels_;
 };
 
 class BASE_EXPORT MessagePumpCFRunLoop : public MessagePumpCFRunLoopBase {
@@ -295,7 +284,7 @@ class BASE_EXPORT MessagePumpCFRunLoop : public MessagePumpCFRunLoopBase {
   // True if Quit is called to stop the innermost MessagePump
   // (|innermost_quittable_|) but some other CFRunLoopRun loop
   // (|nesting_level_|) is running inside the MessagePump's innermost Run call.
-  bool quit_pending_;
+  bool quit_pending_ = false;
 };
 
 class BASE_EXPORT MessagePumpNSRunLoop : public MessagePumpCFRunLoopBase {
@@ -321,7 +310,7 @@ class BASE_EXPORT MessagePumpNSRunLoop : public MessagePumpCFRunLoopBase {
 // This is a fake message pump.  It attaches sources to the main thread's
 // CFRunLoop, so PostTask() will work, but it is unable to drive the loop
 // directly, so calling Run() or Quit() are errors.
-class MessagePumpUIApplication : public MessagePumpCFRunLoopBase {
+class BASE_EXPORT MessagePumpUIApplication : public MessagePumpCFRunLoopBase {
  public:
   MessagePumpUIApplication();
 
@@ -332,6 +321,15 @@ class MessagePumpUIApplication : public MessagePumpCFRunLoopBase {
   void DoRun(Delegate* delegate) override;
   bool DoQuit() override;
 
+  // Sets the initial run loop nesting `depth` for the current thread.
+  // This is a thread_local and one-shot configuration; it applies only to the
+  // next message pump initialized on this thread and is automatically reset to
+  // default immediately after being read.
+  static void SetNextInitialNestingLevelForCurrentThread(int depth);
+
+  // Resets the initial nesting level for the current thread. For testing only.
+  static void ResetNextInitialNestingLevelForTesting();
+
   // MessagePumpCFRunLoopBase.
   // MessagePumpUIApplication can not spin the main message loop directly.
   // Instead, call |Attach()| to set up a delegate.  It is an error to call
@@ -340,26 +338,10 @@ class MessagePumpUIApplication : public MessagePumpCFRunLoopBase {
   void Detach() override;
 
  private:
-  absl::optional<RunLoop> run_loop_;
+  std::optional<RunLoop> run_loop_;
 };
 
-#else
-
-// While in scope, permits posted tasks to be run in private AppKit run loop
-// modes that would otherwise make the UI unresponsive. E.g., menu fade out.
-class BASE_EXPORT ScopedPumpMessagesInPrivateModes {
- public:
-  ScopedPumpMessagesInPrivateModes();
-
-  ScopedPumpMessagesInPrivateModes(const ScopedPumpMessagesInPrivateModes&) =
-      delete;
-  ScopedPumpMessagesInPrivateModes& operator=(
-      const ScopedPumpMessagesInPrivateModes&) = delete;
-
-  ~ScopedPumpMessagesInPrivateModes();
-
-  int GetModeMaskForTest();
-};
+#else  // !BUILDFLAG(IS_IOS)
 
 class MessagePumpNSApplication : public MessagePumpCFRunLoopBase {
  public:
@@ -374,8 +356,6 @@ class MessagePumpNSApplication : public MessagePumpCFRunLoopBase {
   bool DoQuit() override;
 
  private:
-  friend class ScopedPumpMessagesInPrivateModes;
-
   void EnterExitRunLoop(CFRunLoopActivity activity) override;
 
   // True if DoRun is managing its own run loop as opposed to letting
@@ -403,7 +383,8 @@ class MessagePumpCrApplication : public MessagePumpNSApplication {
   // Requires NSApp implementing CrAppProtocol.
   bool ShouldCreateAutoreleasePool() override;
 };
-#endif  // BUILDFLAG(IS_IOS)
+
+#endif  // !BUILDFLAG(IS_IOS)
 
 namespace message_pump_apple {
 
@@ -431,10 +412,6 @@ BASE_EXPORT bool IsHandlingSendEvent();
 #endif  // !BUILDFLAG(IS_IOS)
 
 }  // namespace message_pump_apple
-
-// Tasks posted to the message loop are posted under this mode, as well
-// as kCFRunLoopCommonModes.
-extern const CFStringRef BASE_EXPORT kMessageLoopExclusiveRunLoopMode;
 
 }  // namespace base
 

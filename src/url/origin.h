@@ -7,25 +7,28 @@
 
 #include <stdint.h>
 
+#include <compare>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "base/component_export.h"
-#include "base/debug/alias.h"
-#include "base/debug/crash_logging.h"
-#include "base/gtest_prod_util.h"
 #include "base/strings/string_util.h"
 #include "base/trace_event/base_tracing_forward.h"
+#include "base/types/pass_key.h"
 #include "base/unguessable_token.h"
 #include "build/build_config.h"
 #include "build/buildflag.h"
 #include "build/robolectric_buildflags.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "net/base/cronet_buildflags.h"
 #include "url/scheme_host_port.h"
 
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_ROBOLECTRIC)
+#if (BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_ROBOLECTRIC)) && \
+    !BUILDFLAG(CRONET_BUILD)
 #include "base/android/jni_android.h"
+#include "url/url_jni_headers/Origin_shared_jni.h"
 #endif
 
 class GURL;
@@ -37,15 +40,15 @@ class StorageKey;
 class StorageKeyTest;
 }  // namespace blink
 
+namespace content {
+class SiteInfo;
+class SandboxedOpaqueOriginCreator;
+}  // namespace content
+
 namespace IPC {
 template <class P>
 struct ParamTraits;
 }  // namespace IPC
-
-namespace ipc_fuzzer {
-template <class T>
-struct FuzzTraits;
-}  // namespace ipc_fuzzer
 
 namespace mojo {
 template <typename DataViewType, typename T>
@@ -56,6 +59,10 @@ struct UrlOriginAdapter;
 namespace net {
 class SchemefulSite;
 }  // namespace net
+
+namespace optimization_guide {
+class SecurityOriginSerializer;
+}
 
 namespace url {
 
@@ -176,6 +183,16 @@ class COMPONENT_EXPORT(URL) Origin {
   // with `base_origin`, even if `base_origin` is already opaque.
   static Origin Resolve(const GURL& url, const Origin& base_origin);
 
+  // Creates an origin with the given nonce and tuple. This method can only be
+  // called by SandboxedOpaqueOriginCreator to ensure proper access
+  // control for nonce-based origins.
+  static Origin CreateWithNonce(
+      base::PassKey<content::SandboxedOpaqueOriginCreator>,
+      const base::UnguessableToken& nonce,
+      SchemeHostPort tuple) {
+    return Origin(Nonce(nonce), std::move(tuple));
+  }
+
   // Copyable and movable.
   Origin(const Origin&);
   Origin& operator=(const Origin&);
@@ -190,7 +207,7 @@ class COMPONENT_EXPORT(URL) Origin {
   // forth over IPC (as transitioning through GURL would risk potentially
   // dangerous recanonicalization); other potential callers should prefer the
   // 'GURL'-based constructor.
-  static absl::optional<Origin> UnsafelyCreateTupleOriginWithoutNormalization(
+  static std::optional<Origin> UnsafelyCreateTupleOriginWithoutNormalization(
       std::string_view scheme,
       std::string_view host,
       uint16_t port);
@@ -224,11 +241,10 @@ class COMPONENT_EXPORT(URL) Origin {
   // are exact matches. Two opaque origins are same-origin only if their
   // internal nonce values match. A non-opaque origin is never same-origin with
   // an opaque origin.
+  //
+  // If you are looking for a same _site_ check between origins, see
+  // net::SchemefulSite::IsSameSite.
   bool IsSameOriginWith(const Origin& other) const;
-  bool operator==(const Origin& other) const { return IsSameOriginWith(other); }
-  bool operator!=(const Origin& other) const {
-    return !IsSameOriginWith(other);
-  }
 
   // Non-opaque origin is "same-origin" with `url` if their schemes, hosts, and
   // ports are exact matches. Opaque origin is never "same-origin" with any
@@ -281,7 +297,15 @@ class COMPONENT_EXPORT(URL) Origin {
 
   // Allows Origin to be used as a key in STL (for example, a std::set or
   // std::map).
-  bool operator<(const Origin& other) const;
+  friend bool operator==(const Origin& left, const Origin& right) = default;
+  friend auto operator<=>(const Origin& left, const Origin& right) = default;
+
+  // Allows Origin to be used as a key in ABSL (for example, absl::flat_hash_set
+  // or absl::flat_hash_map).
+  template <typename H>
+  friend H AbslHashValue(H h, const Origin& o) {
+    return H::combine(std::move(h), o.tuple_, o.nonce_);
+  }
 
   // Creates a new opaque origin that is guaranteed to be cross-origin to all
   // currently existing origins. An origin created by this method retains its
@@ -301,23 +325,28 @@ class COMPONENT_EXPORT(URL) Origin {
   // |d|, and |d| is cross-origin to |a| and |c|.
   Origin DeriveNewOpaqueOrigin() const;
 
+  // Returns the nonce associated with the origin, if it is opaque, or nullptr
+  // otherwise. This is only for use in tests.
+  const base::UnguessableToken* GetNonceForTesting() const;
+
   // Creates a string representation of the object that can be used for logging
   // and debugging. It serializes the internal state, such as the nonce value
   // and precursor information.
   std::string GetDebugString(bool include_nonce = true) const;
 
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_ROBOLECTRIC)
-  base::android::ScopedJavaLocalRef<jobject> ToJavaObject() const;
-  static Origin FromJavaObject(
-      const base::android::JavaRef<jobject>& java_origin);
-  static jlong CreateNative(JNIEnv* env,
-                            const base::android::JavaRef<jstring>& java_scheme,
-                            const base::android::JavaRef<jstring>& java_host,
-                            uint16_t port,
-                            bool is_opaque,
-                            uint64_t tokenHighBits,
-                            uint64_t tokenLowBits);
-#endif  // BUILDFLAG(IS_ANDROID)
+#if (BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_ROBOLECTRIC)) && \
+    !BUILDFLAG(CRONET_BUILD)
+  jni_zero::ScopedJavaLocalRef<JOrigin> ToJavaObject(JNIEnv* env) const;
+  static Origin FromJavaObject(JNIEnv* env,
+                               const jni_zero::JavaRef<jobject>& java_origin);
+  static int64_t CreateNative(JNIEnv* env,
+                              const jni_zero::JavaRef<jstring>& java_scheme,
+                              const jni_zero::JavaRef<jstring>& java_host,
+                              uint16_t port,
+                              bool is_opaque,
+                              uint64_t tokenHighBits,
+                              uint64_t tokenLowBits);
+#endif
 
   void WriteIntoTrace(perfetto::TracedValue context) const;
 
@@ -326,7 +355,8 @@ class COMPONENT_EXPORT(URL) Origin {
   size_t EstimateMemoryUsage() const;
 
  private:
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_ROBOLECTRIC)
+#if (BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_ROBOLECTRIC)) && \
+    !BUILDFLAG(CRONET_BUILD)
   friend Origin CreateOpaqueOriginForAndroid(
       const std::string& scheme,
       const std::string& host,
@@ -336,17 +366,20 @@ class COMPONENT_EXPORT(URL) Origin {
   friend class blink::SecurityOrigin;
   friend class blink::SecurityOriginTest;
   friend class blink::StorageKey;
+  // SiteInfo needs the nonce to compute the site URL for some opaque origins,
+  // like data: URLs.
+  friend class content::SiteInfo;
   // SchemefulSite needs access to the serialization/deserialization logic which
   // includes the nonce.
   friend class net::SchemefulSite;
   friend class OriginTest;
   friend struct mojo::UrlOriginAdapter;
-  friend struct ipc_fuzzer::FuzzTraits<Origin>;
   friend struct mojo::StructTraits<url::mojom::OriginDataView, url::Origin>;
   friend IPC::ParamTraits<url::Origin>;
   friend COMPONENT_EXPORT(URL) std::ostream& operator<<(std::ostream& out,
                                                         const Origin& origin);
   friend class blink::StorageKeyTest;
+  friend class optimization_guide::SecurityOriginSerializer;
 
   // Origin::Nonce is a wrapper around base::UnguessableToken that generates
   // the random value only when the value is first accessed. The lazy generation
@@ -381,11 +414,17 @@ class COMPONENT_EXPORT(URL) Origin {
     Nonce(Nonce&&) noexcept;
     Nonce& operator=(Nonce&&) noexcept;
 
-    // Note that operator<, used by maps type containers, will trigger |token_|
-    // lazy-initialization. Equality comparisons do not.
-    bool operator<(const Nonce& other) const;
+    // Note that operator<=>, used by maps type containers, will trigger
+    // |token_| lazy-initialization. Equality comparisons do not.
+    std::strong_ordering operator<=>(const Nonce& other) const;
     bool operator==(const Nonce& other) const;
-    bool operator!=(const Nonce& other) const;
+
+    // Hashes the Nonce for absl hash containers. Will trigger |token_|
+    // lazy-initialization.
+    template <typename H>
+    friend H AbslHashValue(H h, const Nonce& n) {
+      return H::combine(std::move(h), n.token());
+    }
 
    private:
     friend class OriginTest;
@@ -417,7 +456,7 @@ class COMPONENT_EXPORT(URL) Origin {
   // This factory method should be used in order to pass opaque Origin objects
   // back and forth over IPC (as transitioning through GURL would risk
   // potentially dangerous recanonicalization).
-  static absl::optional<Origin> UnsafelyCreateOpaqueOriginWithoutNormalization(
+  static std::optional<Origin> UnsafelyCreateOpaqueOriginWithoutNormalization(
       std::string_view precursor_scheme,
       std::string_view precursor_host,
       uint16_t precursor_port,
@@ -439,17 +478,17 @@ class COMPONENT_EXPORT(URL) Origin {
   // origin's |tuple_| is invalid nullopt is returned. If the nonce is not
   // initialized, a nonce of 0 is used. Use of this method should be limited as
   // an opaque origin will never be matchable in future browser sessions.
-  absl::optional<std::string> SerializeWithNonce() const;
+  std::optional<std::string> SerializeWithNonce() const;
 
   // Like SerializeWithNonce(), but forces |nonce_| to be initialized prior to
   // serializing.
-  absl::optional<std::string> SerializeWithNonceAndInitIfNeeded();
+  std::optional<std::string> SerializeWithNonceAndInitIfNeeded();
 
-  absl::optional<std::string> SerializeWithNonceImpl() const;
+  std::optional<std::string> SerializeWithNonceImpl() const;
 
   // Deserializes an origin from |ToValueWithNonce|. Returns nullopt if the
   // value was invalid in any way.
-  static absl::optional<Origin> Deserialize(const std::string& value);
+  static std::optional<Origin> Deserialize(std::string_view value);
 
   // The tuple is used for both tuple origins (e.g. https://example.com:80), as
   // well as for opaque origins, where it tracks the tuple origin from which
@@ -460,7 +499,7 @@ class COMPONENT_EXPORT(URL) Origin {
   // The nonce is used for maintaining identity of an opaque origin. This
   // nonce is preserved when an opaque origin is copied or moved. An Origin
   // is considered opaque if and only if |nonce_| holds a value.
-  absl::optional<Nonce> nonce_;
+  std::optional<Nonce> nonce_;
 };
 
 // Pretty-printers for logging. These expose the internal state of the nonce.
@@ -471,29 +510,25 @@ std::ostream& operator<<(std::ostream& out, const Origin::Nonce& origin);
 
 COMPONENT_EXPORT(URL) bool IsSameOriginWith(const GURL& a, const GURL& b);
 
-// DEBUG_ALIAS_FOR_ORIGIN(var_name, origin) copies `origin` into a new
-// stack-allocated variable named `<var_name>`. This helps ensure that the
-// value of `origin` gets preserved in crash dumps.
-#define DEBUG_ALIAS_FOR_ORIGIN(var_name, origin) \
-  DEBUG_ALIAS_FOR_CSTR(var_name, (origin).Serialize().c_str(), 128)
-
-namespace debug {
-
-class COMPONENT_EXPORT(URL) ScopedOriginCrashKey {
- public:
-  ScopedOriginCrashKey(base::debug::CrashKeyString* crash_key,
-                       const url::Origin* value);
-  ~ScopedOriginCrashKey();
-
-  ScopedOriginCrashKey(const ScopedOriginCrashKey&) = delete;
-  ScopedOriginCrashKey& operator=(const ScopedOriginCrashKey&) = delete;
-
- private:
-  base::debug::ScopedCrashKeyString scoped_string_value_;
-};
-
-}  // namespace debug
-
 }  // namespace url
+
+#if (BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_ROBOLECTRIC)) && \
+    !BUILDFLAG(CRONET_BUILD)
+namespace jni_zero {
+
+// @JniType conversion function.
+template <>
+inline url::Origin FromJniType<url::Origin>(JNIEnv* env,
+                                            const JavaRef<jobject>& j_obj) {
+  return url::Origin::FromJavaObject(env, j_obj);
+}
+template <>
+inline ScopedJavaLocalRef<jobject> ToJniType(JNIEnv* env,
+                                             const url::Origin& obj) {
+  return obj.ToJavaObject(env);
+}
+
+}  // namespace jni_zero
+#endif
 
 #endif  // URL_ORIGIN_H_

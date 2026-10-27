@@ -13,24 +13,26 @@
 #include <vector>
 
 #include "base/base64.h"
+#include "base/containers/span.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
-#include "base/functional/callback_forward.h"
 #include "base/functional/callback_helpers.h"
-#include "base/hash/md5.h"
 #include "base/logging.h"
 #include "base/memory/weak_ptr.h"
 #include "base/path_service.h"
 #include "base/strings/escape.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
+#include "base/strings/string_view_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "base/unguessable_token.h"
+#include "crypto/hash.h"
 #include "net/base/host_port_pair.h"
 #include "net/base/url_util.h"
 #include "net/filter/filter_source_stream_test_util.h"
@@ -137,7 +139,7 @@ std::unique_ptr<HttpResponse> HandleEchoCookieWithStatus(
   return http_response;
 }
 
-// TODO(https://crbug.com/1138913): Remove when request handlers are
+// TODO(crbug.com/40153192): Remove when request handlers are
 // implementable in Android's embedded test server implementation
 std::unique_ptr<HttpResponse> HandleEchoCriticalHeader(
     const HttpRequest& request) {
@@ -183,16 +185,17 @@ std::unique_ptr<HttpResponse> HandleEcho(const HttpRequest& request) {
 std::unique_ptr<HttpResponse> HandleEchoTitle(const HttpRequest& request) {
   auto http_response = std::make_unique<BasicHttpResponse>();
   http_response->set_content_type("text/html");
-  http_response->set_content("<!doctype html><title>" + request.content +
-                             "</title>");
+  http_response->set_content(
+      base::StrCat({"<!doctype html><title>", request.content, "</title>"}));
   return http_response;
 }
 
 // /echoall?QUERY
 // Responds with the list of QUERY and the request headers.
 //
-// Alternative form:
-// /echoall/nocache?QUERY prevents caching of the response.
+// Alternative forms:
+// - /echoall/nocache?QUERY prevents caching of the response.
+// - /echoall/cache?QUERY caches the response using a max-age.
 std::unique_ptr<HttpResponse> HandleEchoAll(const HttpRequest& request) {
   auto http_response = std::make_unique<BasicHttpResponse>();
 
@@ -211,20 +214,21 @@ std::unique_ptr<HttpResponse> HandleEchoAll(const HttpRequest& request) {
       body += query + "\n";
   }
 
-  body +=
-      "</pre>"
-      "<h1>Request Headers:</h1><pre id='request-headers'>" +
-      request.all_headers + "</pre>" +
-      "<h1>Response nonce:</h1><pre id='response-nonce'>" +
-      base::UnguessableToken::Create().ToString() + "</pre>";
+  base::StrAppend(&body,
+                  {"</pre>"
+                   "<h1>Request Headers:</h1><pre id='request-headers'>",
+                   request.all_headers, "</pre>",
+                   "<h1>Response nonce:</h1><pre id='response-nonce'>",
+                   base::UnguessableToken::Create().ToString(), "</pre>"});
 
   http_response->set_content_type("text/html");
   http_response->set_content(body);
 
-  if (base::EndsWith(request.GetURL().path_piece(), "/nocache",
-                     base::CompareCase::SENSITIVE)) {
+  if (request.GetURL().path().ends_with("/nocache")) {
     http_response->AddCustomHeader("Cache-Control",
                                    "no-cache, no-store, must-revalidate");
+  } else if (request.GetURL().path().ends_with("/cache")) {
+    http_response->AddCustomHeader("Cache-Control", "max-age=3600");
   }
 
   return http_response;
@@ -233,7 +237,7 @@ std::unique_ptr<HttpResponse> HandleEchoAll(const HttpRequest& request) {
 // /echo-raw
 // Returns the query string as the raw response (no HTTP headers).
 std::unique_ptr<HttpResponse> HandleEchoRaw(const HttpRequest& request) {
-  return std::make_unique<RawHttpResponse>("", request.GetURL().query());
+  return std::make_unique<RawHttpResponse>("", request.GetURL().GetQuery());
 }
 
 // /set-cookie?COOKIES
@@ -244,8 +248,9 @@ std::unique_ptr<HttpResponse> HandleSetCookie(const HttpRequest& request) {
   std::string content;
   GURL request_url = request.GetURL();
   if (request_url.has_query()) {
-    std::vector<std::string> cookies = base::SplitString(
-        request_url.query(), "&", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
+    std::vector<std::string> cookies =
+        base::SplitString(request_url.GetQuery(), "&", base::KEEP_WHITESPACE,
+                          base::SPLIT_WANT_ALL);
     for (const auto& cookie : cookies) {
       http_response->AddCustomHeader("Set-Cookie", cookie);
       content += cookie;
@@ -321,8 +326,9 @@ std::unique_ptr<HttpResponse> HandleExpectAndSetCookie(
 
 // An internal utility to extract HTTP Headers from a URL in the format of
 // "/url&KEY1: VALUE&KEY2: VALUE2". Returns a header key to header value map.
-std::map<std::string, std::string> ExtractHeadersFromQuery(const GURL& url) {
-  std::map<std::string, std::string> key_to_value;
+std::multimap<std::string, std::string> ExtractHeadersFromQuery(
+    const GURL& url) {
+  std::multimap<std::string, std::string> key_to_value;
   if (url.has_query()) {
     RequestQuery headers = ParseQuery(url);
     for (const auto& header : headers) {
@@ -354,7 +360,7 @@ std::unique_ptr<HttpResponse> HandleSetHeader(const HttpRequest& request) {
   auto headers = ExtractHeadersFromQuery(request_url);
   for (const auto& [key, value] : headers) {
     http_response->AddCustomHeader(key, value);
-    content += key + ": " + value;
+    base::StrAppend(&content, {key, ": ", value});
   }
 
   http_response->set_content(content);
@@ -387,9 +393,9 @@ std::unique_ptr<HttpResponse> HandleSetHeaderWithFile(
   auto http_response = std::make_unique<BasicHttpResponse>();
 
   base::FilePath server_root;
-  base::PathService::Get(base::DIR_SOURCE_ROOT, &server_root);
+  base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &server_root);
   base::FilePath file_path =
-      server_root.AppendASCII(request_url.path().substr(prefix.size() + 1));
+      server_root.AppendASCII(request_url.GetPath().substr(prefix.size() + 1));
   std::string file_content;
   CHECK(base::ReadFileToString(file_path, &file_content));
   http_response->set_content(file_content);
@@ -414,7 +420,7 @@ std::unique_ptr<HttpResponse> HandleIframe(const HttpRequest& request) {
 
   GURL iframe_url("about:blank");
   if (request_url.has_query()) {
-    iframe_url = GURL(base::UnescapeBinaryURLComponent(request_url.query()));
+    iframe_url = GURL(base::UnescapeBinaryURLComponent(request_url.GetQuery()));
   }
 
   http_response->set_content(base::StringPrintf(
@@ -484,8 +490,8 @@ std::unique_ptr<HttpResponse> HandleAuthBasic(const HttpRequest& request) {
   if (!authed) {
     http_response->set_code(HTTP_UNAUTHORIZED);
     http_response->set_content_type("text/html");
-    http_response->AddCustomHeader("WWW-Authenticate",
-                                   "Basic realm=\"" + realm + "\"");
+    http_response->AddCustomHeader(
+        "WWW-Authenticate", base::StrCat({"Basic realm=\"", realm, "\""}));
     if (query.find("set-cookie-if-challenged") != query.end())
       http_response->AddCustomHeader("Set-Cookie", "got_challenged=true");
     if (query.find("set-secure-cookie-if-challenged") != query.end())
@@ -513,7 +519,7 @@ std::unique_ptr<HttpResponse> HandleAuthBasic(const HttpRequest& request) {
       base::FilePath().AppendASCII(request.relative_url.substr(1));
   if (file_path.FinalExtension() == FILE_PATH_LITERAL("gif")) {
     base::FilePath server_root;
-    base::PathService::Get(base::DIR_SOURCE_ROOT, &server_root);
+    base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &server_root);
     base::FilePath gif_path = server_root.AppendASCII(kLogoPath);
     std::string gif_data;
     base::ReadFileToString(gif_path, &gif_data);
@@ -533,12 +539,16 @@ std::unique_ptr<HttpResponse> HandleAuthBasic(const HttpRequest& request) {
   return http_response;
 }
 
+std::string Sha256String(std::string_view input) {
+  return base::HexEncodeLower(crypto::hash::Sha256(input));
+}
+
 // /auth-digest
 // Performs "Digest" HTTP authentication.
 std::unique_ptr<HttpResponse> HandleAuthDigest(const HttpRequest& request) {
-  std::string nonce = base::MD5String(
+  std::string nonce = Sha256String(
       base::StringPrintf("privatekey%s", request.relative_url.c_str()));
-  std::string opaque = base::MD5String("opaque");
+  std::string opaque = Sha256String("opaque");
   std::string password = kDefaultPassword;
   std::string realm = kDefaultRealm;
 
@@ -577,22 +587,22 @@ std::unique_ptr<HttpResponse> HandleAuthDigest(const HttpRequest& request) {
     } else {
       username = auth_pairs["username"];
 
-      std::string hash1 = base::MD5String(
+      std::string hash1 = Sha256String(
           base::StringPrintf("%s:%s:%s", auth_pairs["username"].c_str(),
                              realm.c_str(), password.c_str()));
-      std::string hash2 = base::MD5String(base::StringPrintf(
+      std::string hash2 = Sha256String(base::StringPrintf(
           "%s:%s", request.method_string.c_str(), auth_pairs["uri"].c_str()));
 
       std::string response;
       if (auth_pairs.find("qop") != auth_pairs.end() &&
           auth_pairs.find("nc") != auth_pairs.end() &&
           auth_pairs.find("cnonce") != auth_pairs.end()) {
-        response = base::MD5String(base::StringPrintf(
+        response = Sha256String(base::StringPrintf(
             "%s:%s:%s:%s:%s:%s", hash1.c_str(), nonce.c_str(),
             auth_pairs["nc"].c_str(), auth_pairs["cnonce"].c_str(),
             auth_pairs["qop"].c_str(), hash2.c_str()));
       } else {
-        response = base::MD5String(base::StringPrintf(
+        response = Sha256String(base::StringPrintf(
             "%s:%s:%s", hash1.c_str(), nonce.c_str(), hash2.c_str()));
       }
 
@@ -609,7 +619,7 @@ std::unique_ptr<HttpResponse> HandleAuthDigest(const HttpRequest& request) {
     http_response->set_content_type("text/html");
     std::string auth_header = base::StringPrintf(
         "Digest realm=\"%s\", "
-        "domain=\"/\", qop=\"auth\", algorithm=MD5, nonce=\"%s\", "
+        "domain=\"/\", qop=\"auth\", algorithm=SHA-256, nonce=\"%s\", "
         "opaque=\"%s\"",
         realm.c_str(), nonce.c_str(), opaque.c_str());
     http_response->AddCustomHeader("WWW-Authenticate", auth_header);
@@ -639,8 +649,7 @@ std::unique_ptr<HttpResponse> HandleServerRedirect(HttpStatusCode redirect_code,
                                                    bool allow_cors,
                                                    const HttpRequest& request) {
   GURL request_url = request.GetURL();
-  std::string dest =
-      base::UnescapeBinaryURLComponent(request_url.query_piece());
+  std::string dest = base::UnescapeBinaryURLComponent(request_url.query());
   RequestQuery query = ParseQuery(request_url);
 
   if (request.method == METHOD_OPTIONS) {
@@ -671,8 +680,7 @@ std::unique_ptr<HttpResponse> HandleServerRedirectWithCookie(
     HttpStatusCode redirect_code,
     const HttpRequest& request) {
   GURL request_url = request.GetURL();
-  std::string dest =
-      base::UnescapeBinaryURLComponent(request_url.query_piece());
+  std::string dest = base::UnescapeBinaryURLComponent(request_url.query());
   RequestQuery query = ParseQuery(request_url);
 
   auto http_response = std::make_unique<BasicHttpResponse>();
@@ -692,8 +700,7 @@ std::unique_ptr<HttpResponse> HandleServerRedirectWithSecureCookie(
     HttpStatusCode redirect_code,
     const HttpRequest& request) {
   GURL request_url = request.GetURL();
-  std::string dest =
-      base::UnescapeBinaryURLComponent(request_url.query_piece());
+  std::string dest = base::UnescapeBinaryURLComponent(request_url.query());
   RequestQuery query = ParseQuery(request_url);
 
   auto http_response = std::make_unique<BasicHttpResponse>();
@@ -743,8 +750,7 @@ std::unique_ptr<HttpResponse> HandleCrossSiteRedirect(
 // Returns a meta redirect to URL.
 std::unique_ptr<HttpResponse> HandleClientRedirect(const HttpRequest& request) {
   GURL request_url = request.GetURL();
-  std::string dest =
-      base::UnescapeBinaryURLComponent(request_url.query_piece());
+  std::string dest = base::UnescapeBinaryURLComponent(request_url.query());
 
   auto http_response = std::make_unique<BasicHttpResponse>();
   http_response->set_content_type("text/html");
@@ -773,7 +779,7 @@ std::unique_ptr<HttpResponse> HandleSlowServer(const HttpRequest& request) {
 
   GURL request_url = request.GetURL();
   if (request_url.has_query())
-    delay = std::atof(request_url.query().c_str());
+    delay = std::atof(request_url.GetQuery().c_str());
 
   auto http_response =
       std::make_unique<DelayedHttpResponse>(base::Seconds(delay));
@@ -842,22 +848,11 @@ std::unique_ptr<HttpResponse> HandleExabyteResponse(
 // Returns a response with a gzipped body of "<body>". Attempts to allocate
 // enough memory to contain the body, but DCHECKs if that fails.
 std::unique_ptr<HttpResponse> HandleGzipBody(const HttpRequest& request) {
-  std::string uncompressed_body = request.GetURL().query();
-  // Attempt to pick size that's large enough even in the worst case (deflate
-  // block headers should be shorter than 512 bytes, and deflating should never
-  // double size of data, modulo headers).
-  // TODO(mmenke): This is rather awkward. Worth improving CompressGzip?
-  std::vector<char> compressed_body(uncompressed_body.size() * 2 + 512);
-  size_t compressed_size = compressed_body.size();
-  CompressGzip(uncompressed_body.c_str(), uncompressed_body.size(),
-               compressed_body.data(), &compressed_size,
-               true /* gzip_framing */);
-  // CompressGzip should DCHECK itself if this fails, anyways.
-  DCHECK_GE(compressed_body.size(), compressed_size);
+  std::string uncompressed_body = request.GetURL().GetQuery();
+  auto compressed_body = CompressGzip(uncompressed_body);
 
   auto http_response = std::make_unique<BasicHttpResponse>();
-  http_response->set_content(
-      std::string(compressed_body.data(), compressed_size));
+  http_response->set_content(base::as_string_view(compressed_body));
   http_response->AddCustomHeader("Content-Encoding", "gzip");
   http_response->AddCustomHeader("Cache-Control", "max-age=60");
   return http_response;

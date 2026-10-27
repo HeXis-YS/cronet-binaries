@@ -4,15 +4,19 @@
 
 #include "base/allocator/dispatcher/tls.h"
 
+#include <memory>
+#include <string>
+#include <string_view>
+
 #if USE_LOCAL_TLS_EMULATION()
+
+#include <sys/mman.h>
 
 #include "base/check.h"
 #include "base/dcheck_is_on.h"
 #include "base/debug/crash_logging.h"
 #include "base/immediate_crash.h"
 #include "build/build_config.h"
-
-#include <sys/mman.h>
 
 #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
 #include <sys/prctl.h>
@@ -72,7 +76,10 @@ bool MMapAllocator::FreeMemoryForTesting(void* pointer_to_allocated,
 
 PThreadTLSSystem::PThreadTLSSystem() = default;
 
+PThreadTLSSystem::~PThreadTLSSystem() = default;
+
 PThreadTLSSystem::PThreadTLSSystem(PThreadTLSSystem&& other) {
+  std::swap(crash_key_name_, other.crash_key_name_);
   std::swap(crash_key_, other.crash_key_);
   std::swap(data_access_key_, other.data_access_key_);
 
@@ -82,6 +89,7 @@ PThreadTLSSystem::PThreadTLSSystem(PThreadTLSSystem&& other) {
 }
 
 PThreadTLSSystem& PThreadTLSSystem::operator=(PThreadTLSSystem&& other) {
+  std::swap(crash_key_name_, other.crash_key_name_);
   std::swap(crash_key_, other.crash_key_);
   std::swap(data_access_key_, other.data_access_key_);
 
@@ -94,7 +102,7 @@ PThreadTLSSystem& PThreadTLSSystem::operator=(PThreadTLSSystem&& other) {
 
 bool PThreadTLSSystem::Setup(
     OnThreadTerminationFunction thread_termination_function,
-    const base::StringPiece instance_id) {
+    std::string_view instance_id) {
 #if DCHECK_IS_ON()
   // Initialize must happen outside of the allocation path. Therefore, it is
   // secure to verify with DCHECK.
@@ -115,11 +123,13 @@ bool PThreadTLSSystem::Setup(
   // and running into the problems mentioned above. Since there's no way to
   // handle this issue programmatically, we include the key into the crashpad
   // report to allow for later inspection.
-  std::string crash_key_name = "tls_system-";
-  crash_key_name += instance_id;
+  // Crashpad stores the crash key name pointer instead of copying the name.
+  // Keep the string alive as long as the CrashKeyString may be read.
+  crash_key_name_ = std::make_unique<std::string>("tls_system-");
+  crash_key_name_->append(instance_id);
 
   crash_key_ = base::debug::AllocateCrashKeyString(
-      crash_key_name.c_str(), GetCrashKeySize(crash_key_name));
+      crash_key_name_->c_str(), GetCrashKeySize(*crash_key_name_));
   base::debug::SetCrashKeyString(crash_key_,
                                  base::NumberToString(data_access_key_));
 
@@ -135,6 +145,7 @@ bool PThreadTLSSystem::TearDownForTesting() {
 
   base::debug::ClearCrashKeyString(crash_key_);
   crash_key_ = nullptr;
+  crash_key_name_.reset();
 
   auto const key_delete_res = pthread_key_delete(data_access_key_);
   return (0 == key_delete_res);

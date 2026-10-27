@@ -5,6 +5,7 @@
 #ifndef BASE_TEST_GMOCK_EXPECTED_SUPPORT_H_
 #define BASE_TEST_GMOCK_EXPECTED_SUPPORT_H_
 
+#include <optional>
 #include <ostream>
 #include <string>
 #include <type_traits>
@@ -15,6 +16,7 @@
 #include "base/types/expected.h"
 #include "base/types/expected_internal.h"
 #include "base/types/expected_macros.h"
+#include "base/types/is_instantiation.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -22,14 +24,19 @@ namespace base::test {
 
 namespace internal {
 
+template <typename T>
+concept IsOptional =
+    base::is_instantiation<std::remove_cvref_t<T>, std::optional>;
+
+template <typename T>
+concept IsExpectedOrOptional = base::internal::IsExpected<T> || IsOptional<T>;
+
 // `HasVoidValueType<T>` is true iff `T` satisfies
 // `base::internal::IsExpected<T>` and `T`'s `value_type` is `void`.
-template <typename T, typename = void>
-constexpr bool HasVoidValueType = false;
 template <typename T>
-constexpr bool
-    HasVoidValueType<T, std::enable_if_t<base::internal::IsExpected<T>>> =
-        std::is_void_v<typename std::remove_cvref_t<T>::value_type>;
+concept HasVoidValueType =
+    base::internal::IsExpected<T> &&
+    std::is_void_v<typename std::remove_cvref_t<T>::value_type>;
 
 // Implementation for matcher `HasValue`.
 class HasValueMatcher {
@@ -42,33 +49,37 @@ class HasValueMatcher {
   }
 
  private:
-  // Reject instantiation with types that do not satisfy
-  // `base::internal::IsExpected<T>`.
-  template <typename T, typename = void>
-  class Impl {
-    static_assert(base::internal::IsExpected<T>,
-                  "Must be used with base::expected<T, E>");
-  };
-
   template <typename T>
-  class Impl<T, std::enable_if_t<base::internal::IsExpected<T>>>
-      : public ::testing::MatcherInterface<T> {
+    requires(IsExpectedOrOptional<T>)
+  class Impl : public ::testing::MatcherInterface<T> {
    public:
     Impl() = default;
 
     void DescribeTo(std::ostream* os) const override {
-      *os << "is an 'expected' type with a value";
+      if constexpr (IsOptional<T>) {
+        *os << "is a 'std::optional' type with a value";
+      } else {
+        *os << "is an 'expected' type with a value";
+      }
     }
 
     void DescribeNegationTo(std::ostream* os) const override {
-      *os << "is an 'expected' type with an error";
+      if constexpr (IsOptional<T>) {
+        *os << "is a 'std::optional' type which is nullopt";
+      } else {
+        *os << "is an 'expected' type with an error";
+      }
     }
 
     bool MatchAndExplain(
         T actual_value,
         ::testing::MatchResultListener* listener) const override {
       if (!actual_value.has_value()) {
-        *listener << "which has the error " << ToString(actual_value.error());
+        if constexpr (IsOptional<T>) {
+          *listener << "which is nullopt";
+        } else {
+          *listener << "which has the error " << ToString(actual_value.error());
+        }
       }
       return actual_value.has_value();
     }
@@ -87,32 +98,29 @@ class ValueIsMatcher {
   }
 
  private:
-  // Reject instantiation with types that do not satisfy
-  // `base::internal::IsExpected<U> && !HasVoidValueType<U>`.
-  template <typename U, typename = void>
-  class Impl {
-    static_assert(base::internal::IsExpected<U>,
-                  "Must be used with base::expected<T, E>");
-    static_assert(!HasVoidValueType<U>,
-                  "expected object must have non-void value type");
-  };
-
   template <typename U>
-  class Impl<
-      U,
-      std::enable_if_t<base::internal::IsExpected<U> && !HasVoidValueType<U>>>
-      : public ::testing::MatcherInterface<U> {
+    requires(IsExpectedOrOptional<U> && !HasVoidValueType<U>)
+  class Impl : public ::testing::MatcherInterface<U> {
    public:
     explicit Impl(const T& matcher)
         : matcher_(::testing::SafeMatcherCast<const V&>(matcher)) {}
 
     void DescribeTo(std::ostream* os) const override {
-      *os << "is an 'expected' type with a value which ";
+      if constexpr (IsOptional<U>) {
+        *os << "is a 'std::optional' type with a value which ";
+      } else {
+        *os << "is an 'expected' type with a value which ";
+      }
       matcher_.DescribeTo(os);
     }
 
     void DescribeNegationTo(std::ostream* os) const override {
-      *os << "is an 'expected' type with an error or a value which ";
+      if constexpr (IsOptional<U>) {
+        *os << "is a 'std::optional' type which is nullopt or has a value "
+               "which ";
+      } else {
+        *os << "is an 'expected' type with an error or a value which ";
+      }
       matcher_.DescribeNegationTo(os);
     }
 
@@ -120,7 +128,11 @@ class ValueIsMatcher {
         U actual_value,
         ::testing::MatchResultListener* listener) const override {
       if (!actual_value.has_value()) {
-        *listener << "which has the error " << ToString(actual_value.error());
+        if constexpr (IsOptional<U>) {
+          *listener << "which is nullopt";
+        } else {
+          *listener << "which has the error " << ToString(actual_value.error());
+        }
         return false;
       }
 
@@ -156,17 +168,9 @@ class ErrorIsMatcher {
   }
 
  private:
-  // Reject instantiation with types that do not satisfy
-  // `base::internal::IsExpected<U>`.
-  template <typename U, typename = void>
-  class Impl {
-    static_assert(base::internal::IsExpected<U>,
-                  "Must be used with base::expected<T, E>");
-  };
-
   template <typename U>
-  class Impl<U, std::enable_if_t<base::internal::IsExpected<U>>>
-      : public ::testing::MatcherInterface<U> {
+    requires(base::internal::IsExpected<U>)
+  class Impl : public ::testing::MatcherInterface<U> {
    public:
     explicit Impl(const T& matcher)
         : matcher_(::testing::SafeMatcherCast<const E&>(matcher)) {}
@@ -239,11 +243,22 @@ inline internal::ErrorIsMatcher<typename std::decay_t<T>> ErrorIs(T&& matcher) {
 
 }  // namespace base::test
 
-// Executes an expression that returns an `expected<T, E>` or some subclass
-// thereof, and assigns the contained `T` to `lhs` if the result is a value. If
-// the result is an error, generates a test failure and returns from the current
-// function, which must have a `void` return type. For more usage examples and
-// caveats, see the documentation for `ASSIGN_OR_RETURN`.
+// Macros for testing the results of functions that return expected<T, E>
+// (for any type T and E).
+//
+// Example:
+//   EXPECT_OK(MaybeGetValue(arg));
+//   ASSERT_OK(MaybeGetValue(arg));
+//
+// Analogous to ABSL_{EXPECT,ASSERT}_OK macros for absl::Status(Or).
+#define EXPECT_OK(expression) EXPECT_THAT(expression, ::base::test::HasValue())
+#define ASSERT_OK(expression) ASSERT_THAT(expression, ::base::test::HasValue())
+
+// Executes an expression that returns an `expected<T, E>` or
+// `std::optional<T>`, and assigns the contained `T` to `lhs` if the result is a
+// value. If the result is an error, generates a test failure and returns from
+// the current function, which must have a `void` return type. For more usage
+// examples and caveats, see the documentation for `ASSIGN_OR_RETURN`.
 //
 // Example: Declaring and initializing a new value:
 //   ASSERT_OK_AND_ASSIGN(ValueType value, MaybeGetValue(arg));
@@ -251,12 +266,34 @@ inline internal::ErrorIsMatcher<typename std::decay_t<T>> ErrorIs(T&& matcher) {
 // Example: Assigning to an existing value:
 //   ValueType value;
 //   ASSERT_OK_AND_ASSIGN(value, MaybeGetValue(arg));
-#define ASSERT_OK_AND_ASSIGN(lhs, rexpr)                               \
-  ASSIGN_OR_RETURN(lhs, rexpr, [](const auto& e) {                     \
-    return GTEST_MESSAGE_(                                             \
-        base::StrCat({#rexpr, " returned error: ", base::ToString(e)}) \
-            .c_str(),                                                  \
-        ::testing::TestPartResult::kFatalFailure);                     \
+#define ASSERT_OK_AND_ASSIGN(lhs, rexpr)                             \
+  ASSIGN_OR_RETURN(lhs, rexpr, []<typename... Ts>(const Ts&... e) {  \
+    std::string message;                                             \
+    if constexpr (sizeof...(Ts) > 0) {                               \
+      message = base::StrCat(                                        \
+          {#rexpr, " returned error: ", (..., base::ToString(e))});  \
+    } else {                                                         \
+      message = base::StrCat({#rexpr, " returned nullopt"});         \
+    }                                                                \
+    return GTEST_MESSAGE_(message.c_str(),                           \
+                          ::testing::TestPartResult::kFatalFailure); \
   })
+
+namespace base {
+template <typename T, typename E>
+void PrintTo(const expected<T, E>& expected, ::std::ostream* os) {
+  *os << expected.ToString();
+}
+
+template <typename T>
+void PrintTo(const ok<T>& a, ::std::ostream* os) {
+  *os << a.ToString();
+}
+
+template <typename T>
+void PrintTo(const unexpected<T>& a, ::std::ostream* os) {
+  *os << a.ToString();
+}
+}  // namespace base
 
 #endif  // BASE_TEST_GMOCK_EXPECTED_SUPPORT_H_

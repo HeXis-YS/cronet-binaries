@@ -7,12 +7,16 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <optional>
+#include <string_view>
 
 #include "base/containers/flat_set.h"
 #include "base/containers/span.h"
+#include "base/memory/raw_span.h"
 #include "base/metrics/histogram.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
+#include "base/notreached.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
@@ -21,6 +25,7 @@
 #include "build/build_config.h"
 #include "crypto/crypto_buildflags.h"
 #include "crypto/sha2.h"
+#include "net/base/cronet_buildflags.h"
 #include "net/base/features.h"
 #include "net/base/net_errors.h"
 #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
@@ -34,26 +39,23 @@
 #include "net/cert/internal/revocation_checker.h"
 #include "net/cert/internal/system_trust_store.h"
 #include "net/cert/known_roots.h"
-#include "net/cert/ocsp_revocation_status.h"
-#include "net/cert/pem.h"
-#include "net/cert/pki/extended_key_usage.h"
-#include "net/cert/pki/ocsp.h"
-#include "net/cert/pki/parse_certificate.h"
-#include "net/cert/pki/signature_algorithm.h"
-#include "net/cert/symantec_certs.h"
 #include "net/cert/x509_certificate.h"
 #include "net/cert/x509_certificate_net_log_param.h"
 #include "net/cert/x509_util.h"
-#include "net/der/encode_values.h"
 #include "net/log/net_log_event_type.h"
 #include "net/log/net_log_values.h"
 #include "net/log/net_log_with_source.h"
+#include "third_party/boringssl/src/include/openssl/pki/ocsp.h"
 #include "third_party/boringssl/src/include/openssl/pool.h"
+#include "third_party/boringssl/src/pki/encode_values.h"
+#include "third_party/boringssl/src/pki/extended_key_usage.h"
+#include "third_party/boringssl/src/pki/ocsp.h"
+#include "third_party/boringssl/src/pki/parse_certificate.h"
+#include "third_party/boringssl/src/pki/pem.h"
+#include "third_party/boringssl/src/pki/signature_algorithm.h"
 #include "url/url_canon.h"
 
-#if BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(USE_NSS_CERTS) ||               \
-    BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED) || BUILDFLAG(IS_ANDROID) || \
-    BUILDFLAG(IS_LINUX)
+#if BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
 #include "net/cert/cert_verify_proc_builtin.h"
 #endif
 
@@ -76,12 +78,15 @@ const char kLeafCert[] = "Leaf";
 const char kIntermediateCert[] = "Intermediate";
 const char kRootCert[] = "Root";
 
-// Histogram buckets for RSA/DSA/DH key sizes.
-const int kRsaDsaKeySizes[] = {512, 768, 1024, 1536, 2048, 3072, 4096, 8192,
-                               16384};
-// Histogram buckets for ECDSA/ECDH key sizes. The list is based upon the FIPS
-// 186-4 approved curves.
-const int kEccKeySizes[] = {163, 192, 224, 233, 256, 283, 384, 409, 521, 571};
+// Histogram buckets for RSA key sizes, as well as unknown key types. RSA key
+// sizes < 1024 bits should cause errors, while key sizes > 16K are not
+// supported by BoringSSL.
+const int kRsaKeySizes[] = {512,  768,  1024, 1536, 2048,
+                            3072, 4096, 8192, 16384};
+// Histogram buckets for ECDSA key sizes. The list was historically based upon
+// FIPS 186-4 approved curves, but most are impossible. BoringSSL will only ever
+// return P-224, P-256, P-384, or P-521, and the verifier will reject P-224.
+const int kEcdsaKeySizes[] = {163, 192, 224, 233, 256, 283, 384, 409, 521, 571};
 
 const char* CertTypeToString(X509Certificate::PublicKeyType cert_type) {
   switch (cert_type) {
@@ -89,17 +94,10 @@ const char* CertTypeToString(X509Certificate::PublicKeyType cert_type) {
       return "Unknown";
     case X509Certificate::kPublicKeyTypeRSA:
       return "RSA";
-    case X509Certificate::kPublicKeyTypeDSA:
-      return "DSA";
     case X509Certificate::kPublicKeyTypeECDSA:
       return "ECDSA";
-    case X509Certificate::kPublicKeyTypeDH:
-      return "DH";
-    case X509Certificate::kPublicKeyTypeECDH:
-      return "ECDH";
   }
   NOTREACHED();
-  return "Unsupported";
 }
 
 void RecordPublicKeyHistogram(const char* chain_position,
@@ -116,33 +114,30 @@ void RecordPublicKeyHistogram(const char* chain_position,
   base::HistogramBase* counter = nullptr;
 
   // Histogram buckets are contingent upon the underlying algorithm being used.
-  if (cert_type == X509Certificate::kPublicKeyTypeECDH ||
-      cert_type == X509Certificate::kPublicKeyTypeECDSA) {
-    // Typical key sizes match SECP/FIPS 186-3 recommendations for prime and
-    // binary curves - which range from 163 bits to 571 bits.
-    counter = base::CustomHistogram::FactoryGet(
-        histogram_name,
-        base::CustomHistogram::ArrayToCustomEnumRanges(kEccKeySizes),
-        base::HistogramBase::kUmaTargetedHistogramFlag);
-  } else {
-    // Key sizes < 1024 bits should cause errors, while key sizes > 16K are not
-    // uniformly supported by the underlying cryptographic libraries.
-    counter = base::CustomHistogram::FactoryGet(
-        histogram_name,
-        base::CustomHistogram::ArrayToCustomEnumRanges(kRsaDsaKeySizes),
-        base::HistogramBase::kUmaTargetedHistogramFlag);
+  switch (cert_type) {
+    case X509Certificate::kPublicKeyTypeECDSA:
+      counter = base::CustomHistogram::FactoryGet(
+          histogram_name,
+          base::CustomHistogram::ArrayToCustomEnumRanges(kEcdsaKeySizes),
+          base::HistogramBase::kUmaTargetedHistogramFlag);
+      break;
+    case X509Certificate::kPublicKeyTypeRSA:
+    case X509Certificate::kPublicKeyTypeUnknown:
+      counter = base::CustomHistogram::FactoryGet(
+          histogram_name,
+          base::CustomHistogram::ArrayToCustomEnumRanges(kRsaKeySizes),
+          base::HistogramBase::kUmaTargetedHistogramFlag);
+      break;
   }
   counter->Add(size_bits);
 }
 
-// Returns true if |type| is |kPublicKeyTypeRSA| or |kPublicKeyTypeDSA|, and
-// if |size_bits| is < 1024. Note that this means there may be false
-// negatives: keys for other algorithms and which are weak will pass this
-// test.
+// Returns true if |type| is |kPublicKeyTypeRSA| and if |size_bits| is < 1024.
+// Note that this means there may be false negatives: keys for other algorithms
+// and which are weak will pass this test.
 bool IsWeakKey(X509Certificate::PublicKeyType type, size_t size_bits) {
   switch (type) {
     case X509Certificate::kPublicKeyTypeRSA:
-    case X509Certificate::kPublicKeyTypeDSA:
       return size_bits < 1024;
     default:
       return false;
@@ -170,25 +165,21 @@ bool ExaminePublicKeys(const scoped_refptr<X509Certificate>& cert,
       cert->valid_start() >= kBaselineEffectiveDate &&
       cert->valid_expiry() >= kBaselineKeysizeEffectiveDate;
 
-  X509Certificate::GetPublicKeyInfo(cert->cert_buffer(), &size_bits, &type);
-  if (should_histogram) {
-    RecordPublicKeyHistogram(kLeafCert, baseline_keysize_applies, size_bits,
-                             type);
-  }
-  if (IsWeakKey(type, size_bits))
-    weak_key = true;
-
-  const std::vector<bssl::UniquePtr<CRYPTO_BUFFER>>& intermediates =
-      cert->intermediate_buffers();
-  for (size_t i = 0; i < intermediates.size(); ++i) {
-    X509Certificate::GetPublicKeyInfo(intermediates[i].get(), &size_bits,
-                                      &type);
+  const std::vector<bssl::UniquePtr<CRYPTO_BUFFER>>& certs =
+      cert->cert_buffers();
+  for (size_t i = 0; i < certs.size(); ++i) {
+    X509Certificate::GetPublicKeyInfo(certs[i].get(), &size_bits, &type);
     if (should_histogram) {
-      RecordPublicKeyHistogram(
-          (i < intermediates.size() - 1) ? kIntermediateCert : kRootCert,
-          baseline_keysize_applies,
-          size_bits,
-          type);
+      const char* chain_position;
+      if (i == 0) {
+        chain_position = kLeafCert;
+      } else if (i < certs.size() - 1) {
+        chain_position = kIntermediateCert;
+      } else {
+        chain_position = kRootCert;
+      }
+      RecordPublicKeyHistogram(chain_position, baseline_keysize_applies,
+                               size_bits, type);
     }
     if (!weak_key && IsWeakKey(type, size_bits))
       weak_key = true;
@@ -199,26 +190,26 @@ bool ExaminePublicKeys(const scoped_refptr<X509Certificate>& cert,
 
 void BestEffortCheckOCSP(const std::string& raw_response,
                          const X509Certificate& certificate,
-                         OCSPVerifyResult* verify_result) {
+                         bssl::OCSPVerifyResult* verify_result) {
   if (raw_response.empty()) {
-    *verify_result = OCSPVerifyResult();
-    verify_result->response_status = OCSPVerifyResult::MISSING;
+    *verify_result = bssl::OCSPVerifyResult();
+    verify_result->response_status = bssl::OCSPVerifyResult::MISSING;
     return;
   }
 
-  base::StringPiece cert_der =
+  std::string_view cert_der =
       x509_util::CryptoBufferAsStringPiece(certificate.cert_buffer());
 
   // Try to get the certificate that signed |certificate|. This will run into
   // problems if the CertVerifyProc implementation doesn't return the ordered
   // certificates. If that happens the OCSP verification may be incorrect.
-  base::StringPiece issuer_der;
+  std::string_view issuer_der;
   if (certificate.intermediate_buffers().empty()) {
     if (X509Certificate::IsSelfSigned(certificate.cert_buffer())) {
       issuer_der = cert_der;
     } else {
       // A valid cert chain wasn't provided.
-      *verify_result = OCSPVerifyResult();
+      *verify_result = bssl::OCSPVerifyResult();
       return;
     }
   } else {
@@ -226,7 +217,7 @@ void BestEffortCheckOCSP(const std::string& raw_response,
         certificate.intermediate_buffers().front().get());
   }
 
-  verify_result->revocation_status = CheckOCSP(
+  verify_result->revocation_status = bssl::CheckOCSP(
       raw_response, cert_der, issuer_der, base::Time::Now().ToTimeT(),
       kMaxRevocationLeafUpdateAge.InSeconds(), &verify_result->response_status);
 }
@@ -249,7 +240,9 @@ void BestEffortCheckOCSP(const std::string& raw_response,
 // |spki_hashes| - that is, situations in which the OS methods of detecting
 // a known root flag a certificate as known, but its hash is not known as part
 // of the built-in list.
-void RecordTrustAnchorHistogram(const HashValueVector& spki_hashes,
+// TODO(crbug.com/347047630): Remove this after the new histogram has
+// accumulated sufficient history.
+void RecordTrustAnchorHistogram(const std::vector<SHA256HashValue>& spki_hashes,
                                 bool is_issued_by_known_root) {
   int32_t id = 0;
   for (const auto& hash : spki_hashes) {
@@ -270,14 +263,13 @@ void RecordTrustAnchorHistogram(const HashValueVector& spki_hashes,
 
 // Inspects the signature algorithms in a single certificate |cert|.
 //
-//   * Sets |verify_result->has_sha1| to true if the certificate uses SHA1.
-//
-// Returns false if the signature algorithm was unknown or mismatched.
+// Returns false if the signature algorithm was unknown, mismatched, or
+// not allowed.
 [[nodiscard]] bool InspectSignatureAlgorithmForCert(
     const CRYPTO_BUFFER* cert,
     CertVerifyResult* verify_result) {
-  base::StringPiece cert_algorithm_sequence;
-  base::StringPiece tbs_algorithm_sequence;
+  std::string_view cert_algorithm_sequence;
+  std::string_view tbs_algorithm_sequence;
 
   // Extract the AlgorithmIdentifier SEQUENCEs
   if (!asn1::ExtractSignatureAlgorithmsFromDERCert(
@@ -286,34 +278,24 @@ void RecordTrustAnchorHistogram(const HashValueVector& spki_hashes,
     return false;
   }
 
-  absl::optional<SignatureAlgorithm> cert_algorithm =
-      ParseSignatureAlgorithm(der::Input(cert_algorithm_sequence));
-  absl::optional<SignatureAlgorithm> tbs_algorithm =
-      ParseSignatureAlgorithm(der::Input(tbs_algorithm_sequence));
+  std::optional<bssl::SignatureAlgorithm> cert_algorithm =
+      bssl::ParseSignatureAlgorithm(bssl::der::Input(cert_algorithm_sequence));
+  std::optional<bssl::SignatureAlgorithm> tbs_algorithm =
+      bssl::ParseSignatureAlgorithm(bssl::der::Input(tbs_algorithm_sequence));
   if (!cert_algorithm || !tbs_algorithm || *cert_algorithm != *tbs_algorithm) {
     return false;
   }
 
-  switch (*cert_algorithm) {
-    case SignatureAlgorithm::kRsaPkcs1Sha1:
-    case SignatureAlgorithm::kEcdsaSha1:
-      verify_result->has_sha1 = true;
-      return true;  // For now.
-
-    case SignatureAlgorithm::kRsaPkcs1Sha256:
-    case SignatureAlgorithm::kRsaPkcs1Sha384:
-    case SignatureAlgorithm::kRsaPkcs1Sha512:
-    case SignatureAlgorithm::kEcdsaSha256:
-    case SignatureAlgorithm::kEcdsaSha384:
-    case SignatureAlgorithm::kEcdsaSha512:
-    case SignatureAlgorithm::kRsaPssSha256:
-    case SignatureAlgorithm::kRsaPssSha384:
-    case SignatureAlgorithm::kRsaPssSha512:
-      return true;
+  if (*cert_algorithm == bssl::SignatureAlgorithm::kRsaPkcs1Sha1 ||
+      *cert_algorithm == bssl::SignatureAlgorithm::kEcdsaSha1) {
+    // The underlying verifier has likely already failed due to the SHA-1
+    // signature, double-checking here is mostly unnecessary. (The only case
+    // this is check is expected to be load-bearing is when cronet is running
+    // on an old Android (before Android 10) that allows SHA-1 signatures.)
+    return false;
   }
 
-  NOTREACHED();
-  return false;
+  return true;
 }
 
 // InspectSignatureAlgorithmsInChain() sets |verify_result->has_*| based on
@@ -342,49 +324,40 @@ void RecordTrustAnchorHistogram(const HashValueVector& spki_hashes,
 // in order to prevent such confusion.
 [[nodiscard]] bool InspectSignatureAlgorithmsInChain(
     CertVerifyResult* verify_result) {
-  const std::vector<bssl::UniquePtr<CRYPTO_BUFFER>>& intermediates =
-      verify_result->verified_cert->intermediate_buffers();
-
   // If there are no intermediates, then the leaf is trusted or verification
   // failed.
-  if (intermediates.empty())
+  if (verify_result->verified_cert->intermediate_buffers().empty()) {
     return true;
-
-  DCHECK(!verify_result->has_sha1);
-
-  // Fill in hash algorithms for the leaf certificate.
-  if (!InspectSignatureAlgorithmForCert(
-          verify_result->verified_cert->cert_buffer(), verify_result)) {
-    return false;
   }
 
-  // Fill in hash algorithms for the intermediate cerificates, excluding the
+  // Fill in hash algorithms for the certificates, excluding the
   // final one (which is presumably the trust anchor; may be incorrect for
   // partial chains).
-  for (size_t i = 0; i + 1 < intermediates.size(); ++i) {
-    if (!InspectSignatureAlgorithmForCert(intermediates[i].get(),
-                                          verify_result))
+  for (const auto& cert :
+       base::span(verify_result->verified_cert->cert_buffers())
+           .first(verify_result->verified_cert->cert_buffers().size() - 1)) {
+    if (!InspectSignatureAlgorithmForCert(cert.get(), verify_result)) {
       return false;
+    }
   }
 
   return true;
 }
 
-base::Value::Dict CertVerifyParams(
-    X509Certificate* cert,
-    const std::string& hostname,
-    const std::string& ocsp_response,
-    const std::string& sct_list,
-    int flags,
-    CRLSet* crl_set,
-    const CertificateList& additional_trust_anchors) {
-  base::Value::Dict dict;
+base::DictValue CertVerifyParams(X509Certificate* cert,
+                                 const std::string& hostname,
+                                 const std::string& ocsp_response,
+                                 const std::string& sct_list,
+                                 int flags,
+                                 CRLSet* crl_set) {
+  base::DictValue dict;
   dict.Set("certificates", NetLogX509CertificateList(cert));
   if (!ocsp_response.empty()) {
-    dict.Set("ocsp_response", PEMEncode(ocsp_response, "NETLOG OCSP RESPONSE"));
+    dict.Set("stapled_ocsp_response",
+             bssl::PEMEncode(ocsp_response, "NETLOG OCSP RESPONSE"));
   }
   if (!sct_list.empty()) {
-    dict.Set("sct_list", PEMEncode(sct_list, "NETLOG SCT LIST"));
+    dict.Set("tls_sct_list", bssl::PEMEncode(sct_list, "NETLOG SCT LIST"));
   }
   dict.Set("host", NetLogStringValue(hostname));
   dict.Set("verify_flags", flags);
@@ -392,26 +365,12 @@ base::Value::Dict CertVerifyParams(
   if (crl_set->IsExpired())
     dict.Set("crlset_is_expired", true);
 
-  if (!additional_trust_anchors.empty()) {
-    base::Value::List certs;
-    for (auto& anchor : additional_trust_anchors) {
-      std::string pem_encoded;
-      if (X509Certificate::GetPEMEncodedFromDER(
-              x509_util::CryptoBufferAsStringPiece(anchor->cert_buffer()),
-              &pem_encoded)) {
-        certs.Append(std::move(pem_encoded));
-      }
-    }
-    dict.Set("additional_trust_anchors", std::move(certs));
-  }
-
   return dict;
 }
 
 }  // namespace
 
-#if !(BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(IS_LINUX) || \
-      BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(CHROME_ROOT_STORE_ONLY))
+#if !(BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(CHROME_ROOT_STORE_ONLY))
 // static
 scoped_refptr<CertVerifyProc> CertVerifyProc::CreateSystemVerifyProc(
     scoped_refptr<CertNetFetcher> cert_net_fetcher,
@@ -427,15 +386,19 @@ scoped_refptr<CertVerifyProc> CertVerifyProc::CreateSystemVerifyProc(
 }
 #endif
 
-#if BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(USE_NSS_CERTS) || \
-    BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
+#if BUILDFLAG(IS_FUCHSIA)
 // static
 scoped_refptr<CertVerifyProc> CertVerifyProc::CreateBuiltinVerifyProc(
     scoped_refptr<CertNetFetcher> cert_net_fetcher,
-    scoped_refptr<CRLSet> crl_set) {
-  return CreateCertVerifyProcBuiltin(std::move(cert_net_fetcher),
-                                     std::move(crl_set),
-                                     CreateSslSystemTrustStore());
+    scoped_refptr<CRLSet> crl_set,
+    std::unique_ptr<CTVerifier> ct_verifier,
+    scoped_refptr<CTPolicyEnforcer> ct_policy_enforcer,
+    const InstanceParams instance_params,
+    std::optional<network_time::TimeTracker> time_tracker) {
+  return CreateCertVerifyProcBuiltin(
+      std::move(cert_net_fetcher), std::move(crl_set), std::move(ct_verifier),
+      std::move(ct_policy_enforcer), CreateSslSystemTrustStore(),
+      instance_params, std::move(time_tracker));
 }
 #endif
 
@@ -444,13 +407,24 @@ scoped_refptr<CertVerifyProc> CertVerifyProc::CreateBuiltinVerifyProc(
 scoped_refptr<CertVerifyProc> CertVerifyProc::CreateBuiltinWithChromeRootStore(
     scoped_refptr<CertNetFetcher> cert_net_fetcher,
     scoped_refptr<CRLSet> crl_set,
-    const ChromeRootStoreData* root_store_data) {
+    std::unique_ptr<CTVerifier> ct_verifier,
+    scoped_refptr<CTPolicyEnforcer> ct_policy_enforcer,
+    const ChromeRootStoreData* root_store_data,
+    const ChromeRootStoreMtcMetadata* root_store_mtc_metadata,
+    const InstanceParams instance_params,
+    std::optional<network_time::TimeTracker> time_tracker) {
   std::unique_ptr<TrustStoreChrome> chrome_root =
-      root_store_data ? std::make_unique<TrustStoreChrome>(*root_store_data)
-                      : std::make_unique<TrustStoreChrome>();
+      std::make_unique<TrustStoreChrome>(root_store_data,
+                                         root_store_mtc_metadata);
   return CreateCertVerifyProcBuiltin(
-      std::move(cert_net_fetcher), std::move(crl_set),
-      CreateSslSystemTrustStoreChromeRoot(std::move(chrome_root)));
+      std::move(cert_net_fetcher), std::move(crl_set), std::move(ct_verifier),
+      std::move(ct_policy_enforcer),
+#if BUILDFLAG(IS_CHROMEOS)
+      CreateChromeOnlySystemTrustStore(std::move(chrome_root)),
+#else
+      CreateSslSystemTrustStoreChromeRoot(std::move(chrome_root)),
+#endif
+      instance_params, std::move(time_tracker));
 }
 #endif
 
@@ -466,7 +440,6 @@ int CertVerifyProc::Verify(X509Certificate* cert,
                            const std::string& ocsp_response,
                            const std::string& sct_list,
                            int flags,
-                           const CertificateList& additional_trust_anchors,
                            CertVerifyResult* verify_result,
                            const NetLogWithSource& net_log) {
   CHECK(cert);
@@ -474,7 +447,7 @@ int CertVerifyProc::Verify(X509Certificate* cert,
 
   net_log.BeginEvent(NetLogEventType::CERT_VERIFY_PROC, [&] {
     return CertVerifyParams(cert, hostname, ocsp_response, sct_list, flags,
-                            crl_set(), additional_trust_anchors);
+                            crl_set());
   });
   // CertVerifyProc's contract allows ::VerifyInternal() to wait on File I/O
   // (such as the Windows registry or smart cards on all platforms) or may re-
@@ -489,9 +462,13 @@ int CertVerifyProc::Verify(X509Certificate* cert,
   verify_result->verified_cert = cert;
 
   int rv = VerifyInternal(cert, hostname, ocsp_response, sct_list, flags,
-                          additional_trust_anchors, verify_result, net_log);
+                          verify_result, net_log);
 
   CHECK(verify_result->verified_cert);
+  if (rv == OK) {
+    CHECK_EQ(verify_result->verified_cert->cert_buffers().size(),
+             verify_result->public_key_hashes.size());
+  }
 
   // Check for mismatched signature algorithms and unknown signature algorithms
   // in the chain. Also fills in the has_* booleans for the digest algorithms
@@ -507,7 +484,7 @@ int CertVerifyProc::Verify(X509Certificate* cert,
   }
 
   if (verify_result->ocsp_result.response_status ==
-      OCSPVerifyResult::NOT_CHECKED) {
+      bssl::OCSPVerifyResult::NOT_CHECKED) {
     // If VerifyInternal did not record the result of checking stapled OCSP,
     // do it now.
     BestEffortCheckOCSP(ocsp_response, *verify_result->verified_cert,
@@ -516,11 +493,7 @@ int CertVerifyProc::Verify(X509Certificate* cert,
 
   // Check to see if the connection is being intercepted.
   for (const auto& hash : verify_result->public_key_hashes) {
-    if (hash.tag() != HASH_VALUE_SHA256) {
-      continue;
-    }
-    if (!crl_set()->IsKnownInterceptionKey(base::StringPiece(
-            reinterpret_cast<const char*>(hash.data()), hash.size()))) {
+    if (!crl_set()->IsKnownInterceptionKey(hash)) {
       continue;
     }
 
@@ -560,46 +533,29 @@ int CertVerifyProc::Verify(X509Certificate* cert,
       rv = MapCertStatusToNetError(verify_result->cert_status);
   }
 
-  if (verify_result->has_sha1)
-    verify_result->cert_status |= CERT_STATUS_SHA1_SIGNATURE_PRESENT;
-
-  // Flag certificates using weak signature algorithms.
-  bool sha1_allowed = (flags & VERIFY_ENABLE_SHA1_LOCAL_ANCHORS) &&
-                      !verify_result->is_issued_by_known_root;
-  if (!sha1_allowed && verify_result->has_sha1) {
-    verify_result->cert_status |= CERT_STATUS_WEAK_SIGNATURE_ALGORITHM;
-    // Avoid replacing a more serious error, such as an OS/library failure,
-    // by ensuring that if verification failed, it failed with a certificate
-    // error.
-    if (rv == OK || IsCertificateError(rv))
-      rv = MapCertStatusToNetError(verify_result->cert_status);
-  }
-
-  // Distrust Symantec-issued certificates, as described at
-  // https://security.googleblog.com/2017/09/chromes-plan-to-distrust-symantec.html
-  if (!(flags & VERIFY_DISABLE_SYMANTEC_ENFORCEMENT) &&
-      IsLegacySymantecCert(verify_result->public_key_hashes)) {
-    verify_result->cert_status |= CERT_STATUS_SYMANTEC_LEGACY;
-    if (rv == OK || IsCertificateError(rv))
-      rv = MapCertStatusToNetError(verify_result->cert_status);
-  }
-
-  // Flag certificates from publicly-trusted CAs that are issued to intranet
-  // hosts. While the CA/Browser Forum Baseline Requirements (v1.1) permit
-  // these to be issued until 1 November 2015, they represent a real risk for
-  // the deployment of gTLDs and are being phased out ahead of the hard
-  // deadline.
-  if (verify_result->is_issued_by_known_root && IsHostnameNonUnique(hostname)) {
-    verify_result->cert_status |= CERT_STATUS_NON_UNIQUE_NAME;
-    // CERT_STATUS_NON_UNIQUE_NAME will eventually become a hard error. For
-    // now treat it as a warning and do not map it to an error return value.
-  }
-
   // Flag certificates using too long validity periods.
   if (verify_result->is_issued_by_known_root && HasTooLongValidity(*cert)) {
     verify_result->cert_status |= CERT_STATUS_VALIDITY_TOO_LONG;
     if (rv == OK)
       rv = MapCertStatusToNetError(verify_result->cert_status);
+  }
+
+  // Flag certificates from publicly-trusted CAs that are issued to intranet
+  // hosts. These are not allowed per the CA/Browser Forum requirements.
+  //
+  // Validity period is checked first just for testing convenience; there's not
+  // a strong security reason to let validity period vs non-unique names take
+  // precedence.
+  if (verify_result->is_issued_by_known_root && IsHostnameNonUnique(hostname)) {
+    verify_result->cert_status |= CERT_STATUS_NON_UNIQUE_NAME;
+    // On Cronet, CERT_STATUS_NON_UNIQUE_NAME is recorded as a warning but not
+    // treated as an error, because consumers have tests that use certs with
+    // non-unique names. See b/337196170 (Google-internal).
+#if !BUILDFLAG(CRONET_BUILD)
+    if (rv == OK) {
+      rv = MapCertStatusToNetError(verify_result->cert_status);
+    }
+#endif  // !BUILDFLAG(CRONET_BUILD)
   }
 
   // Record a histogram for per-verification usage of root certs.
@@ -613,13 +569,32 @@ int CertVerifyProc::Verify(X509Certificate* cert,
   return rv;
 }
 
+scoped_refptr<X509Certificate> CertVerifyProc::Verify2QwacBinding(
+    std::string_view binding,
+    const std::string& hostname,
+    base::span<const uint8_t> tls_cert,
+    const NetLogWithSource& net_log) {
+  return nullptr;
+}
+
+int CertVerifyProc::Verify2Qwac(X509Certificate* cert,
+                                const std::string& hostname,
+                                CertVerifyResult* verify_result,
+                                const NetLogWithSource& net_log) {
+  // Default implementation of Verify2QwacInternal that always fails.
+  // Subclasses that actually implement 2-QWAC verification should override
+  // this.
+  verify_result->cert_status |= CERT_STATUS_INVALID;
+  return ERR_CERT_INVALID;
+}
+
 // static
 void CertVerifyProc::LogNameNormalizationResult(
     const std::string& histogram_suffix,
     NameNormalizationResult result) {
   base::UmaHistogramEnumeration(
-      std::string("Net.CertVerifier.NameNormalizationPrivateRoots") +
-          histogram_suffix,
+      base::StrCat(
+          {"Net.CertVerifier.NameNormalizationPrivateRoots", histogram_suffix}),
       result);
 }
 
@@ -637,27 +612,20 @@ void CertVerifyProc::LogNameNormalizationMetrics(
     return;
   }
 
-  std::vector<CRYPTO_BUFFER*> der_certs;
-  der_certs.push_back(verified_cert->cert_buffer());
-  for (const auto& buf : verified_cert->intermediate_buffers())
-    der_certs.push_back(buf.get());
+  std::vector<bssl::der::Input> subjects;
+  std::vector<bssl::der::Input> issuers;
 
-  ParseCertificateOptions options;
-  options.allow_invalid_serial_numbers = true;
-
-  std::vector<der::Input> subjects;
-  std::vector<der::Input> issuers;
-
-  for (auto* buf : der_certs) {
-    der::Input tbs_certificate_tlv;
-    der::Input signature_algorithm_tlv;
-    der::BitString signature_value;
-    ParsedTbsCertificate tbs;
-    if (!ParseCertificate(
-            der::Input(CRYPTO_BUFFER_data(buf), CRYPTO_BUFFER_len(buf)),
-            &tbs_certificate_tlv, &signature_algorithm_tlv, &signature_value,
-            nullptr /* errors*/) ||
-        !ParseTbsCertificate(tbs_certificate_tlv, options, &tbs,
+  for (const auto& buf : verified_cert->cert_buffers()) {
+    bssl::der::Input tbs_certificate_tlv;
+    bssl::der::Input signature_algorithm_tlv;
+    bssl::der::BitString signature_value;
+    bssl::ParsedTbsCertificate tbs;
+    if (!bssl::ParseCertificate(bssl::der::Input(CRYPTO_BUFFER_data(buf.get()),
+                                                 CRYPTO_BUFFER_len(buf.get())),
+                                &tbs_certificate_tlv, &signature_algorithm_tlv,
+                                &signature_value, nullptr /* errors*/) ||
+        !ParseTbsCertificate(tbs_certificate_tlv,
+                             x509_util::DefaultParseCertificateOptions(), &tbs,
                              nullptr /*errors*/)) {
       LogNameNormalizationResult(histogram_suffix,
                                  NameNormalizationResult::kError);
@@ -682,7 +650,7 @@ void CertVerifyProc::LogNameNormalizationMetrics(
 // CheckNameConstraints verifies that every name in |dns_names| is in one of
 // the domains specified by |domains|.
 static bool CheckNameConstraints(const std::vector<std::string>& dns_names,
-                                 base::span<const base::StringPiece> domains) {
+                                 base::span<const std::string_view> domains) {
   for (const auto& host : dns_names) {
     bool ok = false;
     url::CanonHostInfo host_info;
@@ -704,8 +672,8 @@ static bool CheckNameConstraints(const std::vector<std::string>& dns_names,
       DCHECK_EQ('.', domain[0]);
       if (dns_name.size() <= domain.size())
         continue;
-      base::StringPiece suffix =
-          base::StringPiece(dns_name).substr(dns_name.size() - domain.size());
+      std::string_view suffix =
+          std::string_view(dns_name).substr(dns_name.size() - domain.size());
       if (!base::EqualsCaseInsensitiveASCII(suffix, domain))
         continue;
       ok = true;
@@ -721,11 +689,11 @@ static bool CheckNameConstraints(const std::vector<std::string>& dns_names,
 
 // static
 bool CertVerifyProc::HasNameConstraintsViolation(
-    const HashValueVector& public_key_hashes,
+    const std::vector<SHA256HashValue>& public_key_hashes,
     const std::string& common_name,
     const std::vector<std::string>& dns_names,
     const std::vector<std::string>& ip_addrs) {
-  static constexpr base::StringPiece kDomainsANSSI[] = {
+  static constexpr std::string_view kDomainsANSSI[] = {
       ".fr",  // France
       ".gp",  // Guadeloupe
       ".gf",  // Guyane
@@ -741,7 +709,7 @@ bool CertVerifyProc::HasNameConstraintsViolation(
       ".tf",  // Terres australes et antarctiques françaises
   };
 
-  static constexpr base::StringPiece kDomainsTest[] = {
+  static constexpr std::string_view kDomainsTest[] = {
       ".example.com",
   };
 
@@ -753,9 +721,9 @@ bool CertVerifyProc::HasNameConstraintsViolation(
   // openssl x509 -noout -in <cert>.pem -pubkey | \
   //   openssl asn1parse -noout -inform pem -out - | \
   //   openssl dgst -sha256 -binary | xxd -i
-  static const struct PublicKeyDomainLimitation {
+  static constexpr struct PublicKeyDomainLimitation {
     SHA256HashValue public_key_hash;
-    base::span<const base::StringPiece> domains;
+    base::raw_span<const std::string_view> domains;
   } kLimits[] = {
       // C=FR, ST=France, L=Paris, O=PM/SGDN, OU=DCSSI,
       // CN=IGC/A/emailAddress=igca@sgdn.pm.gouv.fr
@@ -779,10 +747,9 @@ bool CertVerifyProc::HasNameConstraintsViolation(
 
   for (const auto& limit : kLimits) {
     for (const auto& hash : public_key_hashes) {
-      if (hash.tag() != HASH_VALUE_SHA256)
+      if (hash != limit.public_key_hash) {
         continue;
-      if (memcmp(hash.data(), limit.public_key_hash.data, hash.size()) != 0)
-        continue;
+      }
       if (dns_names.empty() && ip_addrs.empty()) {
         std::vector<std::string> names;
         names.push_back(common_name);
@@ -800,8 +767,8 @@ bool CertVerifyProc::HasNameConstraintsViolation(
 
 // static
 bool CertVerifyProc::HasTooLongValidity(const X509Certificate& cert) {
-  const base::Time& start = cert.valid_start();
-  const base::Time& expiry = cert.valid_expiry();
+  base::Time start = cert.valid_start();
+  base::Time expiry = cert.valid_expiry();
   if (start.is_max() || start.is_null() || expiry.is_max() ||
       expiry.is_null() || start > expiry) {
     return true;
@@ -825,32 +792,93 @@ bool CertVerifyProc::HasTooLongValidity(const X509Certificate& cert) {
   // * Certificates issued on-or-after 1 March 2018: 825 days.
   //   * Last possible expiry: 1 September 2020 + 825 days = 2022-12-05
   //
-  // The current limit, from Chrome Root Certificate Policy:
-  // * Certificates issued on-or-after 1 September 2020: 398 days.
+  // No certificates issued under these older lifetime requirements could
+  // possibly still be accepted, so we don't need to check the older limits
+  // explicitly.
 
   base::TimeDelta validity_duration = cert.valid_expiry() - cert.valid_start();
 
-  // No certificates issued before the latest lifetime requirement was enacted
-  // could possibly still be accepted, so we don't need to check the older
-  // limits explicitly.
+  // The current limits, from section 6.3.2 (Certificate operational periods
+  // and key pair usage periods) of CABF Baseline Requirements version 2.1.7.
+  //
+  // The "Last possible expiry" date indicates the date after which each
+  // condition is no longer relevant and can be removed.
+
+  // datetime.datetime(2029,3,15,tzinfo=datetime.timezone.utc).timestamp()*1000
+  static constexpr base::Time kTime_2029_03_15 =
+      base::Time::FromMillisecondsSinceUnixEpoch(1868227200000);
+  // datetime.datetime(2027,3,15,tzinfo=datetime.timezone.utc).timestamp()*1000
+  static constexpr base::Time kTime_2027_03_15 =
+      base::Time::FromMillisecondsSinceUnixEpoch(1805068800000);
+  // datetime.datetime(2026,3,15,tzinfo=datetime.timezone.utc).timestamp()*1000
+  static constexpr base::Time kTime_2026_03_15 =
+      base::Time::FromMillisecondsSinceUnixEpoch(1773532800000);
+
+  // For certificates issued on-or-after March 15, 2029: 47 days.
+  if (start >= kTime_2029_03_15) {
+    return validity_duration > base::Days(47);
+  }
+
+  // For certificates issued on-or-after March 15, 2027: 100 days.
+  // Last possible expiry: March 15, 2029 + 100 days = 2029-06-23
+  if (start >= kTime_2027_03_15) {
+    return validity_duration > base::Days(100);
+  }
+
+  // For certificates issued on-or-after March 15, 2026: 200 days.
+  // Last possible expiry: March 15, 2027 + 200 days = 2027-10-01
+  if (start >= kTime_2026_03_15) {
+    return validity_duration > base::Days(200);
+  }
+
+  // The current limit, from Chrome Root Certificate Policy:
+  // Certificates issued on-or-after 1 September 2020: 398 days.
+  // Last possible expiry: March 15, 2026 + 398 days = 2027-04-17
   return validity_duration > base::Days(398);
 }
 
-CertVerifyProcFactory::ImplParams::ImplParams() {
+CertVerifyProc::ImplParams::ImplParams() {
   crl_set = net::CRLSet::BuiltinCRLSet();
 #if BUILDFLAG(CHROME_ROOT_STORE_OPTIONAL)
-  use_chrome_root_store =
-      base::FeatureList::IsEnabled(net::features::kChromeRootStoreUsed);
+  // Defaults to using Chrome Root Store, though we have to keep this option in
+  // here to allow WebView to turn this option off.
+  use_chrome_root_store = true;
 #endif
 }
 
-CertVerifyProcFactory::ImplParams::~ImplParams() = default;
+CertVerifyProc::ImplParams::~ImplParams() = default;
 
-CertVerifyProcFactory::ImplParams::ImplParams(const ImplParams&) = default;
-CertVerifyProcFactory::ImplParams& CertVerifyProcFactory::ImplParams::operator=(
+CertVerifyProc::ImplParams::ImplParams(const ImplParams&) = default;
+CertVerifyProc::ImplParams& CertVerifyProc::ImplParams::operator=(
     const ImplParams& other) = default;
-CertVerifyProcFactory::ImplParams::ImplParams(ImplParams&&) = default;
-CertVerifyProcFactory::ImplParams& CertVerifyProcFactory::ImplParams::operator=(
+CertVerifyProc::ImplParams::ImplParams(ImplParams&&) = default;
+CertVerifyProc::ImplParams& CertVerifyProc::ImplParams::operator=(
     ImplParams&& other) = default;
+
+CertVerifyProc::InstanceParams::InstanceParams() = default;
+CertVerifyProc::InstanceParams::~InstanceParams() = default;
+
+CertVerifyProc::InstanceParams::InstanceParams(const InstanceParams&) = default;
+CertVerifyProc::InstanceParams& CertVerifyProc::InstanceParams::operator=(
+    const InstanceParams& other) = default;
+CertVerifyProc::InstanceParams::InstanceParams(InstanceParams&&) = default;
+CertVerifyProc::InstanceParams& CertVerifyProc::InstanceParams::operator=(
+    InstanceParams&& other) = default;
+
+CertVerifyProc::CertificateWithConstraints::CertificateWithConstraints() =
+    default;
+CertVerifyProc::CertificateWithConstraints::~CertificateWithConstraints() =
+    default;
+
+CertVerifyProc::CertificateWithConstraints::CertificateWithConstraints(
+    const CertificateWithConstraints&) = default;
+CertVerifyProc::CertificateWithConstraints&
+CertVerifyProc::CertificateWithConstraints::operator=(
+    const CertificateWithConstraints& other) = default;
+CertVerifyProc::CertificateWithConstraints::CertificateWithConstraints(
+    CertificateWithConstraints&&) = default;
+CertVerifyProc::CertificateWithConstraints&
+CertVerifyProc::CertificateWithConstraints::operator=(
+    CertificateWithConstraints&& other) = default;
 
 }  // namespace net

@@ -8,6 +8,7 @@
 
 #include "base/at_exit.h"
 #include "base/feature_list.h"
+#include "base/notimplemented.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool.h"
@@ -30,7 +31,7 @@ scoped_refptr<base::SingleThreadTaskRunner> InitializeAndCreateTaskRunner() {
   std::ignore = new base::AtExitManager;
 #endif
 
-  base::FeatureList::InitializeInstance(std::string(), std::string());
+  base::FeatureList::InitInstance(std::string(), std::string());
 
   // Note that in component builds this ThreadPoolInstance will be shared with
   // the calling process, if it also depends on //base. In particular this means
@@ -64,13 +65,17 @@ void PostTaskToInitThread(const base::Location& posted_from,
 
 std::unique_ptr<net::ProxyConfigService> CreateProxyConfigService(
     const scoped_refptr<base::SequencedTaskRunner>& io_task_runner) {
-  return nullptr;
+  return net::ProxyConfigService::CreateSystemProxyConfigService(
+      io_task_runner);
 }
 
 std::unique_ptr<net::ProxyResolutionService> CreateProxyResolutionService(
     std::unique_ptr<net::ProxyConfigService> proxy_config_service,
     net::NetLog* net_log) {
-  return nullptr;
+  return net::ConfiguredProxyResolutionService::CreateUsingSystemProxyResolver(
+      std::move(proxy_config_service),
+      /*host_resolver_for_override_rules=*/nullptr, net_log,
+      /*quick_check_enabled=*/true);
 }
 
 std::string CreateDefaultUserAgent(const std::string& partial_user_agent) {

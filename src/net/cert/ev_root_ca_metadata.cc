@@ -4,81 +4,53 @@
 
 #include "net/cert/ev_root_ca_metadata.h"
 
-#include "build/build_config.h"
+#include <string_view>
 
-#include "base/containers/contains.h"
-#include "base/lazy_instance.h"
 #include "base/logging.h"
-#include "base/strings/string_piece.h"
-#include "net/der/input.h"
+#include "base/no_destructor.h"
+#include "base/strings/string_view_util.h"
+#include "third_party/boringssl/src/pki/input.h"
 #if defined(PLATFORM_USES_CHROMIUM_EV_METADATA)
+#include "crypto/openssl_util.h"
+#include "net/cert/internal/chrome_root_store_data.h"
 #include "third_party/boringssl/src/include/openssl/bytestring.h"
-#include "third_party/boringssl/src/include/openssl/mem.h"
 #endif
 
 namespace net {
 
-namespace {
-#if defined(PLATFORM_USES_CHROMIUM_EV_METADATA)
-// Raw metadata.
-struct EVMetadata {
-  // kMaxOIDsPerCA is the number of OIDs that we can support per root CA. At
-  // least one CA has different EV policies for business vs government
-  // entities and, in the case of cross-signing, we might need to list another
-  // CA's policy OID under the cross-signing root.
-  static const size_t kMaxOIDsPerCA = 2;
-
-  // The SHA-256 fingerprint of the root CA certificate, used as a unique
-  // identifier for a root CA certificate.
-  SHA256HashValue fingerprint;
-
-  // The EV policy OIDs of the root CA.
-  const base::StringPiece policy_oids[kMaxOIDsPerCA];
-};
-
-#include "net/data/ssl/chrome_root_store/chrome-ev-roots-inc.cc"
-
-#endif  // defined(PLATFORM_USES_CHROMIUM_EV_METADATA)
-}  // namespace
-
-static base::LazyInstance<EVRootCAMetadata>::Leaky g_ev_root_ca_metadata =
-    LAZY_INSTANCE_INITIALIZER;
-
 // static
 EVRootCAMetadata* EVRootCAMetadata::GetInstance() {
-  return g_ev_root_ca_metadata.Pointer();
+  static base::NoDestructor<EVRootCAMetadata> ev_root_ca_metadata;
+  return ev_root_ca_metadata.get();
 }
 
 #if defined(PLATFORM_USES_CHROMIUM_EV_METADATA)
 
 namespace {
 
-std::string OIDStringToDER(base::StringPiece policy) {
-  uint8_t* der;
-  size_t len;
+std::string OIDStringToDER(std::string_view policy) {
   bssl::ScopedCBB cbb;
   if (!CBB_init(cbb.get(), 32) ||
-      !CBB_add_asn1_oid_from_text(cbb.get(), policy.data(), policy.size()) ||
-      !CBB_finish(cbb.get(), &der, &len)) {
+      !CBB_add_asn1_oid_from_text(cbb.get(), policy.data(), policy.size())) {
     return std::string();
   }
-  bssl::UniquePtr<uint8_t> delete_der(der);
-  return std::string(reinterpret_cast<const char*>(der), len);
+  return std::string(base::as_string_view(crypto::CbbAsSpan(cbb.get())));
 }
 
 }  // namespace
 
-bool EVRootCAMetadata::IsEVPolicyOID(der::Input policy_oid) const {
-  return policy_oids_.find(policy_oid.AsStringView()) != policy_oids_.end();
+bool EVRootCAMetadata::IsEVPolicyOID(bssl::der::Input policy_oid) const {
+  return policy_oids_.find(base::as_string_view(policy_oid)) !=
+         policy_oids_.end();
 }
 
 bool EVRootCAMetadata::HasEVPolicyOID(const SHA256HashValue& fingerprint,
-                                      der::Input policy_oid) const {
+                                      bssl::der::Input policy_oid) const {
   PolicyOIDMap::const_iterator iter = ev_policy_.find(fingerprint);
   if (iter == ev_policy_.end())
     return false;
   for (const std::string& ev_oid : iter->second) {
-    if (der::Input(ev_oid) == policy_oid) {
+    if (bssl::der::Input(ev_oid) == policy_oid) {
       return true;
     }
   }
@@ -115,13 +87,13 @@ bool EVRootCAMetadata::RemoveEVCA(const SHA256HashValue& fingerprint) {
 // metadata.
 //
 
-bool EVRootCAMetadata::IsEVPolicyOID(der::Input policy_oid) const {
+bool EVRootCAMetadata::IsEVPolicyOID(bssl::der::Input policy_oid) const {
   LOG(WARNING) << "Not implemented";
   return false;
 }
 
 bool EVRootCAMetadata::HasEVPolicyOID(const SHA256HashValue& fingerprint,
-                                      der::Input policy_oid) const {
+                                      bssl::der::Input policy_oid) const {
   LOG(WARNING) << "Not implemented";
   return false;
 }
@@ -140,9 +112,9 @@ bool EVRootCAMetadata::RemoveEVCA(const SHA256HashValue& fingerprint) {
 #endif
 
 EVRootCAMetadata::EVRootCAMetadata() {
-// Constructs the object from the raw metadata in kEvRootCaMetadata.
+// Constructs the object from the raw metadata in GetEvRootCaMetadata().
 #if defined(PLATFORM_USES_CHROMIUM_EV_METADATA)
-  for (const auto& ev_root : kEvRootCaMetadata) {
+  for (const auto& ev_root : GetEvRootCaMetadata()) {
     for (const auto& policy : ev_root.policy_oids) {
       if (policy.empty())
         break;

@@ -4,6 +4,8 @@
 
 #include "quiche/quic/core/http/http_constants.h"
 
+#include <string>
+
 #include "absl/strings/str_cat.h"
 
 namespace quic {
@@ -28,6 +30,7 @@ std::string H3SettingsToString(Http3AndQpackSettingsIdentifiers identifier) {
 }
 
 ABSL_CONST_INIT const absl::string_view kUserAgentHeaderName = "user-agent";
+ABSL_CONST_INIT const absl::string_view kPriorityHeaderName = "priority";
 
 #undef RETURN_STRING_LITERAL  // undef for jumbo builds
 

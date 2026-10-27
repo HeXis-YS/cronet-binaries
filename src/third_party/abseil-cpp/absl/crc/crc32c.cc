@@ -14,6 +14,7 @@
 
 #include "absl/crc/crc32c.h"
 
+#include <cstddef>
 #include <cstdint>
 
 #include "absl/crc/internal/crc.h"
@@ -54,10 +55,6 @@ crc32c_t ExtendCrc32cInternal(crc32c_t initial_crc,
 
 }  // namespace crc_internal
 
-crc32c_t ComputeCrc32c(absl::string_view buf) {
-  return ExtendCrc32c(crc32c_t{0}, buf);
-}
-
 crc32c_t ExtendCrc32cByZeroes(crc32c_t initial_crc, size_t length) {
   uint32_t crc = static_cast<uint32_t>(initial_crc) ^ kCRC32Xor;
   CrcEngine()->ExtendByZeroes(&crc, length);
@@ -77,7 +74,7 @@ crc32c_t RemoveCrc32cPrefix(crc32c_t crc_a, crc32c_t crc_ab, size_t length_b) {
 crc32c_t MemcpyCrc32c(void* dest, const void* src, size_t count,
                       crc32c_t initial_crc) {
   return static_cast<crc32c_t>(
-      crc_internal::Crc32CAndCopy(dest, src, count, initial_crc, false));
+      crc_internal::Crc32CAndCopy(dest, src, count, initial_crc));
 }
 
 // Remove a Suffix of given size from a buffer

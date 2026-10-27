@@ -7,18 +7,21 @@
 
 #include <stdint.h>
 
+#include <compare>
 #include <iosfwd>
 #include <string>
+#include <string_view>
 
 #include "base/base_export.h"
+#include "base/compiler_specific.h"
 #include "base/containers/span.h"
-#include "base/strings/string_piece.h"
-#include "base/types/pass_key.h"
-#include "build/build_config.h"
+#include "build/robolectric_buildflags.h"
+#include "third_party/abseil-cpp/absl/numeric/int128.h"
 
-namespace content {
-class FileSystemAccessManagerImpl;
-}
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_ROBOLECTRIC)
+#include "base/android/jni_string.h"
+#include "third_party/jni_zero/jni_zero.h"
+#endif
 
 namespace base {
 
@@ -36,31 +39,16 @@ class BASE_EXPORT Uuid {
   // UnguessableToken for greater type-safety if Uuid format is unnecessary.
   static Uuid GenerateRandomV4();
 
-  // Formats a sequence of 16 random bytes as a Uuid in the form of version 4.
-  // `input` must:
-  // - have been randomly generated (e.g. created from an UnguessableToken), and
-  // - be of length 16 (this is checked at compile-time).
-  // Despite taking 128 bits of randomness, certain bits will always be
-  // masked over to adhere to the V4 Uuid format.
-  // Useful in cases where an opaque identifier that is generated from stable
-  // inputs needs to be formatted as a V4 Uuid. Currently only exposed to the
-  // File System Access API to return a V4 Uuid for the getUniqueId() method.
-  static Uuid FormatRandomDataAsV4(
-      base::span<const uint8_t, kGuidV4InputLength> input,
-      base::PassKey<content::FileSystemAccessManagerImpl> pass_key);
-  static Uuid FormatRandomDataAsV4ForTesting(
-      base::span<const uint8_t, kGuidV4InputLength> input);
-
   // Returns a valid Uuid if the input string conforms to the Uuid format, and
   // an invalid Uuid otherwise. Note that this does NOT check if the hexadecimal
   // values "a" through "f" are in lower case characters.
-  static Uuid ParseCaseInsensitive(StringPiece input);
-  static Uuid ParseCaseInsensitive(StringPiece16 input);
+  static Uuid ParseCaseInsensitive(std::string_view input);
+  static Uuid ParseCaseInsensitive(std::u16string_view input);
 
   // Similar to ParseCaseInsensitive(), but all hexadecimal values "a" through
   // "f" must be lower case characters.
-  static Uuid ParseLowercase(StringPiece input);
-  static Uuid ParseLowercase(StringPiece16 input);
+  static Uuid ParseLowercase(std::string_view input);
+  static Uuid ParseLowercase(std::u16string_view input);
 
   // Constructs an invalid Uuid.
   Uuid();
@@ -80,21 +68,24 @@ class BASE_EXPORT Uuid {
   // should not treat it as such. When the internal type of base::Uuid changes,
   // this will be a non-trivial converter. See the TODO above `lowercase_` for
   // more context.
-  const std::string& AsLowercaseString() const;
+  const std::string& AsLowercaseString() const LIFETIME_BOUND;
+
+  // Returns the Uuid as a 128-bit integer, or 0 if the Uuid is invalid.
+  // Note: The memory layout is platform-dependent. On little-endian systems, it
+  // matches neither the RFC 4122 byte sequence nor the Microsoft GUID layout.
+  // Do not interpret or store the returned integer as a byte array.
+  absl::uint128 AsInteger() const;
 
   // Invalid Uuids are equal.
-  bool operator==(const Uuid& other) const;
-  bool operator!=(const Uuid& other) const;
-  bool operator<(const Uuid& other) const;
-  bool operator<=(const Uuid& other) const;
-  bool operator>(const Uuid& other) const;
-  bool operator>=(const Uuid& other) const;
+  friend bool operator==(const Uuid&, const Uuid&) = default;
+  // Uuids are 128bit chunks of data so must be indistinguishable if equivalent.
+  friend std::strong_ordering operator<=>(const Uuid&, const Uuid&) = default;
 
  private:
   static Uuid FormatRandomDataAsV4Impl(
       base::span<const uint8_t, kGuidV4InputLength> input);
 
-  // TODO(crbug.com/1026195): Consider using a different internal type.
+  // TODO(crbug.com/40108138): Consider using a different internal type.
   // Most existing representations of Uuids in the codebase use std::string,
   // so matching the internal type will avoid inefficient string conversions
   // during the migration to base::Uuid.
@@ -113,5 +104,32 @@ struct BASE_EXPORT UuidHash {
 BASE_EXPORT std::ostream& operator<<(std::ostream& out, const Uuid& uuid);
 
 }  // namespace base
+
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_ROBOLECTRIC)
+
+namespace jni_zero {
+
+template <>
+inline base::Uuid FromJniType<base::Uuid>(
+    JNIEnv* env,
+    const jni_zero::JavaRef<jobject>& obj) {
+  if (!obj) {
+    return base::Uuid();
+  }
+  return {};
+}
+
+template <>
+inline ScopedJavaLocalRef<jobject> ToJniType<base::Uuid>(
+    JNIEnv* env,
+    const base::Uuid& uuid) {
+  if (!uuid.is_valid()) {
+    return nullptr;
+  }
+  return {};
+}
+
+}  // namespace jni_zero
+#endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_ROBOLECTRIC)
 
 #endif  // BASE_UUID_H_

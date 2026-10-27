@@ -6,7 +6,9 @@
 #define QUICHE_QUIC_CORE_CRYPTO_QUIC_CLIENT_SESSION_CACHE_H_
 
 #include <memory>
+#include <string>
 
+#include "absl/hash/hash.h"
 #include "quiche/quic/core/crypto/quic_crypto_client_config.h"
 #include "quiche/quic/core/quic_lru_cache.h"
 #include "quiche/quic/core/quic_server_id.h"
@@ -43,7 +45,11 @@ class QUICHE_EXPORT QuicClientSessionCache : public SessionCache {
 
   void Clear() override;
 
-  size_t size() const { return cache_.Size(); }
+  size_t GetSize() const override;
+
+  size_t GetMaxSize() const override;
+
+  void UpdateMaxSize(size_t max_entries) override;
 
  private:
   friend class test::QuicClientSessionCachePeer;
@@ -74,7 +80,7 @@ class QUICHE_EXPORT QuicClientSessionCache : public SessionCache {
                             const TransportParameters& params,
                             const ApplicationState* application_state);
 
-  QuicLRUCache<QuicServerId, Entry, QuicServerIdHash> cache_;
+  QuicLRUCache<std::string, Entry, absl::Hash<std::string>> cache_;
 };
 
 }  // namespace quic

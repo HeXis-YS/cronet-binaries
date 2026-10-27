@@ -22,8 +22,7 @@ enum class TaskRunnerType { BASE, SEQUENCED, SINGLE_THREAD };
 // a C++ TaskRunner.
 class BASE_EXPORT TaskRunnerAndroid {
  public:
-  explicit TaskRunnerAndroid(scoped_refptr<TaskRunner> task_runner,
-                             TaskRunnerType type);
+  TaskRunnerAndroid(scoped_refptr<TaskRunner> task_runner, TaskRunnerType type);
 
   TaskRunnerAndroid(const TaskRunnerAndroid&) = delete;
   TaskRunnerAndroid& operator=(const TaskRunnerAndroid&) = delete;
@@ -32,15 +31,20 @@ class BASE_EXPORT TaskRunnerAndroid {
 
   void Destroy(JNIEnv* env);
 
-  void PostDelayedTask(JNIEnv* env,
-                       const base::android::JavaRef<jobject>& task,
-                       jlong delay,
-                       jstring runnable_class_name);
+  void PostDelayedTask(JNIEnv* env, int64_t delay, int32_t taskIndex);
+
+  void PostDelayedTaskWithLocation(
+      JNIEnv* env,
+      int64_t delay,
+      int32_t taskIndex,
+      const android::JavaRef<jstring>& fileName,
+      const android::JavaRef<jstring>& functionName,
+      int32_t lineNumber);
 
   bool BelongsToCurrentThread(JNIEnv* env);
 
-  static std::unique_ptr<TaskRunnerAndroid> Create(jint task_runner_type,
-                                                   jint j_task_traits);
+  static std::unique_ptr<TaskRunnerAndroid> Create(int32_t task_runner_type,
+                                                   int32_t j_task_traits);
 
   using UiThreadTaskRunnerCallback =
       RepeatingCallback<scoped_refptr<base::SingleThreadTaskRunner>(

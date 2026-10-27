@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 
 #include "quiche/quic/platform/api/quic_export.h"
@@ -74,7 +75,7 @@ enum QuicRstStreamErrorCode : uint32_t {
   // A frame that fails to satisfy layout requirements or with an invalid size
   // was received.
   QUIC_STREAM_FRAME_ERROR = 23,
-  // Peer exhibits a behavior that might be generating excessive load.
+  // The system is experiencing excessive load, possibly due to peer behavior.
   QUIC_STREAM_EXCESSIVE_LOAD = 24,
   // A Stream ID or Push ID was used incorrectly, such as exceeding a limit,
   // reducing a limit, or being reused.
@@ -168,7 +169,7 @@ enum QuicErrorCode : uint32_t {
   // ACK frame data is malformed.
   QUIC_INVALID_ACK_DATA = 9,
   // Message frame data is malformed.
-  QUIC_INVALID_MESSAGE_DATA = 112,
+  QUIC_INVALID_DATAGRAM_DATA = 112,
 
   // Version negotiation packet is malformed.
   QUIC_INVALID_VERSION_NEGOTIATION_PACKET = 10,
@@ -228,6 +229,9 @@ enum QuicErrorCode : uint32_t {
   QUIC_FLOW_CONTROL_SENT_TOO_MUCH_DATA = 63,
   // The peer received an invalid flow control window.
   QUIC_FLOW_CONTROL_INVALID_WINDOW = 64,
+  // The peer sent a RESET_STREAM or STREAM frame indicating a change in the
+  // final size for the stream.
+  QUIC_FLOW_CONTROL_FINAL_SIZE_CHANGED = 221,
   // The connection has been IP pooled into an existing connection.
   QUIC_CONNECTION_IP_POOLED = 62,
   // The connection has too many outstanding sent packets.
@@ -252,6 +256,23 @@ enum QuicErrorCode : uint32_t {
   // Split from QUIC_HANDSHAKE_FAILED and specially indicates handshake failure
   // due to packets buffered for too long.
   QUIC_HANDSHAKE_FAILED_PACKETS_BUFFERED_TOO_LONG = 214,
+  // Handshake failed due to invalid hostname in ClientHello. Only sent from
+  // server.
+  QUIC_HANDSHAKE_FAILED_INVALID_HOSTNAME = 216,
+  // Handshake failed because server is rejecting all connections. Only sent
+  // from server.
+  QUIC_HANDSHAKE_FAILED_REJECTING_ALL_CONNECTIONS = 217,
+  // Handshake failed because the connection failed validity checks in
+  // QuicDispatcher. Only sent from server.
+  QUIC_HANDSHAKE_FAILED_INVALID_CONNECTION = 218,
+  // Handshake failed because
+  // 1) There used to be a QuicConnection created for the connection ID. And
+  // 2) When the QuicConnection was destroyed, it did not have a termination
+  //    packet so the QuicDispatcher synthesized one using this error code.
+  // Only sent from server.
+  QUIC_HANDSHAKE_FAILED_SYNTHETIC_CONNECTION_CLOSE = 219,
+  // Handshake failed because there is a CID collision. Only sent from server.
+  QUIC_HANDSHAKE_FAILED_CID_COLLISION = 220,
   // Handshake message contained out of order tags.
   QUIC_CRYPTO_TAGS_OUT_OF_ORDER = 29,
   // Handshake message contained too many entries.
@@ -573,6 +594,8 @@ enum QuicErrorCode : uint32_t {
 
   // The connection silently timed out due to no network activity.
   QUIC_SILENT_IDLE_TIMEOUT = 168,
+  // Connection idle timeout detected when about to send a new request.
+  QUIC_CLIENT_REQUEST_IDLE_TIMEOUT = 222,
 
   // Try to write data without the right write keys.
   QUIC_MISSING_WRITE_KEYS = 170,
@@ -622,8 +645,11 @@ enum QuicErrorCode : uint32_t {
   // Error code related to backend health-check.
   QUIC_SERVER_UNHEALTHY = 213,
 
+  // Client application lost network access.
+  QUIC_CLIENT_LOST_NETWORK_ACCESS = 215,
+
   // No error. Used as bound while iterating.
-  QUIC_LAST_ERROR = 215,
+  QUIC_LAST_ERROR = 223,
 };
 // QuicErrorCodes is encoded as four octets on-the-wire when doing Google QUIC,
 // or a varint62 when doing IETF QUIC. Ensure that its value does not exceed
@@ -704,8 +730,10 @@ class QUICHE_EXPORT QuicResetStreamError {
   uint64_t ietf_application_code_;
 };
 
-// Convert TLS alert code to QuicErrorCode.
-QUICHE_EXPORT QuicErrorCode TlsAlertToQuicErrorCode(uint8_t desc);
+// Convert TLS alert code to QuicErrorCode. Returns nullopt if the alert code
+// is not recognized.
+QUICHE_EXPORT std::optional<QuicErrorCode> TlsAlertToQuicErrorCode(
+    uint8_t desc);
 
 // Returns the name of the QuicRstStreamErrorCode as a char*
 QUICHE_EXPORT const char* QuicRstStreamErrorCodeToString(

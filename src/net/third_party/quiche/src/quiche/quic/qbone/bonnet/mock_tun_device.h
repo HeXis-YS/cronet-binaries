@@ -20,7 +20,10 @@ class MockTunDevice : public TunDeviceInterface {
 
   MOCK_METHOD(void, CloseDevice, (), (override));
 
-  MOCK_METHOD(int, GetFileDescriptor, (), (const, override));
+  MOCK_METHOD(int, GetReadFileDescriptor, (), (const, override));
+  MOCK_METHOD(int, GetWriteFileDescriptor, (), (const, override));
+
+  MOCK_METHOD(int, OpenQueue, (), (override));
 };
 
 }  // namespace quic

@@ -4,6 +4,12 @@
 
 #include "quiche/quic/core/crypto/tls_client_connection.h"
 
+#include <utility>
+#include <vector>
+
+#include "quiche/quic/platform/api/quic_flag_utils.h"
+#include "quiche/quic/platform/api/quic_flags.h"
+
 namespace quic {
 
 TlsClientConnection::TlsClientConnection(SSL_CTX* ssl_ctx, Delegate* delegate,
@@ -18,6 +24,13 @@ bssl::UniquePtr<SSL_CTX> TlsClientConnection::CreateSslCtx(
   bssl::UniquePtr<SSL_CTX> ssl_ctx = TlsConnection::CreateSslCtx();
   // Configure certificate verification.
   SSL_CTX_set_custom_verify(ssl_ctx.get(), SSL_VERIFY_PEER, &VerifyCallback);
+
+  if (GetQuicRestartFlag(quic_client_cert_support)) {
+    QUIC_RESTART_FLAG_COUNT_N(quic_client_cert_support, 1, 2);
+    // Register the client certificate callback.
+    SSL_CTX_set_cert_cb(ssl_ctx.get(), &ClientCertRequestCallback, nullptr);
+  }
+
   int reverify_on_resume_enabled = 1;
   SSL_CTX_set_reverify_on_resume(ssl_ctx.get(), reverify_on_resume_enabled);
 
@@ -43,6 +56,12 @@ int TlsClientConnection::NewSessionCallback(SSL* ssl, SSL_SESSION* session) {
   static_cast<TlsClientConnection*>(ConnectionFromSsl(ssl))
       ->delegate_->InsertSession(bssl::UniquePtr<SSL_SESSION>(session));
   return 1;
+}
+
+// static
+int TlsClientConnection::ClientCertRequestCallback(SSL* ssl, void*) {
+  return static_cast<TlsClientConnection*>(ConnectionFromSsl(ssl))
+      ->delegate_->OnClientCertRequested(ssl);
 }
 
 }  // namespace quic

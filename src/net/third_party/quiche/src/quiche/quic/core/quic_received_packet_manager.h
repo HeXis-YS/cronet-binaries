@@ -6,13 +6,16 @@
 #define QUICHE_QUIC_CORE_QUIC_RECEIVED_PACKET_MANAGER_H_
 
 #include <cstddef>
+#include <cstdint>
 
 #include "quiche/quic/core/frames/quic_ack_frequency_frame.h"
 #include "quiche/quic/core/quic_config.h"
-#include "quiche/quic/core/quic_framer.h"
+#include "quiche/quic/core/quic_constants.h"
+#include "quiche/quic/core/quic_packet_number.h"
 #include "quiche/quic/core/quic_packets.h"
+#include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_types.h"
-#include "quiche/quic/platform/api/quic_export.h"
+#include "quiche/common/platform/api/quiche_export.h"
 
 namespace quic {
 
@@ -61,6 +64,10 @@ class QUICHE_EXPORT QuicReceivedPacketManager {
   // received after this call.
   void DontWaitForPacketsBefore(QuicPacketNumber least_unacked);
 
+  // An IMMEDIATE_ACK frame arrived, so update the ack_timeout_ to now the next
+  // time it's set.
+  void OnImmediateAckFrame() { ack_now_ = true; }
+
   // Called to update ack_timeout_ to the time when an ACK needs to be sent. A
   // caller can decide whether and when to send an ACK by retrieving
   // ack_timeout_. If ack_timeout_ is not initialized, no ACK needs to be sent.
@@ -79,6 +86,13 @@ class QUICHE_EXPORT QuicReceivedPacketManager {
   // Returns true when there are new missing packets to be reported within 3
   // packets of the largest observed.
   virtual bool HasNewMissingPackets() const;
+
+  // Returns true if the lowest packet number beyond largest_acked_ is more
+  // than reordering_threshold_ behind largest_unacked. Used only when
+  // reordering_threshold_ > 1.
+  // TODO(martinduke): This code can be used for reordering_threshold_ == 1
+  // as well, once we have full confidence in it.
+  bool ReorderingExceedsThreshold() const;
 
   virtual bool ack_frame_updated() const;
 
@@ -102,9 +116,8 @@ class QUICHE_EXPORT QuicReceivedPacketManager {
     max_ack_ranges_ = max_ack_ranges;
   }
 
-  void set_save_timestamps(bool save_timestamps, bool in_order_packets_only) {
+  void set_save_timestamps(bool save_timestamps) {
     save_timestamps_ = save_timestamps;
-    save_timestamps_for_in_order_packets_ = in_order_packets_only;
   }
 
   size_t min_received_before_ack_decimation() const {
@@ -135,14 +148,14 @@ class QUICHE_EXPORT QuicReceivedPacketManager {
   // Sets ack_timeout_ to |time| if ack_timeout_ is not initialized or > time.
   void MaybeUpdateAckTimeoutTo(QuicTime time);
 
-  // Maybe update ack_frequency_ when condition meets.
-  void MaybeUpdateAckFrequency(QuicPacketNumber last_received_packet_number);
+  // Sets ack_frequency_ when enough packets have been received.
+  void MaybeEnableAckDecimation(QuicPacketNumber last_received_packet_number);
 
   QuicTime::Delta GetMaxAckDelay(QuicPacketNumber last_received_packet_number,
                                  const RttStats& rtt_stats) const;
 
   bool AckFrequencyFrameReceived() const {
-    return last_ack_frequency_frame_sequence_number_ >= 0;
+    return next_ack_frequency_frame_sequence_number_ > 0;
   }
 
   void MaybeTrimAckRanges();
@@ -169,10 +182,6 @@ class QUICHE_EXPORT QuicReceivedPacketManager {
   // If true, save timestamps in the ack_frame_.
   bool save_timestamps_;
 
-  // If true and |save_timestamps_|, only save timestamps for packets that are
-  // received in order.
-  bool save_timestamps_for_in_order_packets_;
-
   // Least packet number received from peer.
   QuicPacketNumber least_received_packet_number_;
 
@@ -182,8 +191,8 @@ class QUICHE_EXPORT QuicReceivedPacketManager {
   QuicPacketCount num_retransmittable_packets_received_since_last_ack_sent_;
   // Ack decimation will start happening after this many packets are received.
   size_t min_received_before_ack_decimation_;
-  // Ack every n-th packet.
-  size_t ack_frequency_;
+  // Ack every nth packet.
+  size_t ack_frequency_ = kDefaultRetransmittablePacketsBeforeAck;
   // The max delay in fraction of min_rtt to use when sending decimated acks.
   float ack_decimation_delay_;
   // When true, removes ack decimation's max number of packets(10) before
@@ -191,12 +200,16 @@ class QUICHE_EXPORT QuicReceivedPacketManager {
   bool unlimited_ack_decimation_;
   // When true, only send 1 immediate ACK when reordering is detected.
   bool one_immediate_ack_;
-  // When true, do not ack immediately upon observation of packet reordering.
-  bool ignore_order_;
+  // If the largest unacked packet has a packet number that is
+  // reordering_threshold_ more than the lowest missing packet number that is
+  // greater than largest_acked, then an immediate ACK will be sent. The default
+  // value is 1. A value of 0 means to ignore reordering.
+  uint64_t reordering_threshold_ = 1;
 
   // The local node's maximum ack delay time. This is the maximum amount of
   // time to wait before sending an acknowledgement.
   QuicTime::Delta local_max_ack_delay_;
+
   // Time that an ACK needs to be sent. 0 means no ACK is pending. Used when
   // decide_when_to_send_acks_ is true.
   QuicTime ack_timeout_;
@@ -206,12 +219,20 @@ class QUICHE_EXPORT QuicReceivedPacketManager {
   // Whether the most recent packet was missing before it was received.
   bool was_last_packet_missing_;
 
+  // Was the previous received packet CE-marked?
+  bool last_packet_was_ce_marked_ = false;
+  // The current packet is CE-marked, and the previous packet was not. This
+  // condition should trigger an immediate ACK.
+  bool changed_to_ce_marked_ = false;
+  // Because of an IMMEDIATE_ACK frame, the next call to MaybeUpdateAckTimeout
+  // should set the ack timeout to now.
+  bool ack_now_ = false;
+
   // Last sent largest acked, which gets updated when ACK was successfully sent.
   QuicPacketNumber last_sent_largest_acked_;
 
-  // The sequence number of the last received AckFrequencyFrame. Negative if
-  // none received.
-  int64_t last_ack_frequency_frame_sequence_number_;
+  // The expected sequence number of the next received AckFrequencyFrame.
+  uint64_t next_ack_frequency_frame_sequence_number_ = 0;
 };
 
 }  // namespace quic

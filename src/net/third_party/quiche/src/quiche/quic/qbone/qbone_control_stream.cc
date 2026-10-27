@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <string>
 
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/quic_session.h"
@@ -25,12 +26,12 @@ QboneControlStreamBase::QboneControlStreamBase(QuicSession* session)
           /*is_static=*/true, BIDIRECTIONAL),
       pending_message_size_(0) {}
 
-QboneControlStreamBase::QboneControlStreamBase(quic::PendingStream* pending,
+QboneControlStreamBase::QboneControlStreamBase(quic::PendingStream& pending,
                                                QuicSession* session)
     : QuicStream(pending, session, /*is_static=*/true),
       pending_message_size_(0) {
-  QUICHE_DCHECK_EQ(pending->id(), QboneConstants::GetControlStreamId(
-                                      session->transport_version()));
+  QUICHE_DCHECK_EQ(pending.id(), QboneConstants::GetControlStreamId(
+                                     session->transport_version()));
 }
 
 void QboneControlStreamBase::OnDataAvailable() {
@@ -55,7 +56,7 @@ void QboneControlStreamBase::OnDataAvailable() {
   }
 }
 
-bool QboneControlStreamBase::SendMessage(const proto2::Message& proto) {
+bool QboneControlStreamBase::SendDatagram(const proto2::Message& proto) {
   std::string tmp;
   if (!proto.SerializeToString(&tmp)) {
     QUIC_BUG(quic_bug_11023_1) << "Failed to serialize QboneControlRequest";

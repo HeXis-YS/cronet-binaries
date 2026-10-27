@@ -10,7 +10,7 @@
 
 project('zstd',
   ['c', 'cpp'],
-  license: ['BSD', 'GPLv2'],
+  license: 'BSD-3-Clause OR GPL-2.0-only',
   default_options : [
     # There shouldn't be any need to force a C standard convention for zstd
     # but in case one would want that anyway, this can be done here.
@@ -65,7 +65,6 @@ zstd_docdir = join_paths(zstd_datadir, 'doc', meson.project_name())
 
 # Built-in options
 use_debug = get_option('debug')
-buildtype = get_option('buildtype')
 default_library_type = get_option('default_library')
 
 # Custom options
@@ -88,8 +87,13 @@ feature_lz4 = get_option('lz4')
 # =============================================================================
 
 libm_dep = cc.find_library('m', required: false)
-thread_dep = dependency('threads', required: feature_multi_thread)
-use_multi_thread = thread_dep.found()
+if host_machine_os == os_windows
+  thread_dep = dependency('', required: false)
+  use_multi_thread = not feature_multi_thread.disabled()
+else
+  thread_dep = dependency('threads', required: feature_multi_thread)
+  use_multi_thread = thread_dep.found()
+endif
 # Arguments in dependency should be equivalent to those passed to pkg-config
 zlib_dep = dependency('zlib', required: feature_zlib)
 use_zlib = zlib_dep.found()
@@ -111,10 +115,16 @@ if [compiler_gcc, compiler_clang].contains(cc_id)
   if cc_id == compiler_clang
     common_warning_flags += ['-Wconversion', '-Wno-sign-conversion', '-Wdocumentation']
   endif
-  cc_compile_flags = cc.get_supported_arguments(common_warning_flags + ['-Wstrict-prototypes'])
-  cxx_compile_flags = cxx.get_supported_arguments(common_warning_flags)
+  noexecstack_flags = ['-Wa,--noexecstack' ]
+  noexecstack_link_flags = ['-Wl,-z,noexecstack']
+  cc_compile_flags = cc.get_supported_arguments(common_warning_flags + noexecstack_flags + ['-Wstrict-prototypes'])
+  cxx_compile_flags = cxx.get_supported_arguments(common_warning_flags + noexecstack_flags)
   add_project_arguments(cc_compile_flags, language : 'c')
   add_project_arguments(cxx_compile_flags, language : 'cpp')
+  cc_link_flags = cc.get_supported_link_arguments(noexecstack_link_flags)
+  cxx_link_flags = cxx.get_supported_link_arguments(noexecstack_link_flags)
+  add_project_link_arguments(cc_link_flags, language: 'c')
+  add_project_link_arguments(cxx_link_flags, language: 'cpp')
 elif cc_id == compiler_msvc
   msvc_compile_flags = [ '/D_UNICODE', '/DUNICODE' ]
   if use_multi_thread

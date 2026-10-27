@@ -5,16 +5,55 @@
 """Siso configuration main entry."""
 
 load("@builtin//encoding.star", "json")
+load("@builtin//lib/gn.star", "gn")
 load("@builtin//runtime.star", "runtime")
 load("@builtin//struct.star", "module")
+load("@builtin//time.star", "time")
+load("./backend_config/backend.star", "backend")
 load("./blink_all.star", "blink_all")
+load("./config.star", "config")
+load("./denylist.star", "denylist")
+load("./gn_logs.star", "gn_logs")
+load("./grit.star", "grit")
 load("./linux.star", chromium_linux = "chromium")
 load("./mac.star", chromium_mac = "chromium")
 load("./mojo.star", "mojo")
 load("./platform.star", "platform")
-load("./reproxy.star", "reproxy")
+load("./reclient.star", "reclient")
+load("./rust.star", "rust")
 load("./simple.star", "simple")
+load("./typescript_all.star", "typescript_all")
 load("./windows.star", chromium_windows = "chromium")
+
+def __setup_python(ctx, step_config):
+    for rule in step_config["rules"]:
+        if rule.get("remote_command") == platform.remote_python_bin:
+            inputs = rule.get("inputs", [])
+            if "third_party/cpython3/linux-amd64:cpython3" not in inputs:
+                inputs.append("third_party/cpython3/linux-amd64:cpython3")
+                rule["inputs"] = inputs
+    return step_config
+
+def __disable_remote(ctx, step_config):
+    gn_logs_data = gn_logs.read(ctx)
+    if gn_logs_data.get("use_remoteexec") == "true":
+        return step_config
+    for rule in step_config["rules"]:
+        rule["remote"] = False
+    return step_config
+
+def __unset_timeout(ctx, step_config):
+    if not config.get(ctx, "no-remote-timeout"):
+        return step_config
+    for rule in step_config["rules"]:
+        # if no timeout, default is 60m timeout.
+        # better to keep longer timeout instead of using shorter timeout.
+        timeout = rule.get("timeout")
+        if timeout and \
+           time.parse_duration(timeout) > time.parse_duration("60m"):
+            continue
+        rule.pop("timeout", None)
+    return step_config
 
 def init(ctx):
     print("runtime: os:%s arch:%s run:%d" % (
@@ -27,60 +66,79 @@ def init(ctx):
         "darwin": chromium_mac,
         "windows": chromium_windows,
     }[runtime.os]
+    properties = {}
+    for k, v in gn.args(ctx).items():
+        properties["gn_args:" + k] = v
+    for k, v in gn_logs.read(ctx).items():
+        properties["gn_logs:" + k] = v
+
     step_config = {
-        "platforms": {
-            # Large workers are usually used for Python actions like generate bindings, mojo generators etc
-            # They can run on Linux workers.
-            "large": {
-                "OSFamily": "Linux",
-                "container-image": "docker://gcr.io/chops-public-images-prod/rbe/siso-chromium/linux@sha256:912808c295e578ccde53b0685bcd0d56c15d7a03e819dcce70694bfe3fdab35e",
-                # As of Jul 2023, the action_large pool uses n2-highmem-8 with 200GB of pd-ssd.
-                # The pool is intended for the following actions.
-                #  - slow actions that can benefit from multi-cores and/or faster disk I/O. e.g. link, mojo, generate bindings etc.
-                #  - actions that fail for OOM.
-                "label:action_large": "1",
+        "properties": properties,
+        "platforms": backend.platform_properties(ctx),
+        "input_deps": {},
+        "scandeps": {
+            "step_inputs": {
+                "excludes": [
+                    "*.json",
+                    "*.proto",
+                    # Evaluating pyc files causes cache invalidation
+                    # and potential non determinism with SHA256 generation.
+                    "*.pyc",
+                    "*.xml",
+                ],
             },
         },
-        "input_deps": {},
         "rules": [],
+        # Allowlist for fail-on-bad-deps feature.
+        "bad_deps": {
+            "./gen/third_party/devtools-frontend/src/front_end/panels/application/application.js": "crbug.com/556413211",
+            "./gen/third_party/devtools-frontend/src/front_end/panels/sources/sources.js": "crbug.com/556926446",
+            "./gen/third_party/devtools-frontend/src/front_end/panels/timeline/timeline.js": "crbug.com/556600964",
+            "./gen/third_party/devtools-frontend/src/front_end/ui/legacy/components/cookie_table/cookie_table.js": "crbug.com/556881890",
+            "./obj/ash/quick_pair/repository/repository/device_address_map.o": "crbug.com/546524333",
+            "./obj/ash/quick_pair/repository/repository/device_image_store.o": "crbug.com/546524333",
+            "./obj/chrome/browser/ash/guest_os/public/public/guest_os_mount_provider.o": "crbug.com/565544340",
+            "./obj/chrome/browser/ui/views/upgrade_notification_controller/upgrade_notification_controller.o": "crbug.com/555387059",
+        },
+        # Executables sent from Windows host to Linux workers need to set executable bit explicitly.
+        # This is necessary for cross platform build actions. e.g. node binary for typescript
+        "executables": [
+            "third_party/node/linux/node-linux-x64/bin/node",
+            "third_party/typescript/linux-amd64/src/lib/tsc",
+            "third_party/cpython3/linux-amd64/bin/python3",
+        ],
     }
     step_config = blink_all.step_config(ctx, step_config)
+    step_config = grit.step_config(ctx, step_config)
     step_config = host.step_config(ctx, step_config)
     step_config = mojo.step_config(ctx, step_config)
+    step_config = rust.step_config(ctx, step_config)
     step_config = simple.step_config(ctx, step_config)
-    if reproxy.enabled(ctx):
-        step_config = reproxy.step_config(ctx, step_config)
+    step_config = typescript_all.step_config(ctx, step_config)
+    if reclient.enabled(ctx):
+        step_config = reclient.step_config(ctx, step_config)
 
-    #  Python actions may use an absolute path at the first argument.
-    #  e.g. C:/src/depot_tools/bootstrap-2@3_8_10_chromium_26_bin/python3/bin/python3.exe
-    #  It needs to set `pyhton3` or `python3.exe` to remote_command.
-    for rule in step_config["rules"]:
-        if rule["name"].startswith("clang-coverage"):
-            # clang_code_coverage_wrapper.run() strips the python wrapper.
-            # So it shouldn't set `remote_command: python3`.
-            continue
+    step_config = denylist.step_config(ctx, step_config)
 
-        # On Linux worker, it needs to be `python3` instead of `python3.exe`.
-        arg0 = rule.get("command_prefix", "").split(" ")[0].strip("\"")
-        if arg0 != platform.python_bin:
-            continue
-        p = rule.get("reproxy_config", {}).get("platform") or step_config["platforms"].get(rule.get("platform_ref", "default"))
-        if not p:
-            continue
-        if p.get("OSFamily") == "Linux":
-            arg0 = arg0.removesuffix(".exe")
-        rule["remote_command"] = arg0
+    step_config = __setup_python(ctx, step_config)
+    step_config = __disable_remote(ctx, step_config)
+    step_config = __unset_timeout(ctx, step_config)
 
     filegroups = {}
-    filegroups.update(blink_all.filegroups)
-    filegroups.update(host.filegroups)
-    filegroups.update(simple.filegroups)
+    filegroups.update(blink_all.filegroups(ctx))
+    filegroups.update(host.filegroups(ctx))
+    filegroups.update(platform.filegroups(ctx))
+    filegroups.update(rust.filegroups(ctx))
+    filegroups.update(simple.filegroups(ctx))
+    filegroups.update(typescript_all.filegroups(ctx))
 
     handlers = {}
     handlers.update(blink_all.handlers)
     handlers.update(host.handlers)
+    handlers.update(rust.handlers)
     handlers.update(simple.handlers)
-    handlers.update(reproxy.handlers)
+    handlers.update(reclient.handlers)
+    handlers.update(typescript_all.handlers)
 
     return module(
         "config",

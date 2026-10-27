@@ -33,16 +33,21 @@
 
 #include "absl/time/time.h"
 
-#if defined(_MSC_VER)
-#include <winsock2.h>  // for timeval
-#endif
-
+#include <chrono>  // NOLINT(build/c++11)
+#include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <limits>
 
+#include "absl/base/attributes.h"
+#include "absl/base/config.h"
+#include "absl/time/civil_time.h"
 #include "absl/time/internal/cctz/include/cctz/civil_time.h"
 #include "absl/time/internal/cctz/include/cctz/time_zone.h"
+
+#if defined(_MSC_VER)
+#include <winsock2.h>  // for timeval
+#endif
 
 namespace cctz = absl::time_internal::cctz;
 
@@ -249,8 +254,8 @@ absl::Time FromUniversal(int64_t universal) {
 int64_t ToUnixNanos(Time t) {
   if (time_internal::GetRepHi(time_internal::ToUnixDuration(t)) >= 0 &&
       time_internal::GetRepHi(time_internal::ToUnixDuration(t)) >> 33 == 0) {
-    return (time_internal::GetRepHi(time_internal::ToUnixDuration(t)) *
-            1000 * 1000 * 1000) +
+    return (time_internal::GetRepHi(time_internal::ToUnixDuration(t)) * 1000 *
+            1000 * 1000) +
            (time_internal::GetRepLo(time_internal::ToUnixDuration(t)) / 4);
   }
   return FloorToUnit(time_internal::ToUnixDuration(t), absl::Nanoseconds(1));
@@ -259,8 +264,8 @@ int64_t ToUnixNanos(Time t) {
 int64_t ToUnixMicros(Time t) {
   if (time_internal::GetRepHi(time_internal::ToUnixDuration(t)) >= 0 &&
       time_internal::GetRepHi(time_internal::ToUnixDuration(t)) >> 43 == 0) {
-    return (time_internal::GetRepHi(time_internal::ToUnixDuration(t)) *
-            1000 * 1000) +
+    return (time_internal::GetRepHi(time_internal::ToUnixDuration(t)) * 1000 *
+            1000) +
            (time_internal::GetRepLo(time_internal::ToUnixDuration(t)) / 4000);
   }
   return FloorToUnit(time_internal::ToUnixDuration(t), absl::Microseconds(1));

@@ -16,23 +16,33 @@
 #define QUICHE_QUIC_CORE_QUIC_PACKET_CREATOR_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
-#include <utility>
-#include <vector>
+#include <optional>
+#include <string>
 
 #include "absl/base/attributes.h"
 #include "absl/strings/string_view.h"
-#include "absl/types/optional.h"
+#include "absl/types/span.h"
+#include "quiche/quic/core/crypto/quic_encrypter.h"
+#include "quiche/quic/core/crypto/quic_random.h"
+#include "quiche/quic/core/frames/quic_frame.h"
 #include "quiche/quic/core/frames/quic_stream_frame.h"
 #include "quiche/quic/core/quic_coalesced_packet.h"
 #include "quiche/quic/core/quic_connection_id.h"
+#include "quiche/quic/core/quic_error_codes.h"
 #include "quiche/quic/core/quic_framer.h"
+#include "quiche/quic/core/quic_packet_number.h"
 #include "quiche/quic/core/quic_packets.h"
 #include "quiche/quic/core/quic_types.h"
-#include "quiche/quic/platform/api/quic_export.h"
-#include "quiche/quic/platform/api/quic_flags.h"
-#include "quiche/common/platform/api/quiche_mem_slice.h"
+#include "quiche/quic/core/quic_versions.h"
+#include "quiche/quic/core/scone.h"
+#include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/common/platform/api/quiche_export.h"
+#include "quiche/common/platform/api/quiche_logging.h"
 #include "quiche/common/quiche_circular_deque.h"
+#include "quiche/common/quiche_endian.h"
+#include "quiche/common/quiche_mem_slice.h"
 
 namespace quic {
 namespace test {
@@ -61,14 +71,27 @@ class QUICHE_EXPORT QuicPacketCreator {
     virtual bool ShouldGeneratePacket(HasRetransmittableData retransmittable,
                                       IsHandshake handshake) = 0;
     // Called when there is data to be sent. Gives delegate a chance to bundle
-    // anything with to-be-sent data.
-    virtual const QuicFrames MaybeBundleOpportunistically() = 0;
+    // anything with to-be-sent data. |transmission_type| is the transmission
+    // type of the data being sent.
+    virtual void MaybeBundleOpportunistically(
+        TransmissionType transmission_type) = 0;
+
+    // When sending flow controlled data, this will be called after
+    // MaybeBundleOpportunistically(). If the returned flow control send window
+    // is smaller than data's write_length, write_length will be adjusted
+    // acccordingly.
+    // If the delegate has no notion of flow control, it should return
+    // std::numeric_limit<QuicByteCount>::max().
+    virtual QuicByteCount GetFlowControlSendWindowSize(QuicStreamId id) = 0;
 
     // Returns the packet fate for serialized packets which will be handed over
     // to delegate via OnSerializedPacket(). Called when a packet is about to be
     // serialized.
     virtual SerializedPacketFate GetSerializedPacketFate(
         bool is_mtu_discovery, EncryptionLevel encryption_level) = 0;
+
+    // Return the spin bit value to send in the next short header packet.
+    virtual bool NextSpinBitToSend() = 0;
   };
 
   // Interface which gets callbacks from the QuicPacketCreator at interesting
@@ -165,10 +188,10 @@ class QUICHE_EXPORT QuicPacketCreator {
   bool HasRoomForStreamFrame(QuicStreamId id, QuicStreamOffset offset,
                              size_t data_size);
 
-  // Returns true if current open packet can accommodate a message frame of
+  // Returns true if current open packet can accommodate a datagram frame of
   // |length|.
   // TODO(fayang): mark this const by moving RemoveSoftMaxPacketLength out.
-  bool HasRoomForMessageFrame(QuicByteCount length);
+  bool HasRoomForDatagramFrame(QuicByteCount length);
 
   // Serializes all added frames into a single packet and invokes the delegate_
   // to further process the SerializedPacket.
@@ -233,8 +256,8 @@ class QUICHE_EXPORT QuicPacketCreator {
   bool AddPaddedSavedFrame(const QuicFrame& frame,
                            TransmissionType transmission_type);
 
-  // Creates a connectivity probing packet for versions prior to version 99.
-  std::unique_ptr<SerializedPacket> SerializeConnectivityProbingPacket();
+  // Creates a connectivity probing packet for gQUIC.
+  std::unique_ptr<SerializedPacket> SerializeGQuicConnectivityProbingPacket();
 
   // Create connectivity probing request and response packets using PATH
   // CHALLENGE and PATH RESPONSE frames, respectively, for version 99/IETF QUIC.
@@ -252,11 +275,26 @@ class QUICHE_EXPORT QuicPacketCreator {
       const quiche::QuicheCircularDeque<QuicPathFrameBuffer>& payloads,
       const bool is_padded);
 
+  // Create a CONNECTION_CLOSE packet with a large packet number.
+  // This packet can be pre-generated and other processes can send it later to
+  // close the connection.
+  // For example, on Android, the system server stores this packet and sends it
+  // to the server when the app is frozen, loses network access due to the
+  // firewall, or crashes. This will stop servers sending packets to the
+  // device and wasting the device battery.
+  // Note that the generated packet uses the packet number larger than the
+  // current largest acked packet number by (1 << 31) + 1 but the server will
+  // ignore this packet after the connection uses this packet number.
+  std::unique_ptr<SerializedPacket>
+  SerializeLargePacketNumberConnectionClosePacket(
+      QuicPacketNumber largest_acked_packet, QuicErrorCode error,
+      const std::string& error_details);
+
   // Add PATH_RESPONSE to current packet, flush before or afterwards if needed.
   bool AddPathResponseFrame(const QuicPathFrameBuffer& data_buffer);
 
   // Add PATH_CHALLENGE to current packet, flush before or afterwards if needed.
-  // This is a best effort adding. It may fail becasue of delegate state, but
+  // This is a best effort adding. It may fail because of delegate state, but
   // it's okay because of path validation retry mechanism.
   void AddPathChallengeFrame(const QuicPathFrameBuffer& payload);
 
@@ -303,6 +341,14 @@ class QUICHE_EXPORT QuicPacketCreator {
   // created.
   QuicPacketNumber packet_number() const { return packet_.packet_number; }
 
+  // Sets the packet number of the last sent packet on this connection prior to
+  // the birth of this creator.
+  // Must be called before any packet is created by this creator.
+  void set_packet_number(QuicPacketNumber packet_number) {
+    QUICHE_DCHECK(!packet_.packet_number.IsInitialized());
+    packet_.packet_number = packet_number;
+  }
+
   QuicByteCount max_packet_length() const { return max_packet_length_; }
 
   bool has_ack() const { return packet_.has_ack; }
@@ -321,7 +367,7 @@ class QUICHE_EXPORT QuicPacketCreator {
   // Sets the maximum packet length.
   void SetMaxPacketLength(QuicByteCount length);
 
-  // Sets the maximum DATAGRAM/MESSAGE frame size we can send.
+  // Sets the maximum DATAGRAM frame size we can send.
   void SetMaxDatagramFrameSize(QuicByteCount max_datagram_frame_size);
 
   // Set a soft maximum packet length in the creator. If a packet cannot be
@@ -369,10 +415,6 @@ class QUICHE_EXPORT QuicPacketCreator {
   // Generates an MTU discovery packet of specified size.
   void GenerateMtuDiscoveryPacket(QuicByteCount target_mtu);
 
-  // Called when there is data to be sent. Gives delegate a chance to bundle any
-  // data (including ACK).
-  void MaybeBundleOpportunistically();
-
   // Called to flush ACK and STOP_WAITING frames, returns false if the flush
   // fails.
   bool FlushAckFrame(const QuicFrames& frames);
@@ -396,16 +438,16 @@ class QUICHE_EXPORT QuicPacketCreator {
   // Set transmission type of next constructed packets.
   void SetTransmissionType(TransmissionType type);
 
-  // Tries to add a message frame containing |message| and returns the status.
-  MessageStatus AddMessageFrame(QuicMessageId message_id,
-                                absl::Span<quiche::QuicheMemSlice> message);
+  // Tries to add a datagram frame containing |datagram| and returns the status.
+  DatagramStatus AddDatagramFrame(QuicDatagramId datagram_id,
+                                  absl::Span<quiche::QuicheMemSlice> datagram);
 
-  // Returns the largest payload that will fit into a single MESSAGE frame.
-  QuicPacketLength GetCurrentLargestMessagePayload() const;
-  // Returns the largest payload that will fit into a single MESSAGE frame at
+  // Returns the largest payload that will fit into a single DATAGRAM frame.
+  QuicPacketLength GetCurrentLargestDatagramPayload() const;
+  // Returns the largest payload that will fit into a single DATAGRAM frame at
   // any point during the connection.  This assumes the version and
   // connection ID lengths do not change.
-  QuicPacketLength GetGuaranteedLargestMessagePayload() const;
+  QuicPacketLength GetGuaranteedLargestDatagramPayload() const;
 
   // Packet number of next created packet.
   QuicPacketNumber NextSendingPacketNumber() const;
@@ -477,7 +519,17 @@ class QUICHE_EXPORT QuicPacketCreator {
 
   const QuicSocketAddress& peer_address() const { return packet_.peer_address; }
 
-  bool flush_ack_in_maybe_bundle() const { return flush_ack_in_maybe_bundle_; }
+  // Prepend a SCONE packet when initiating a new QUIC datagram. There must not
+  // be pending frames or a partially complete coalesced packet when this is
+  // called.
+  void PrependSconePacket();
+
+  void IndicateSconeSupport() {
+    if (framer_->perspective() == Perspective::IS_CLIENT) {
+      append_scone_indicator_ = true;
+      SetMaxPacketLength(max_packet_length() - kSconeIndicatorLength);
+    }
+  }
 
  private:
   friend class test::QuicPacketCreatorPeer;
@@ -494,9 +546,9 @@ class QUICHE_EXPORT QuicPacketCreator {
   };
 
   // Attempts to build a data packet with chaos protection. If this packet isn't
-  // supposed to be protected or if serialization fails then absl::nullopt is
+  // supposed to be protected or if serialization fails then std::nullopt is
   // returned. Otherwise returns the serialized length.
-  absl::optional<size_t> MaybeBuildDataPacketWithChaosProtection(
+  std::optional<size_t> MaybeBuildDataPacketWithChaosProtection(
       const QuicPacketHeader& header, char* buffer);
 
   // Creates a stream frame which fits into the current open packet. If
@@ -542,6 +594,10 @@ class QUICHE_EXPORT QuicPacketCreator {
   size_t ReserializeInitialPacketInCoalescedPacket(
       const SerializedPacket& packet, size_t padding_size, char* buffer,
       size_t buffer_len);
+
+  // Reduce the available space in the datagram by the space needed for a SCONE
+  // packet.
+  void ReserveSpaceForScone();
 
   // Tries to coalesce |frame| with the back of |queued_frames_|.
   // Returns true on success.
@@ -609,6 +665,22 @@ class QUICHE_EXPORT QuicPacketCreator {
   // fail to add.
   bool AddPaddedFrameWithRetry(const QuicFrame& frame);
 
+  // Saves next_transmission_type_ before calling the delegate and restore it
+  // after.
+  void MaybeBundleOpportunistically();
+
+  // Generates crypto frames from any remaining available crypto data.
+  size_t GenerateRemainingCryptoFrames(EncryptionLevel level,
+                                       size_t write_length,
+                                       QuicStreamOffset offset,
+                                       size_t total_bytes_consumed);
+
+  // Attempts to perform multi-packet chaos protection. If this portion of the
+  // crypto stream isn't supposed to be protected or if anything fails then 0 is
+  // returned. Otherwise returns the amount of crypto data consumed.
+  size_t MultiPacketChaosProtect(EncryptionLevel level, size_t write_length,
+                                 QuicStreamOffset offset);
+
   // Does not own these delegates or the framer.
   DelegateInterface* delegate_;
   DebugDelegate* debug_delegate_;
@@ -621,6 +693,9 @@ class QUICHE_EXPORT QuicPacketCreator {
   DiversificationNonce diversification_nonce_;
   // Maximum length including headers and encryption (UDP payload length.)
   QuicByteCount max_packet_length_;
+  // Value of max_packet_length_ to be applied for the next packet, if not 0.
+  QuicByteCount next_max_packet_length_;
+
   size_t max_plaintext_size_;
   // Whether the server_connection_id is sent over the wire.
   QuicConnectionIdIncluded server_connection_id_included_;
@@ -671,13 +746,17 @@ class QUICHE_EXPORT QuicPacketCreator {
   // set to a soft value.
   QuicByteCount latched_hard_max_packet_length_;
 
-  // The maximum length of a MESSAGE/DATAGRAM frame that our peer is willing to
+  // The maximum length of a DATAGRAM frame that our peer is willing to
   // accept. There is no limit for QUIC_CRYPTO connections, but QUIC+TLS
   // negotiates this during the handshake.
   QuicByteCount max_datagram_frame_size_;
 
-  const bool flush_ack_in_maybe_bundle_ =
-      GetQuicReloadableFlag(quic_flush_ack_in_maybe_bundle);
+  // The connection has requested a SCONE packet be prepended to the next
+  // packet.
+  bool send_scone_packet_ = false;
+
+  // If true, the current packet should append 0xc813 to end of the datagram.
+  bool append_scone_indicator_ = false;
 };
 
 }  // namespace quic

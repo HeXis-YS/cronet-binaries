@@ -57,6 +57,12 @@ class QUICHE_EXPORT QuicControlFrameManager {
   void WriteOrBufferRstStream(QuicControlFrameId id, QuicResetStreamError error,
                               QuicStreamOffset bytes_written);
 
+  // Tries to send a RESET_STREAM_AT frame. Buffers the frame if it cannot be
+  // sent immediately.
+  void WriteOrBufferResetStreamAt(QuicStreamId id, QuicResetStreamError error,
+                                  QuicStreamOffset bytes_written,
+                                  QuicStreamOffset reliable_size);
+
   // Tries to send a GOAWAY_FRAME. Buffers the frame if it cannot be sent
   // immediately.
   void WriteOrBufferGoAway(QuicErrorCode error,
@@ -135,6 +141,9 @@ class QUICHE_EXPORT QuicControlFrameManager {
   // sent.
   bool WillingToWrite() const;
 
+  // Returns the number of buffered MAX_STREAM frames.
+  size_t NumBufferedMaxStreams() const;
+
  private:
   friend class test::QuicControlFrameManagerPeer;
 
@@ -185,6 +194,9 @@ class QUICHE_EXPORT QuicControlFrameManager {
 
   // Last sent window update frame for each stream.
   absl::flat_hash_map<QuicStreamId, QuicControlFrameId> window_update_frames_;
+
+  // Number of MAX_STREAM frames which are currently buffered.
+  size_t num_buffered_max_stream_frames_;
 };
 
 }  // namespace quic

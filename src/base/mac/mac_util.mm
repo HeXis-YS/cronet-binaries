@@ -31,7 +31,6 @@
 #include "base/mac/scoped_ioobject.h"
 #include "base/posix/sysctl.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/sys_string_conversions.h"
@@ -50,7 +49,7 @@ class LoginItemsFileList {
   ~LoginItemsFileList() = default;
 
   [[nodiscard]] bool Initialize() {
-    DCHECK(!login_items_.get()) << __func__ << " called more than once.";
+    DCHECK(!login_items_) << __func__ << " called more than once.";
     // The LSSharedFileList suite of functions has been deprecated. Instead,
     // a LoginItems helper should be registered with SMLoginItemSetEnabled()
     // https://crbug.com/1154377.
@@ -64,8 +63,8 @@ class LoginItemsFileList {
   }
 
   LSSharedFileListRef GetLoginFileList() {
-    DCHECK(login_items_.get()) << "Initialize() failed or not called.";
-    return login_items_;
+    DCHECK(login_items_) << "Initialize() failed or not called.";
+    return login_items_.get();
   }
 
   // Looks into Shared File Lists corresponding to Login Items for the item
@@ -74,17 +73,18 @@ class LoginItemsFileList {
   // reference.
   apple::ScopedCFTypeRef<LSSharedFileListItemRef> GetLoginItemForApp(
       NSURL* url) {
-    DCHECK(login_items_.get()) << "Initialize() failed or not called.";
+    DCHECK(login_items_) << "Initialize() failed or not called.";
 
 #pragma clang diagnostic push  // https://crbug.com/1154377
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     apple::ScopedCFTypeRef<CFArrayRef> login_items_array(
-        LSSharedFileListCopySnapshot(login_items_, /*inList=*/nullptr));
+        LSSharedFileListCopySnapshot(login_items_.get(), /*inList=*/nullptr));
 #pragma clang diagnostic pop
 
-    for (CFIndex i = 0; i < CFArrayGetCount(login_items_array); ++i) {
+    for (CFIndex i = 0; i < CFArrayGetCount(login_items_array.get()); ++i) {
       LSSharedFileListItemRef item =
-          (LSSharedFileListItemRef)CFArrayGetValueAtIndex(login_items_array, i);
+          (LSSharedFileListItemRef)CFArrayGetValueAtIndex(
+              login_items_array.get(), i);
 #pragma clang diagnostic push  // https://crbug.com/1154377
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
       // kLSSharedFileListDoNotMountVolumes is used so that we don't trigger
@@ -121,19 +121,10 @@ bool IsHiddenLoginItem(LSSharedFileListItemRef item) {
           item, kLSSharedFileListLoginItemHidden)));
 #pragma clang diagnostic pop
 
-  return hidden && hidden == kCFBooleanTrue;
+  return hidden && hidden.get() == kCFBooleanTrue;
 }
 
 }  // namespace
-
-CGColorSpaceRef GetGenericRGBColorSpace() {
-  // Leaked. That's OK, it's scoped to the lifetime of the application.
-  static CGColorSpaceRef g_color_space_generic_rgb(
-      CGColorSpaceCreateWithName(kCGColorSpaceGenericRGB));
-  DLOG_IF(ERROR, !g_color_space_generic_rgb) <<
-      "Couldn't get the generic RGB color space";
-  return g_color_space_generic_rgb;
-}
 
 CGColorSpaceRef GetSRGBColorSpace() {
   // Leaked.  That's OK, it's scoped to the lifetime of the application.
@@ -141,27 +132,6 @@ CGColorSpaceRef GetSRGBColorSpace() {
       CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
   DLOG_IF(ERROR, !g_color_space_sRGB) << "Couldn't get the sRGB color space";
   return g_color_space_sRGB;
-}
-
-CGColorSpaceRef GetSystemColorSpace() {
-  // Leaked.  That's OK, it's scoped to the lifetime of the application.
-  // Try to get the main display's color space.
-  static CGColorSpaceRef g_system_color_space =
-      CGDisplayCopyColorSpace(CGMainDisplayID());
-
-  if (!g_system_color_space) {
-    // Use a generic RGB color space.  This is better than nothing.
-    g_system_color_space = CGColorSpaceCreateDeviceRGB();
-
-    if (g_system_color_space) {
-      DLOG(WARNING) <<
-          "Couldn't get the main display's color space, using generic";
-    } else {
-      DLOG(ERROR) << "Couldn't get any color space";
-    }
-  }
-
-  return g_system_color_space;
 }
 
 void AddToLoginItems(const FilePath& app_bundle_file_path,
@@ -175,7 +145,7 @@ void AddToLoginItems(const FilePath& app_bundle_file_path,
   apple::ScopedCFTypeRef<LSSharedFileListItemRef> item =
       login_items.GetLoginItemForApp(app_bundle_url);
 
-  if (item.get() && (IsHiddenLoginItem(item) == hide_on_startup)) {
+  if (item.get() && (IsHiddenLoginItem(item.get()) == hide_on_startup)) {
     return;  // There already is a login item with required hide flag.
   }
 
@@ -183,7 +153,7 @@ void AddToLoginItems(const FilePath& app_bundle_file_path,
   if (item.get()) {
 #pragma clang diagnostic push  // https://crbug.com/1154377
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    LSSharedFileListItemRemove(login_items.GetLoginFileList(), item);
+    LSSharedFileListItemRemove(login_items.GetLoginFileList(), item.get());
 #pragma clang diagnostic pop
   }
 
@@ -221,7 +191,7 @@ void RemoveFromLoginItems(const FilePath& app_bundle_file_path) {
 
 #pragma clang diagnostic push  // https://crbug.com/1154377
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-  LSSharedFileListItemRemove(login_items.GetLoginFileList(), item);
+  LSSharedFileListItemRemove(login_items.GetLoginFileList(), item.get());
 #pragma clang diagnostic pop
 }
 
@@ -269,7 +239,8 @@ bool WasLaunchedAsLoginItemRestoreState() {
     return true;
   }
 
-  if (CFBooleanRef restore_state = base::apple::CFCast<CFBooleanRef>(plist)) {
+  if (CFBooleanRef restore_state =
+          base::apple::CFCast<CFBooleanRef>(plist.get())) {
     return CFBooleanGetValue(restore_state);
   }
 
@@ -292,13 +263,48 @@ bool WasLaunchedAsHiddenLoginItem() {
     // The OS itself can launch items, usually for the resume feature.
     return false;
   }
-  return IsHiddenLoginItem(item);
+  return IsHiddenLoginItem(item.get());
 }
 
 bool RemoveQuarantineAttribute(const FilePath& file_path) {
+  // It is critical that NSURLQuarantinePropertiesKey not be used here; it is
+  // irredeemably broken.
+  //
+  // Before macOS 26.1, attempting to remove a quarantine attribute using
+  // NSURLQuarantinePropertiesKey would fail if the file didn't already have a
+  // quarantine attribute. But even after that, while
+  // NSURLQuarantinePropertiesKey appears to successfully remove the quarantine
+  // attribute in testing, in deployment it fails to reliably do so, and in the
+  // process that breaks the updater (no bug filed as it was caught early in a
+  // panic) and app links (https://crbug.com/488020336).
+  //
+  // It's not clear how to test NSURLQuarantinePropertiesKey for any further
+  // attempt to use it. The previous land/revert cycle
+  // (https://crrev.com/c/7551491 and https://crrev.com/c/7602582) came with
+  // extensive testing that passed, and in informal experience, things would
+  // work fine for, say, seven times before failing on the eighth.
+  //
+  // Given the criticality of the updater, it's hard to find an incentive to do
+  // experimentation in this area. Stay away.
+
   const char kQuarantineAttrName[] = "com.apple.quarantine";
   int status = removexattr(file_path.value().c_str(), kQuarantineAttrName, 0);
   return status == 0 || errno == ENOATTR;
+}
+
+void SetFileTags(const FilePath& file_path,
+                 const std::vector<std::string>& file_tags) {
+  if (file_tags.empty()) {
+    return;
+  }
+
+  NSMutableArray* tag_array = [NSMutableArray array];
+  for (const auto& tag : file_tags) {
+    [tag_array addObject:SysUTF8ToNSString(tag)];
+  }
+
+  NSURL* file_url = apple::FilePathToNSURL(file_path);
+  [file_url setResourceValue:tag_array forKey:NSURLTagNamesKey error:nil];
 }
 
 namespace {
@@ -313,7 +319,7 @@ int ParseOSProductVersion(const std::string_view& version) {
   // When a Rapid Security Response is applied to a system, the UI will display
   // an additional letter (e.g. "13.4.1 (a)"). That extra letter should not be
   // present in `version_string`; in fact, the version string should not contain
-  // any spaces. However, take the first string-delimited "word" for parsing.
+  // any spaces. However, take the first space-delimited "word" for parsing.
   std::vector<std::string_view> words = base::SplitStringPiece(
       version, " ", base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
   CHECK_GE(words.size(), 1u);
@@ -344,11 +350,12 @@ int ParseOSProductVersion(const std::string_view& version) {
     macos_version *= 100;
   }
 
-  // Checks that the value is within expected bounds corresponding to released
-  // OS version numbers. The most important bit is making sure that the "10.16"
-  // compatibility mode isn't engaged.
+  // Check that the value is within expected bounds corresponding to released
+  // OS version numbers. Specifically, ensure that neither the "macOS 10.16" nor
+  // the "macOS 16" compatibility modes are engaged.
   CHECK(macos_version >= 10'00'00);
   CHECK(macos_version < 10'16'00 || macos_version >= 11'00'00);
+  CHECK(macos_version < 16'00'00 || macos_version >= 26'00'00);
 
   return macos_version;
 }
@@ -364,6 +371,29 @@ int MacOSVersion() {
       StringSysctlByName("kern.osproductversion").value());
 
   return macos_version;
+}
+
+bool IsVirtualMachine() {
+  int ret;
+  size_t size = sizeof(ret);
+  PCHECK(sysctlbyname("kern.hv_vmm_present", &ret, &size, nullptr, 0) != -1);
+  return ret;
+}
+
+MacOS26LiquidGlassPreferredLook GetMacOS26LiquidGlassPreferredLook() {
+  CHECK_EQ(MacOSMajorVersion(), 26);
+  NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+  NSNumber* setting = base::apple::ObjCCast<NSNumber>(
+      [defaults objectForKey:@"NSGlassDiffusionSetting"]);
+  if (!setting) {
+    setting = base::apple::ObjCCast<NSNumber>(
+        [defaults objectForKey:@"NSLiquidGlassSetting"]);
+  }
+  if (setting) {
+    return [setting boolValue] ? MacOS26LiquidGlassPreferredLook::kTint
+                               : MacOS26LiquidGlassPreferredLook::kClear;
+  }
+  return MacOS26LiquidGlassPreferredLook::kDefault;
 }
 
 namespace {
@@ -400,7 +430,7 @@ std::string GetOSDisplayName() {
 
 std::string GetPlatformSerialNumber() {
   base::mac::ScopedIOObject<io_service_t> expert_device(
-      IOServiceGetMatchingService(kIOMasterPortDefault,
+      IOServiceGetMatchingService(kIOMainPortDefault,
                                   IOServiceMatching("IOPlatformExpertDevice")));
   if (!expert_device) {
     DLOG(ERROR) << "Error retrieving the machine serial number.";
@@ -408,11 +438,11 @@ std::string GetPlatformSerialNumber() {
   }
 
   apple::ScopedCFTypeRef<CFTypeRef> serial_number(
-      IORegistryEntryCreateCFProperty(expert_device,
+      IORegistryEntryCreateCFProperty(expert_device.get(),
                                       CFSTR(kIOPlatformSerialNumberKey),
                                       kCFAllocatorDefault, 0));
   CFStringRef serial_number_cfstring =
-      base::apple::CFCast<CFStringRef>(serial_number);
+      base::apple::CFCast<CFStringRef>(serial_number.get());
   if (!serial_number_cfstring) {
     DLOG(ERROR) << "Error retrieving the machine serial number.";
     return std::string();
@@ -421,160 +451,106 @@ std::string GetPlatformSerialNumber() {
   return base::SysCFStringRefToUTF8(serial_number_cfstring);
 }
 
-void OpenSystemSettingsPane(SystemSettingsPane pane) {
+void OpenSystemSettingsPane(SystemSettingsPane pane,
+                            const std::string& id_param) {
   NSString* url = nil;
-  NSString* pane_file = nil;
-  NSData* subpane_data = nil;
-  // Note: On macOS 13 and later, System Settings are implemented with app
-  // extensions found at /System/Library/ExtensionKit/Extensions/. URLs to open
-  // them are constructed with a scheme of "x-apple.systempreferences" and a
-  // body of the the bundle ID of the app extension. (In the Info.plist there is
-  // an EXAppExtensionAttributes dictionary with legacy identifiers, but given
-  // that those are explicitly named "legacy", this code prefers to use the
-  // bundle IDs for the URLs it uses.) It is not yet known how to definitively
-  // identify the query string used to open sub-panes; the ones used below were
+
+  // System Settings are implemented with app extensions found at
+  // /System/Library/ExtensionKit/Extensions/. URLs to open them are constructed
+  // with a scheme of "x-apple.systempreferences" and a body of the the bundle
+  // ID of the app extension. (In the Info.plist there is an
+  // EXAppExtensionAttributes dictionary with legacy identifiers, but given that
+  // those are explicitly named "legacy", this code prefers to use the bundle
+  // IDs for the URLs it uses.) It is not yet known how to definitively identify
+  // the query string used to open sub-panes; the ones used below were
   // determined from historical usage, disassembly of related code, and
-  // guessing. Clarity was requested from Apple in FB11753405.
+  // guessing. Clarity was requested from Apple in FB11753405. The current best
+  // guess is to analyze the method named -revealElementForKey:, but because the
+  // extensions are all written in Swift it's hard to confirm this is correct or
+  // to use this knowledge.
+  //
+  // These values have been tested on macOS 13, 14, 15, and 26. Be sure to
+  // verify them on new releases of macOS.
   switch (pane) {
     case SystemSettingsPane::kAccessibility_Captions:
-      if (MacOSMajorVersion() >= 13) {
-        url = @"x-apple.systempreferences:com.apple.Accessibility-Settings."
-              @"extension?Captioning";
-      } else {
-        url = @"x-apple.systempreferences:com.apple.preference.universalaccess?"
-              @"Captioning";
-      }
+      url = @"x-apple.systempreferences:com.apple.Accessibility-Settings."
+            @"extension?Captioning";
       break;
-    case SystemSettingsPane::kDateTime:
-      if (MacOSMajorVersion() >= 13) {
-        url =
-            @"x-apple.systempreferences:com.apple.Date-Time-Settings.extension";
-      } else {
-        pane_file = @"/System/Library/PreferencePanes/DateAndTime.prefPane";
-      }
+    case SystemSettingsPane::kGeneral_DateTime:
+      url = @"x-apple.systempreferences:com.apple.Date-Time-Settings.extension";
       break;
-    case SystemSettingsPane::kNetwork_Proxies:
-      if (MacOSMajorVersion() >= 13) {
-        url = @"x-apple.systempreferences:com.apple.Network-Settings.extension?"
-              @"Proxies";
+    case SystemSettingsPane::kGeneral_LoginItems_Extensions_Sharing:
+      if (MacOSMajorVersion() >= 15) {
+        // See ShareKit, -[SHKSharingServicePicker openAppExtensionsPrefpane].
+        url = @"x-apple.systempreferences:com.apple.ExtensionsPreferences?"
+              @"extensionPointIdentifier=com.apple.share-services";
       } else {
-        pane_file = @"/System/Library/PreferencePanes/Network.prefPane";
-        subpane_data = [@"Proxies" dataUsingEncoding:NSASCIIStringEncoding];
-      }
-      break;
-    case SystemSettingsPane::kPrintersScanners:
-      if (MacOSMajorVersion() >= 13) {
-        url = @"x-apple.systempreferences:com.apple.Print-Scan-Settings."
-              @"extension";
-      } else {
-        pane_file = @"/System/Library/PreferencePanes/PrintAndFax.prefPane";
-      }
-      break;
-    case SystemSettingsPane::kPrivacySecurity_Accessibility:
-      if (MacOSMajorVersion() >= 13) {
-        url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
-              @"extension?Privacy_Accessibility";
-      } else {
-        url = @"x-apple.systempreferences:com.apple.preference.security?"
-              @"Privacy_Accessibility";
-      }
-      break;
-    case SystemSettingsPane::kPrivacySecurity_Bluetooth:
-      if (MacOSMajorVersion() >= 13) {
-        url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
-              @"extension?Privacy_Bluetooth";
-      } else {
-        url = @"x-apple.systempreferences:com.apple.preference.security?"
-              @"Privacy_Bluetooth";
-      }
-      break;
-    case SystemSettingsPane::kPrivacySecurity_Camera:
-      if (MacOSMajorVersion() >= 13) {
-        url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
-              @"extension?Privacy_Camera";
-      } else {
-        url = @"x-apple.systempreferences:com.apple.preference.security?"
-              @"Privacy_Camera";
-      }
-      break;
-    case SystemSettingsPane::kPrivacySecurity_Extensions_Sharing:
-      if (MacOSMajorVersion() >= 13) {
         // See ShareKit, -[SHKSharingServicePicker openAppExtensionsPrefpane].
         url = @"x-apple.systempreferences:com.apple.ExtensionsPreferences?"
               @"Sharing";
-      } else {
-        // This is equivalent to the implementation of AppKit's
-        // +[NSSharingServicePicker openAppExtensionsPrefPane].
-        pane_file = @"/System/Library/PreferencePanes/Extensions.prefPane";
-        NSDictionary* subpane_dict = @{
-          @"action" : @"revealExtensionPoint",
-          @"protocol" : @"com.apple.share-services"
-        };
-        subpane_data = [NSPropertyListSerialization
-            dataWithPropertyList:subpane_dict
-                          format:NSPropertyListXMLFormat_v1_0
-                         options:0
-                           error:nil];
       }
+      break;
+    case SystemSettingsPane::kNetwork_Proxies:
+      url = @"x-apple.systempreferences:com.apple.Network-Settings.extension?"
+            @"Proxies";
+      break;
+    case SystemSettingsPane::kNotifications:
+      url = @"x-apple.systempreferences:com.apple.Notifications-Settings."
+            @"extension";
+      if (!id_param.empty()) {
+        url = [url stringByAppendingFormat:@"?id=%s", id_param.c_str()];
+      }
+      break;
+    case SystemSettingsPane::kPrintersScanners:
+      url = @"x-apple.systempreferences:com.apple.Print-Scan-Settings."
+            @"extension";
+      break;
+    case SystemSettingsPane::kPrivacySecurity:
+      url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
+            @"extension?Privacy";
+      break;
+    case SystemSettingsPane::kPrivacySecurity_Accessibility:
+      url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
+            @"extension?Privacy_Accessibility";
+      break;
+    case SystemSettingsPane::kPrivacySecurity_Bluetooth:
+      url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
+            @"extension?Privacy_Bluetooth";
+      break;
+    case SystemSettingsPane::kPrivacySecurity_Camera:
+      url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
+            @"extension?Privacy_Camera";
       break;
     case SystemSettingsPane::kPrivacySecurity_LocationServices:
-      if (MacOSMajorVersion() >= 13) {
-        url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
-              @"extension?Privacy_LocationServices";
-      } else {
-        url = @"x-apple.systempreferences:com.apple.preference.security?"
-              @"Privacy_LocationServices";
-      }
+      url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
+            @"extension?Privacy_LocationServices";
       break;
     case SystemSettingsPane::kPrivacySecurity_Microphone:
-      if (MacOSMajorVersion() >= 13) {
-        url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
-              @"extension?Privacy_Microphone";
-      } else {
-        url = @"x-apple.systempreferences:com.apple.preference.security?"
-              @"Privacy_Microphone";
-      }
+      url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
+            @"extension?Privacy_Microphone";
+      break;
+    case SystemSettingsPane::kPrivacySecurity_PasteFromOtherApps:
+      // Pasteboard permissions were added in macOS 15.
+      DCHECK_GE(MacOSMajorVersion(), 15);
+      url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
+            @"extension?Privacy_Pasteboard";
       break;
     case SystemSettingsPane::kPrivacySecurity_ScreenRecording:
-      if (MacOSMajorVersion() >= 13) {
-        url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
-              @"extension?Privacy_ScreenCapture";
-      } else {
-        url = @"x-apple.systempreferences:com.apple.preference.security?"
-              @"Privacy_ScreenCapture";
-      }
+      url = @"x-apple.systempreferences:com.apple.settings.PrivacySecurity."
+            @"extension?Privacy_ScreenCapture";
       break;
     case SystemSettingsPane::kTrackpad:
-      if (MacOSMajorVersion() >= 13) {
-        url = @"x-apple.systempreferences:com.apple.Trackpad-Settings."
-              @"extension";
-      } else {
-        pane_file = @"/System/Library/PreferencePanes/Trackpad.prefPane";
-      }
+      url = @"x-apple.systempreferences:com.apple.Trackpad-Settings."
+            @"extension";
       break;
+    default:
+      NOTREACHED();
   }
 
-  DCHECK(url != nil ^ pane_file != nil);
-
-  if (url) {
-    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:url]];
-    return;
-  }
-
-  NSAppleEventDescriptor* subpane_descriptor;
-  NSArray* pane_file_urls = @[ [NSURL fileURLWithPath:pane_file] ];
-
-  LSLaunchURLSpec launchSpec = {0};
-  launchSpec.itemURLs = apple::NSToCFPtrCast(pane_file_urls);
-  if (subpane_data) {
-    subpane_descriptor =
-        [[NSAppleEventDescriptor alloc] initWithDescriptorType:'ptru'
-                                                          data:subpane_data];
-    launchSpec.passThruParams = subpane_descriptor.aeDesc;
-  }
-  launchSpec.launchFlags = kLSLaunchAsync | kLSLaunchDontAddToRecents;
-
-  LSOpenFromURLSpec(&launchSpec, nullptr);
+  [NSWorkspace.sharedWorkspace
+                openURL:[NSURL URLWithString:url]
+          configuration:[NSWorkspaceOpenConfiguration configuration]
+      completionHandler:nil];
 }
 
 }  // namespace base::mac

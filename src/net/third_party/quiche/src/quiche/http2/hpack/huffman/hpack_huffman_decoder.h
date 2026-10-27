@@ -23,10 +23,6 @@
 
 namespace http2 {
 
-#if defined(__MIPSEL__) && !defined(__LP64__)
-// Clang 18+ miscompiles "uint64_t x; size_t y; x <<= y;" on mipsel.
-typedef uint32_t HuffmanAccumulator;
-#else
 // HuffmanAccumulator is used to store bits during decoding, e.g. next N bits
 // that have not yet been decoded, but have been extracted from the encoded
 // string).  An advantage of using a uint64 for the accumulator
@@ -38,7 +34,6 @@ typedef uint32_t HuffmanAccumulator;
 // reach 30), and then keep track of the last two bits we've not been able to
 // add to the accumulator.
 typedef uint64_t HuffmanAccumulator;
-#endif
 typedef size_t HuffmanAccumulatorBitCount;
 
 // HuffmanBitBuffer stores the leading edge of bits to be decoded. The high
@@ -52,7 +47,7 @@ class QUICHE_EXPORT HuffmanBitBuffer {
 
   // Add as many whole bytes to the accumulator (accumulator_) as possible,
   // returning the number of bytes added.
-  size_t AppendBytes(absl::string_view input);
+  size_t AppendBytes(absl::string_view input, bool enable_optimizations);
 
   // Get the bits of the accumulator.
   HuffmanAccumulator value() const { return accumulator_; }
@@ -126,7 +121,10 @@ class QUICHE_EXPORT HpackHuffmanDecoder {
   std::string DebugString() const;
 
  private:
+  bool DecodeOld(absl::string_view input, std::string* output);
+
   HuffmanBitBuffer bit_buffer_;
+  const bool enable_optimizations_;
 };
 
 inline std::ostream& operator<<(std::ostream& out,

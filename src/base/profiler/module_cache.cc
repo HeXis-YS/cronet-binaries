@@ -4,16 +4,13 @@
 
 #include "base/profiler/module_cache.h"
 
+#include <algorithm>
 #include <iterator>
+#include <string_view>
 #include <utility>
 
 #include "base/check_op.h"
-#include "base/debug/crash_logging.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/strcat.h"
-#include "base/trace_event/base_tracing.h"
-#include "base/tracing_buildflags.h"
-#include "build/build_config.h"
 
 namespace base {
 
@@ -34,20 +31,9 @@ struct ModuleAddressCompare {
   }
 };
 
-// TODO(crbug/1446766): Cleanup after finishing crash investigation.
-#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_BASE_TRACING)
-std::string ModuleToString(const ModuleCache::Module& module) {
-  trace_event::TracedValueJSON value;
-  value.SetPointer("base", reinterpret_cast<void*>(module.GetBaseAddress()));
-  value.SetInteger("size", static_cast<int>(module.GetSize()));
-  value.SetString("path", module.GetDebugBasename().value());
-  return value.ToJSON();
-}
-#endif  // BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_BASE_TRACING)
-
 }  // namespace
 
-std::string TransformModuleIDToSymbolServerFormat(StringPiece module_id) {
+std::string TransformModuleIDToSymbolServerFormat(std::string_view module_id) {
   std::string mangled_id(module_id);
   // Android and Linux Chrome builds use the "breakpad" format to index their
   // build id, so we transform the build id for these platforms. All other
@@ -62,12 +48,14 @@ std::string TransformModuleIDToSymbolServerFormat(StringPiece module_id) {
   if (mangled_id.size() < 32) {
     mangled_id.resize(32, '0');
   }
+  std::string_view mangled_id_view = mangled_id;
 
-  mangled_id = base::StrCat({mangled_id.substr(6, 2), mangled_id.substr(4, 2),
-                             mangled_id.substr(2, 2), mangled_id.substr(0, 2),
-                             mangled_id.substr(10, 2), mangled_id.substr(8, 2),
-                             mangled_id.substr(14, 2), mangled_id.substr(12, 2),
-                             mangled_id.substr(16, 16), "0"});
+  mangled_id = base::StrCat(
+      {mangled_id_view.substr(6, 2), mangled_id_view.substr(4, 2),
+       mangled_id_view.substr(2, 2), mangled_id_view.substr(0, 2),
+       mangled_id_view.substr(10, 2), mangled_id_view.substr(8, 2),
+       mangled_id_view.substr(14, 2), mangled_id_view.substr(12, 2),
+       mangled_id_view.substr(16, 16), "0"});
 #endif
   return mangled_id;
 }
@@ -79,17 +67,21 @@ ModuleCache::~ModuleCache() {
 }
 
 const ModuleCache::Module* ModuleCache::GetModuleForAddress(uintptr_t address) {
-  if (const ModuleCache::Module* module = GetExistingModuleForAddress(address))
+  if (const ModuleCache::Module* module =
+          GetExistingModuleForAddress(address)) {
     return module;
+  }
 
   std::unique_ptr<const Module> new_module = CreateModuleForAddress(address);
-  if (!new_module && auxiliary_module_provider_)
+  if (!new_module && auxiliary_module_provider_) {
     new_module = auxiliary_module_provider_->TryCreateModuleForAddress(address);
-  if (!new_module)
+  }
+  if (!new_module) {
     return nullptr;
+  }
 
   const auto result = native_modules_.insert(std::move(new_module));
-  // TODO(https://crbug.com/1131769): Reintroduce DCHECK(result.second) after
+  // TODO(crbug.com/40150346): Reintroduce DCHECK(result.second) after
   // fixing the issue that is causing it to fail.
   return result.first->get();
 }
@@ -97,10 +89,13 @@ const ModuleCache::Module* ModuleCache::GetModuleForAddress(uintptr_t address) {
 std::vector<const ModuleCache::Module*> ModuleCache::GetModules() const {
   std::vector<const Module*> result;
   result.reserve(native_modules_.size());
-  for (const std::unique_ptr<const Module>& module : native_modules_)
+  for (const std::unique_ptr<const Module>& module : native_modules_) {
     result.push_back(module.get());
-  for (const std::unique_ptr<const Module>& module : non_native_modules_)
+  }
+  base::AutoLock locker(lock_);
+  for (const std::unique_ptr<const Module>& module : non_native_modules_) {
     result.push_back(module.get());
+  }
   return result;
 }
 
@@ -111,6 +106,7 @@ void ModuleCache::UpdateNonNativeModules(
   flat_set<const Module*> defunct_modules_set(defunct_modules.begin(),
                                               defunct_modules.end());
 
+  base::AutoLock locker(lock_);
   // Reorder the modules to be removed to the last slots in the set, then move
   // them to the inactive modules, then erase the moved-from modules from the
   // set. This is a variation on the standard erase-remove idiom, which is
@@ -118,22 +114,20 @@ void ModuleCache::UpdateNonNativeModules(
   //
   // stable_partition is O(m*log(r)) where m is the number of current modules
   // and r is the number of modules to remove. insert and erase are both O(r).
-  auto first_module_defunct_modules = ranges::stable_partition(
+  auto defunct_modules_subrange = std::ranges::stable_partition(
       non_native_modules_,
       [&defunct_modules_set](const std::unique_ptr<const Module>& module) {
         return defunct_modules_set.find(module.get()) ==
                defunct_modules_set.end();
       });
   // All modules requested to be removed should have been found.
-  DCHECK_EQ(
-      static_cast<ptrdiff_t>(defunct_modules.size()),
-      std::distance(first_module_defunct_modules, non_native_modules_.end()));
+  DCHECK_EQ(defunct_modules.size(), defunct_modules_subrange.size());
   inactive_non_native_modules_.insert(
       inactive_non_native_modules_.end(),
-      std::make_move_iterator(first_module_defunct_modules),
-      std::make_move_iterator(non_native_modules_.end()));
-  non_native_modules_.erase(first_module_defunct_modules,
-                            non_native_modules_.end());
+      std::make_move_iterator(defunct_modules_subrange.begin()),
+      std::make_move_iterator(defunct_modules_subrange.end()));
+  non_native_modules_.erase(defunct_modules_subrange.begin(),
+                            defunct_modules_subrange.end());
 
   // Insert the modules to be added. This operation is O((m + a) + a*log(a))
   // where m is the number of current modules and a is the number of modules to
@@ -153,21 +147,6 @@ void ModuleCache::UpdateNonNativeModules(
 }
 
 void ModuleCache::AddCustomNativeModule(std::unique_ptr<const Module> module) {
-// TODO(1446766): Cleanup after finishing crash investigation.
-#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_BASE_TRACING)
-  auto it = native_modules_.find(module);
-  if (it != native_modules_.end()) {
-    static auto* const crash_key = base::debug::AllocateCrashKeyString(
-        "module_cache", base::debug::CrashKeySize::Size1024);
-    trace_event::TracedValueJSON value;
-    value.SetString("new_module", ModuleToString(*module));
-
-    auto& existing_module = *it;
-    value.SetString("existing_module", ModuleToString(*existing_module));
-
-    base::debug::SetCrashKeyString(crash_key, value.ToJSON());
-  }
-#endif  // BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_BASE_TRACING)
   const bool was_inserted = native_modules_.insert(std::move(module)).second;
   // |module| should have been inserted into |native_modules_|, indicating that
   // there was no equivalent module already present. While this scenario would
@@ -178,13 +157,18 @@ void ModuleCache::AddCustomNativeModule(std::unique_ptr<const Module> module) {
 
 const ModuleCache::Module* ModuleCache::GetExistingModuleForAddress(
     uintptr_t address) const {
-  const auto non_native_module_loc = non_native_modules_.find(address);
-  if (non_native_module_loc != non_native_modules_.end())
-    return non_native_module_loc->get();
+  {
+    base::AutoLock locker(lock_);
+    const auto non_native_module_loc = non_native_modules_.find(address);
+    if (non_native_module_loc != non_native_modules_.end()) {
+      return non_native_module_loc->get();
+    }
+  }
 
   const auto native_module_loc = native_modules_.find(address);
-  if (native_module_loc != native_modules_.end())
+  if (native_module_loc != native_modules_.end()) {
     return native_module_loc->get();
+  }
 
   return nullptr;
 }

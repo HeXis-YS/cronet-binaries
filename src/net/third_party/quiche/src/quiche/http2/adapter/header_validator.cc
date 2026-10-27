@@ -2,12 +2,14 @@
 
 #include <array>
 #include <bitset>
+#include <string>
 
+#include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "quiche/http2/adapter/header_validator_base.h"
-#include "quiche/http2/http2_constants.h"
+#include "quiche/http2/core/http2_constants.h"
 #include "quiche/common/platform/api/quiche_logging.h"
 
 namespace http2 {
@@ -16,47 +18,45 @@ namespace adapter {
 namespace {
 
 // From RFC 9110 Section 5.6.2.
-const absl::string_view kHttpTokenChars =
+constexpr absl::string_view kHttpTokenChars =
     "!#$%&'*+-.^_`|~0123456789"
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-const absl::string_view kHttp2HeaderNameAllowedChars =
+constexpr absl::string_view kHttp2HeaderNameAllowedChars =
     "!#$%&'*+-.0123456789"
     "^_`abcdefghijklmnopqrstuvwxyz|~";
 
-const absl::string_view kHttp2HeaderValueAllowedChars =
+constexpr absl::string_view kHttp2HeaderValueAllowedChars =
     "\t "
     "!\"#$%&'()*+,-./"
     "0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
     "abcdefghijklmnopqrstuvwxyz{|}~";
 
-const absl::string_view kHttp2StatusValueAllowedChars = "0123456789";
+constexpr absl::string_view kHttp2StatusValueAllowedChars = "0123456789";
 
-const absl::string_view kValidAuthorityChars =
+constexpr absl::string_view kValidAuthorityChars =
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~%!$&'()["
     "]*+,;=:";
 
-const absl::string_view kValidPathChars =
+constexpr absl::string_view kValidPathChars =
     "/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~%!$&'()"
     "*+,;=:@?";
 
-const absl::string_view kValidPathCharsWithFragment =
+constexpr absl::string_view kValidPathCharsWithFragment =
     "/abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~%!$&'()"
     "*+,;=:@?#";
 
 using CharMap = std::array<bool, 256>;
 
-CharMap BuildValidCharMap(absl::string_view valid_chars) {
-  CharMap map;
-  map.fill(false);
+constexpr CharMap BuildValidCharMap(absl::string_view valid_chars) {
+  CharMap map = {};
   for (char c : valid_chars) {
-    // Cast to uint8_t, guaranteed to have 8 bits. A char may have more, leading
-    // to possible indices above 256.
+    // An array index must be a nonnegative integer, hence the cast to uint8_t.
     map[static_cast<uint8_t>(c)] = true;
   }
   return map;
 }
-CharMap AllowObsText(CharMap map) {
+constexpr CharMap AllowObsText(CharMap map) {
   // Characters above 0x80 are allowed in header field values as `obs-text` in
   // RFC 7230.
   for (uint8_t c = 0xff; c >= 0x80; --c) {
@@ -74,20 +74,14 @@ bool AllCharsInMap(absl::string_view str, const CharMap& map) {
   return true;
 }
 
-bool IsValidHeaderName(absl::string_view name) {
-  static const CharMap valid_chars =
-      BuildValidCharMap(kHttp2HeaderNameAllowedChars);
-  return AllCharsInMap(name, valid_chars);
-}
-
 bool IsValidStatus(absl::string_view status) {
-  static const CharMap valid_chars =
+  static constexpr CharMap valid_chars =
       BuildValidCharMap(kHttp2StatusValueAllowedChars);
   return AllCharsInMap(status, valid_chars);
 }
 
 bool IsValidMethod(absl::string_view method) {
-  static const CharMap valid_chars = BuildValidCharMap(kHttpTokenChars);
+  static constexpr CharMap valid_chars = BuildValidCharMap(kHttpTokenChars);
   return AllCharsInMap(method, valid_chars);
 }
 
@@ -114,14 +108,15 @@ HeaderValidator::HeaderStatus HeaderValidator::ValidateSingleHeader(
     return HEADER_FIELD_INVALID;
   }
   if (max_field_size_.has_value() &&
-      key.size() + value.size() > max_field_size_.value()) {
+      key.size() + value.size() > *max_field_size_) {
     QUICHE_VLOG(2) << "Header field size is " << key.size() + value.size()
-                   << ", exceeds max size of " << max_field_size_.value();
+                   << ", exceeds max size of " << *max_field_size_;
     return HEADER_FIELD_TOO_LONG;
   }
   if (key[0] == ':') {
-    const absl::string_view validated_key = key.substr(1);
-    if (validated_key == "status") {
+    // Remove leading ':'.
+    key.remove_prefix(1);
+    if (key == "status") {
       if (value.size() != 3 || !IsValidStatus(value)) {
         QUICHE_VLOG(2) << "malformed status value: [" << absl::CEscape(value)
                        << "]";
@@ -133,7 +128,7 @@ HeaderValidator::HeaderStatus HeaderValidator::ValidateSingleHeader(
       }
       status_ = std::string(value);
       RecordPseudoHeader(TAG_STATUS);
-    } else if (validated_key == "method") {
+    } else if (key == "method") {
       if (value == "OPTIONS") {
         pseudo_header_state_[STATE_METHOD_IS_OPTIONS] = true;
       } else if (value == "CONNECT") {
@@ -142,34 +137,38 @@ HeaderValidator::HeaderStatus HeaderValidator::ValidateSingleHeader(
         return HEADER_FIELD_INVALID;
       }
       RecordPseudoHeader(TAG_METHOD);
-    } else if (validated_key == "authority") {
+    } else if (key == "authority") {
       if (!ValidateAndSetAuthority(value)) {
         return HEADER_FIELD_INVALID;
       }
       RecordPseudoHeader(TAG_AUTHORITY);
-    } else if (validated_key == "path") {
+    } else if (key == "path") {
       if (value == "*") {
         pseudo_header_state_[STATE_PATH_IS_STAR] = true;
       } else if (value.empty()) {
         pseudo_header_state_[STATE_PATH_IS_EMPTY] = true;
         return HEADER_FIELD_INVALID;
-      } else if (validate_path_ &&
-                 !IsValidPath(value, allow_fragment_in_path_)) {
+      } else if (validate_path_) {
+        if (!IsValidPath(value, allow_fragment_in_path_)) {
+          return HEADER_FIELD_INVALID;
+        }
+      } else if (value.find_first_of(" \t") != absl::string_view::npos) {
+        // Tab and space are not valid path characters.
         return HEADER_FIELD_INVALID;
       }
       if (value[0] == '/') {
         pseudo_header_state_[STATE_PATH_INITIAL_SLASH] = true;
       }
       RecordPseudoHeader(TAG_PATH);
-    } else if (validated_key == "protocol") {
+    } else if (key == "protocol") {
       RecordPseudoHeader(TAG_PROTOCOL);
-    } else if (validated_key == "scheme") {
+    } else if (key == "scheme") {
       RecordPseudoHeader(TAG_SCHEME);
     } else {
       pseudo_headers_[TAG_UNKNOWN_EXTRA] = true;
-      if (!IsValidHeaderName(validated_key)) {
+      if (!IsValidHeaderName(key)) {
         QUICHE_VLOG(2) << "invalid chars in header name: ["
-                       << absl::CEscape(validated_key) << "]";
+                       << absl::CEscape(key) << "]";
         return HEADER_FIELD_INVALID;
       }
     }
@@ -179,10 +178,17 @@ HeaderValidator::HeaderStatus HeaderValidator::ValidateSingleHeader(
       return HEADER_FIELD_INVALID;
     }
   } else {
-    const absl::string_view validated_key = key;
-    if (!IsValidHeaderName(validated_key)) {
-      QUICHE_VLOG(2) << "invalid chars in header name: ["
-                     << absl::CEscape(validated_key) << "]";
+    std::string lowercase_key;
+    if (allow_uppercase_in_header_names_) {
+      // Convert header name to lowercase for validation and also for comparison
+      // to lowercase string literals below.
+      lowercase_key = absl::AsciiStrToLower(key);
+      key = lowercase_key;
+    }
+
+    if (!IsValidHeaderName(key)) {
+      QUICHE_VLOG(2) << "invalid chars in header name: [" << absl::CEscape(key)
+                     << "]";
       return HEADER_FIELD_INVALID;
     }
     if (!IsValidHeaderValue(value, obs_text_option_)) {
@@ -240,11 +246,17 @@ bool HeaderValidator::FinishHeaderBlock(HeaderType type) {
   return false;
 }
 
+bool HeaderValidator::IsValidHeaderName(absl::string_view name) {
+  static constexpr CharMap valid_chars =
+      BuildValidCharMap(kHttp2HeaderNameAllowedChars);
+  return AllCharsInMap(name, valid_chars);
+}
+
 bool HeaderValidator::IsValidHeaderValue(absl::string_view value,
                                          ObsTextOption option) {
-  static const CharMap valid_chars =
+  static constexpr CharMap valid_chars =
       BuildValidCharMap(kHttp2HeaderValueAllowedChars);
-  static const CharMap valid_chars_with_obs_text =
+  static constexpr CharMap valid_chars_with_obs_text =
       AllowObsText(BuildValidCharMap(kHttp2HeaderValueAllowedChars));
   return AllCharsInMap(value, option == ObsTextOption::kAllow
                                   ? valid_chars_with_obs_text
@@ -252,13 +264,14 @@ bool HeaderValidator::IsValidHeaderValue(absl::string_view value,
 }
 
 bool HeaderValidator::IsValidAuthority(absl::string_view authority) {
-  static const CharMap valid_chars = BuildValidCharMap(kValidAuthorityChars);
+  static constexpr CharMap valid_chars =
+      BuildValidCharMap(kValidAuthorityChars);
   return AllCharsInMap(authority, valid_chars);
 }
 
 bool HeaderValidator::IsValidPath(absl::string_view path, bool allow_fragment) {
-  static const CharMap valid_chars = BuildValidCharMap(kValidPathChars);
-  static const CharMap valid_chars_with_fragment =
+  static constexpr CharMap valid_chars = BuildValidCharMap(kValidPathChars);
+  static constexpr CharMap valid_chars_with_fragment =
       BuildValidCharMap(kValidPathCharsWithFragment);
   if (allow_fragment) {
     return AllCharsInMap(path, valid_chars_with_fragment);
@@ -289,8 +302,8 @@ HeaderValidator::ContentLengthStatus HeaderValidator::HandleContentLength(
   }
 
   if (content_length_.has_value()) {
-    return content_length == content_length_.value() ? CONTENT_LENGTH_SKIP
-                                                     : CONTENT_LENGTH_ERROR;
+    return content_length == *content_length_ ? CONTENT_LENGTH_SKIP
+                                              : CONTENT_LENGTH_ERROR;
   }
   content_length_ = content_length;
   return CONTENT_LENGTH_OK;
@@ -330,14 +343,14 @@ bool HeaderValidator::ValidateRequestHeaders(
       // protocol and scheme pseudo-headers. The tags corresponding to status
       // and unknown_extra should not be set.
       static const auto* kExtendedConnectHeaders =
-          new PseudoHeaderTagSet("0011111");
+          new PseudoHeaderTagSet(0b0011111);
       if (pseudo_headers == *kExtendedConnectHeaders) {
         return true;
       }
     }
     // See RFC 7540 Section 8.3. Regular CONNECT should have authority and
     // method, but no other pseudo headers.
-    static const auto* kConnectHeaders = new PseudoHeaderTagSet("0000011");
+    static const auto* kConnectHeaders = new PseudoHeaderTagSet(0b0000011);
     return pseudo_header_state[STATE_AUTHORITY_IS_NONEMPTY] &&
            pseudo_headers == *kConnectHeaders;
   }
@@ -354,7 +367,7 @@ bool HeaderValidator::ValidateRequestHeaders(
   }
 
   // Regular HTTP requests require authority, method, path and scheme.
-  static const auto* kRequiredHeaders = new PseudoHeaderTagSet("0010111");
+  static const auto* kRequiredHeaders = new PseudoHeaderTagSet(0b0010111);
   return pseudo_headers == *kRequiredHeaders;
 }
 
@@ -366,7 +379,7 @@ bool HeaderValidator::ValidateRequestTrailers(
 bool HeaderValidator::ValidateResponseHeaders(
     const PseudoHeaderTagSet& pseudo_headers) {
   // HTTP responses require only the status pseudo header.
-  static const auto* kRequiredHeaders = new PseudoHeaderTagSet("0100000");
+  static const auto* kRequiredHeaders = new PseudoHeaderTagSet(0b0100000);
   return pseudo_headers == *kRequiredHeaders;
 }
 

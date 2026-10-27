@@ -4,10 +4,12 @@
 
 #include "quiche/quic/test_tools/quic_test_server.h"
 
+#include <memory>
 #include <utility>
 
 #include "absl/memory/memory.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "quiche/quic/core/connection_id_generator.h"
 #include "quiche/quic/core/io/quic_default_event_loop.h"
 #include "quiche/quic/core/quic_default_connection_helper.h"
@@ -93,7 +95,7 @@ class QuicTestDispatcher : public QuicSimpleDispatcher {
       const ParsedQuicVersion& version,
       const ParsedClientHello& /*parsed_chlo*/,
       ConnectionIdGeneratorInterface& connection_id_generator) override {
-    QuicReaderMutexLock lock(&factory_lock_);
+    absl::ReaderMutexLock lock(factory_lock_);
     // The QuicServerSessionBase takes ownership of |connection| below.
     QuicConnection* connection = new QuicConnection(
         id, self_address, peer_address, helper(), alarm_factory(), writer(),
@@ -117,7 +119,7 @@ class QuicTestDispatcher : public QuicSimpleDispatcher {
           config(), connection, this, session_helper(), crypto_config(),
           compressed_certs_cache(), server_backend(), alpn);
     }
-    if (VersionUsesHttp3(version.transport_version)) {
+    if (VersionIsIetfQuic(version.transport_version)) {
       QUICHE_DCHECK(session->allow_extended_connect());
       // Do not allow extended CONNECT request if the backend doesn't support
       // it.
@@ -129,7 +131,7 @@ class QuicTestDispatcher : public QuicSimpleDispatcher {
   }
 
   void SetSessionFactory(QuicTestServer::SessionFactory* factory) {
-    QuicWriterMutexLock lock(&factory_lock_);
+    absl::WriterMutexLock lock(factory_lock_);
     QUICHE_DCHECK(session_factory_ == nullptr);
     QUICHE_DCHECK(stream_factory_ == nullptr);
     QUICHE_DCHECK(crypto_stream_factory_ == nullptr);
@@ -137,21 +139,21 @@ class QuicTestDispatcher : public QuicSimpleDispatcher {
   }
 
   void SetStreamFactory(QuicTestServer::StreamFactory* factory) {
-    QuicWriterMutexLock lock(&factory_lock_);
+    absl::WriterMutexLock lock(factory_lock_);
     QUICHE_DCHECK(session_factory_ == nullptr);
     QUICHE_DCHECK(stream_factory_ == nullptr);
     stream_factory_ = factory;
   }
 
   void SetCryptoStreamFactory(QuicTestServer::CryptoStreamFactory* factory) {
-    QuicWriterMutexLock lock(&factory_lock_);
+    absl::WriterMutexLock lock(factory_lock_);
     QUICHE_DCHECK(session_factory_ == nullptr);
     QUICHE_DCHECK(crypto_stream_factory_ == nullptr);
     crypto_stream_factory_ = factory;
   }
 
  private:
-  QuicMutex factory_lock_;
+  absl::Mutex factory_lock_;
   QuicTestServer::SessionFactory* session_factory_;             // Not owned.
   QuicTestServer::StreamFactory* stream_factory_;               // Not owned.
   QuicTestServer::CryptoStreamFactory* crypto_stream_factory_;  // Not owned.
@@ -160,7 +162,8 @@ class QuicTestDispatcher : public QuicSimpleDispatcher {
 QuicTestServer::QuicTestServer(
     std::unique_ptr<ProofSource> proof_source,
     QuicSimpleServerBackend* quic_simple_server_backend)
-    : QuicServer(std::move(proof_source), quic_simple_server_backend) {}
+    : QuicServer(std::move(proof_source), /*proof_verifier=*/nullptr,
+                 quic_simple_server_backend) {}
 
 QuicTestServer::QuicTestServer(
     std::unique_ptr<ProofSource> proof_source, const QuicConfig& config,
@@ -175,7 +178,7 @@ QuicTestServer::QuicTestServer(
     const ParsedQuicVersionVector& supported_versions,
     QuicSimpleServerBackend* quic_simple_server_backend,
     uint8_t expected_server_connection_id_length)
-    : QuicServer(std::move(proof_source), config,
+    : QuicServer(std::move(proof_source), /*proof_verifier=*/nullptr, config,
                  QuicCryptoServerConfig::ConfigOptions(), supported_versions,
                  quic_simple_server_backend,
                  expected_server_connection_id_length) {}
@@ -229,7 +232,7 @@ ImmediateGoAwaySession::ImmediateGoAwaySession(
           crypto_config, compressed_certs_cache, quic_simple_server_backend) {}
 
 void ImmediateGoAwaySession::OnStreamFrame(const QuicStreamFrame& frame) {
-  if (VersionUsesHttp3(transport_version())) {
+  if (VersionIsIetfQuic(transport_version())) {
     SendHttp3GoAway(QUIC_PEER_GOING_AWAY, "");
   } else {
     SendGoAway(QUIC_PEER_GOING_AWAY, "");
@@ -241,7 +244,7 @@ void ImmediateGoAwaySession::OnCryptoFrame(const QuicCryptoFrame& frame) {
   // In IETF QUIC, GOAWAY lives up in HTTP/3 layer. It's sent in a QUIC stream
   // and requires encryption. Thus the sending is done in
   // OnNewEncryptionKeyAvailable().
-  if (!VersionUsesHttp3(transport_version())) {
+  if (!VersionIsIetfQuic(transport_version())) {
     SendGoAway(QUIC_PEER_GOING_AWAY, "");
   }
   QuicSimpleServerSession::OnCryptoFrame(frame);
@@ -251,7 +254,7 @@ void ImmediateGoAwaySession::OnNewEncryptionKeyAvailable(
     EncryptionLevel level, std::unique_ptr<QuicEncrypter> encrypter) {
   QuicSimpleServerSession::OnNewEncryptionKeyAvailable(level,
                                                        std::move(encrypter));
-  if (VersionUsesHttp3(transport_version())) {
+  if (VersionIsIetfQuic(transport_version())) {
     if (IsEncryptionEstablished() && !goaway_sent()) {
       SendHttp3GoAway(QUIC_PEER_GOING_AWAY, "");
     }

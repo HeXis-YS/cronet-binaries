@@ -5,7 +5,9 @@
 #include "quiche/quic/core/http/quic_send_control_stream.h"
 
 #include <cstdint>
+#include <iterator>
 #include <memory>
+#include <string>
 
 #include "absl/base/macros.h"
 #include "absl/strings/string_view.h"
@@ -27,6 +29,7 @@ QuicSendControlStream::QuicSendControlStream(QuicStreamId id,
                                              const SettingsFrame& settings)
     : QuicStream(id, spdy_session, /*is_static = */ true, WRITE_UNIDIRECTIONAL),
       settings_sent_(false),
+      origin_frame_sent_(false),
       settings_(settings),
       spdy_session_(spdy_session) {}
 
@@ -50,7 +53,7 @@ void QuicSendControlStream::MaybeSendSettingsFrame() {
   QuicConnection::ScopedPacketFlusher flusher(session()->connection());
   // Send the stream type on so the peer knows about this stream.
   char data[sizeof(kControlStream)];
-  QuicDataWriter writer(ABSL_ARRAYSIZE(data), data);
+  QuicDataWriter writer(std::size(data), data);
   writer.WriteVarInt62(kControlStream);
   WriteOrBufferData(absl::string_view(writer.data(), writer.length()), false,
                     nullptr);
@@ -83,6 +86,20 @@ void QuicSendControlStream::MaybeSendSettingsFrame() {
   // discarded. A greasing frame is added here.
   WriteOrBufferData(HttpEncoder::SerializeGreasingFrame(), /*fin = */ false,
                     nullptr);
+}
+
+void QuicSendControlStream::MaybeSendOriginFrame(
+    std::vector<std::string> origins) {
+  if (origins.empty() || origin_frame_sent_) {
+    return;
+  }
+  OriginFrame frame;
+  frame.origins = std::move(origins);
+  QUIC_DVLOG(1) << "Control stream " << id() << " is writing origin frame "
+                << frame;
+  WriteOrBufferData(HttpEncoder::SerializeOriginFrame(frame), /*fin =*/false,
+                    nullptr);
+  origin_frame_sent_ = true;
 }
 
 void QuicSendControlStream::WritePriorityUpdate(QuicStreamId stream_id,

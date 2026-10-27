@@ -8,28 +8,31 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <map>
+#include <functional>
+#include <optional>
 #include <ostream>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/container/inlined_vector.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
-#include "absl/types/optional.h"
-#include "quiche/quic/core/quic_connection_id.h"
-#include "quiche/quic/core/quic_error_codes.h"
+#include "openssl/ssl.h"
+#include "quiche/quic/core/quic_connection_id.h"  // IWYU pragma: export
+#include "quiche/quic/core/quic_error_codes.h"    // IWYU pragma: export
 #include "quiche/quic/core/quic_packet_number.h"
 #include "quiche/quic/core/quic_time.h"
-#include "quiche/quic/platform/api/quic_export.h"
-#include "quiche/quic/platform/api/quic_flags.h"
-#include "quiche/common/quiche_endian.h"
+#include "quiche/quic/platform/api/quic_flags.h"  // IWYU pragma: export
+#include "quiche/common/platform/api/quiche_export.h"
+#include "quiche/common/quiche_types.h"
 #include "quiche/web_transport/web_transport.h"
 
 namespace quic {
 
 using QuicPacketLength = uint16_t;
 using QuicControlFrameId = uint32_t;
-using QuicMessageId = uint32_t;
+using QuicDatagramId = uint32_t;
 
 // IMPORTANT: IETF QUIC defines stream IDs and stream counts as being unsigned
 // 62-bit numbers. However, we have decided to only support up to 2^32-1 streams
@@ -41,14 +44,14 @@ using QuicStreamId = uint32_t;
 // Count of stream IDs. Used in MAX_STREAMS and STREAMS_BLOCKED frames.
 using QuicStreamCount = QuicStreamId;
 
-using QuicByteCount = uint64_t;
+using QuicByteCount = quiche::QuicheByteCount;
 using QuicPacketCount = uint64_t;
 using QuicPublicResetNonceProof = uint64_t;
 using QuicStreamOffset = uint64_t;
 using DiversificationNonce = std::array<char, 32>;
 using PacketTimeVector = std::vector<std::pair<QuicPacketNumber, QuicTime>>;
 
-enum : size_t { kStatelessResetTokenLength = 16 };
+inline constexpr size_t kStatelessResetTokenLength = 16;
 using StatelessResetToken = std::array<char, kStatelessResetTokenLength>;
 
 // WebTransport session IDs are stream IDs.
@@ -58,7 +61,7 @@ using WebTransportStreamError = ::webtransport::StreamErrorCode;
 // WebTransport session error codes are 32-bit.
 using WebTransportSessionError = ::webtransport::SessionErrorCode;
 
-enum : size_t { kQuicPathFrameBufferSize = 8 };
+inline constexpr size_t kQuicPathFrameBufferSize = 8;
 using QuicPathFrameBuffer = std::array<uint8_t, kQuicPathFrameBufferSize>;
 
 // The connection id sequence number specifies the order that connection
@@ -77,7 +80,7 @@ struct QUICHE_EXPORT QuicConsumedData {
 
   // By default, gtest prints the raw bytes of an object. The bool data
   // member causes this object to have padding bytes, which causes the
-  // default gtest object printer to read uninitialize memory. So we need
+  // default gtest object printer to read uninitialized memory. So we need
   // to teach gtest how to print this object.
   QUICHE_EXPORT friend std::ostream& operator<<(std::ostream& os,
                                                 const QuicConsumedData& s);
@@ -215,6 +218,11 @@ enum IsHandshake : uint8_t { NOT_HANDSHAKE, IS_HANDSHAKE };
 
 enum class Perspective : uint8_t { IS_SERVER, IS_CLIENT };
 
+constexpr Perspective FlipPerspective(Perspective perspective) {
+  return perspective == Perspective::IS_CLIENT ? Perspective::IS_SERVER
+                                               : Perspective::IS_CLIENT;
+}
+
 QUICHE_EXPORT std::string PerspectiveToString(Perspective perspective);
 QUICHE_EXPORT std::ostream& operator<<(std::ostream& os,
                                        const Perspective& perspective);
@@ -228,7 +236,7 @@ QUICHE_EXPORT std::ostream& operator<<(
     std::ostream& os, const ConnectionCloseSource& connection_close_source);
 
 // Should a connection be closed silently or not.
-enum class ConnectionCloseBehavior {
+enum class ConnectionCloseBehavior : uint8_t {
   SILENT_CLOSE,
   SILENT_CLOSE_WITH_CONNECTION_CLOSE_PACKET_SERIALIZED,
   SEND_CONNECTION_CLOSE_PACKET
@@ -271,10 +279,12 @@ enum QuicFrameType : uint8_t {
   PATH_RESPONSE_FRAME,
   PATH_CHALLENGE_FRAME,
   STOP_SENDING_FRAME,
-  MESSAGE_FRAME,
+  DATAGRAM_FRAME,
   NEW_TOKEN_FRAME,
   RETIRE_CONNECTION_ID_FRAME,
   ACK_FREQUENCY_FRAME,
+  IMMEDIATE_ACK_FRAME,
+  RESET_STREAM_AT_FRAME,
 
   NUM_FRAME_TYPES
 };
@@ -331,33 +341,52 @@ enum QuicIetfFrameType : uint64_t {
   IETF_APPLICATION_CLOSE = 0x1d,
 
   IETF_HANDSHAKE_DONE = 0x1e,
+  // See draft-ietf-quic-ack-frequency.
+  IETF_IMMEDIATE_ACK = 0x1f,
 
   // The MESSAGE frame type has not yet been fully standardized.
   // QUIC versions starting with 46 and before 99 use 0x20-0x21.
   // IETF QUIC (v99) uses 0x30-0x31, see draft-pauly-quic-datagram.
-  IETF_EXTENSION_MESSAGE_NO_LENGTH = 0x20,
-  IETF_EXTENSION_MESSAGE = 0x21,
-  IETF_EXTENSION_MESSAGE_NO_LENGTH_V99 = 0x30,
-  IETF_EXTENSION_MESSAGE_V99 = 0x31,
+  IETF_EXTENSION_DATAGRAM_NO_LENGTH = 0x20,
+  IETF_EXTENSION_DATAGRAM = 0x21,
+  IETF_EXTENSION_DATAGRAM_NO_LENGTH_V99 = 0x30,
+  IETF_EXTENSION_DATAGRAM_V99 = 0x31,
 
   // An QUIC extension frame for sender control of acknowledgement delays
   IETF_ACK_FREQUENCY = 0xaf,
 
   // A QUIC extension frame which augments the IETF_ACK frame definition with
-  // packet receive timestamps.
-  // TODO(ianswett): Determine a proper value to replace this temporary value.
-  IETF_ACK_RECEIVE_TIMESTAMPS = 0x22,
+  // packet receive timestamps.  The draft codepoints are from
+  // <https://github.com/quicwg/receive-ts/commit/108fc85425fd6a698fa6d5784566825cc8c47aa6>.
+  IETF_ACK_RECEIVE_TIMESTAMPS = 0x03178307,
+  IETF_ACK_RECEIVE_TIMESTAMPS_ECN = 0x03178308,
+
+  // https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset
+  IETF_RESET_STREAM_AT = 0x24,
 };
 QUICHE_EXPORT std::ostream& operator<<(std::ostream& os,
                                        const QuicIetfFrameType& c);
 QUICHE_EXPORT std::string QuicIetfFrameTypeString(QuicIetfFrameType t);
+
+// Returns true if the specified IETF frame type is an ACK frame.
+QUICHE_EXPORT constexpr bool IsIetfAckFrame(uint64_t type) {
+  switch (type) {
+    case IETF_ACK:
+    case IETF_ACK_ECN:
+    case IETF_ACK_RECEIVE_TIMESTAMPS:
+    case IETF_ACK_RECEIVE_TIMESTAMPS_ECN:
+      return true;
+    default:
+      return false;
+  }
+}
 
 // Masks for the bits that indicate the frame is a Stream frame vs the
 // bits used as flags.
 #define IETF_STREAM_FRAME_TYPE_MASK 0xfffffffffffffff8
 #define IETF_STREAM_FRAME_FLAG_MASK 0x07
 #define IS_IETF_STREAM_FRAME(_stype_) \
-  (((_stype_)&IETF_STREAM_FRAME_TYPE_MASK) == IETF_STREAM)
+  (((_stype_) & IETF_STREAM_FRAME_TYPE_MASK) == IETF_STREAM)
 
 // These are the values encoded in the low-order 3 bits of the
 // IETF_STREAMx frame type.
@@ -447,7 +476,9 @@ enum CongestionControlType {
   kBBR,
   kPCC,
   kGoogCC,
-  kBBRv2,
+  kBBRv2,  // This has some changes from BBRv3 as well.
+  kBBRv3,
+  kPragueCubic,
 };
 
 QUICHE_EXPORT std::string CongestionControlTypeToString(
@@ -549,12 +580,32 @@ enum SentPacketState : uint8_t {
 };
 
 enum PacketHeaderFormat : uint8_t {
+  // Indicates that the packet is either an IETF QUIC long header packet or a
+  // Google-QUIC Q046 long header packet. The Q046 long header format differs
+  // from true IETF-QUIC in that each connection ID length is encoded in 4 bits
+  // instead of 8.
   IETF_QUIC_LONG_HEADER_PACKET,
+  // Indicates that the packet is either an IETF QUIC short header packet or a
+  // Google-QUIC Q046 short header packet. The formats are identical.
   IETF_QUIC_SHORT_HEADER_PACKET,
-  GOOGLE_QUIC_PACKET,
+  // Indicates that the packet is an obsolete Google-QUIC Q043 packet. While
+  // QUICHE no longer supports Q043 (which had a very different packet header
+  // format) GOOGLE_QUIC_Q043_PACKET is only used to detect these packets in
+  // order to send an appropriately formatted Q043 version negotiation packet.
+  // There are bits in the first byte to indicate if there is a connection ID
+  // present (which must be 8 bytes long) and if there is a version present.
+  // Connection ID (with no length prefix) and version follow, in that order.
+  // The first byte bit-pattern that indicates Q043 (or earlier) is
+  // 0b00xx1xxx, where 'x' is any value.
+  GOOGLE_QUIC_Q043_PACKET,
 };
 
 QUICHE_EXPORT std::string PacketHeaderFormatToString(PacketHeaderFormat format);
+
+template <typename Sink>
+void AbslStringify(Sink& sink, PacketHeaderFormat format) {
+  sink.Append(PacketHeaderFormatToString(format));
+}
 
 // Information about a newly acknowledged packet.
 struct QUICHE_EXPORT AckedPacket {
@@ -571,6 +622,9 @@ struct QUICHE_EXPORT AckedPacket {
   QuicPacketNumber packet_number;
   // Number of bytes sent in the packet that was acknowledged.
   QuicPacketLength bytes_acked;
+  // Whether the packet has been marked as lost before the ack. |bytes_acked|
+  // should be 0 if this is true.
+  bool spurious_loss = false;
   // The time |packet_number| was received by the peer, according to the
   // optional timestamp the peer included in the ACK frame which acknowledged
   // |packet_number|. Zero if no timestamp was available for this packet.
@@ -616,50 +670,55 @@ enum QuicPacketHeaderTypeFlags : uint8_t {
   // bit to 0, allowing to distinguish Google QUIC packets from short header
   // packets.
   FLAGS_DEMULTIPLEXING_BIT = 1 << 3,
-  // Bits 4 and 5: Reserved bits for short header.
+  // Bits 4: Reserved bit for short header.
   FLAGS_SHORT_HEADER_RESERVED_1 = 1 << 4,
-  FLAGS_SHORT_HEADER_RESERVED_2 = 1 << 5,
+  // Bit 5: the spin bit.
+  FLAGS_SPIN_BIT = 1 << 5,
   // Bit 6: the 'QUIC' bit.
   FLAGS_FIXED_BIT = 1 << 6,
   // Bit 7: Indicates the header is long or short header.
   FLAGS_LONG_HEADER = 1 << 7,
 };
 
-enum MessageStatus {
-  MESSAGE_STATUS_SUCCESS,
-  MESSAGE_STATUS_ENCRYPTION_NOT_ESTABLISHED,  // Failed to send message because
-                                              // encryption is not established
-                                              // yet.
-  MESSAGE_STATUS_UNSUPPORTED,  // Failed to send message because MESSAGE frame
-                               // is not supported by the connection.
-  MESSAGE_STATUS_BLOCKED,      // Failed to send message because connection is
-                           // congestion control blocked or underlying socket is
-                           // write blocked.
-  MESSAGE_STATUS_TOO_LARGE,  // Failed to send message because the message is
-                             // too large to fit into a single packet.
-  MESSAGE_STATUS_INTERNAL_ERROR,  // Failed to send message because connection
-                                  // reaches an invalid state.
+enum DatagramStatus {
+  DATAGRAM_STATUS_SUCCESS,
+  DATAGRAM_STATUS_ENCRYPTION_NOT_ESTABLISHED,  // Failed to send message because
+                                               // encryption is not established
+                                               // yet.
+  DATAGRAM_STATUS_UNSUPPORTED,  // Failed to send message because MESSAGE frame
+                                // is not supported by the connection.
+  DATAGRAM_STATUS_BLOCKED,      // Failed to send message because connection is
+                            // congestion control blocked or underlying socket
+                            // is write blocked.
+  DATAGRAM_STATUS_TOO_LARGE,  // Failed to send message because the message is
+                              // too large to fit into a single packet.
+  DATAGRAM_STATUS_SETTINGS_NOT_RECEIVED,  // Failed to send message because
+                                          // SETTINGS frame has not been
+                                          // received yet.
+  DATAGRAM_STATUS_INTERNAL_ERROR,  // Failed to send message because connection
+                                   // reaches an invalid state.
 };
 
-QUICHE_EXPORT std::string MessageStatusToString(MessageStatus message_status);
+QUICHE_EXPORT std::string DatagramStatusToString(DatagramStatus message_status);
 
-// Used to return the result of SendMessage calls
-struct QUICHE_EXPORT MessageResult {
-  MessageResult(MessageStatus status, QuicMessageId message_id);
+// Used to return the result of SendDatagram calls
+struct QUICHE_EXPORT DatagramResult {
+  DatagramResult(DatagramStatus status, QuicDatagramId datagram_id);
 
-  bool operator==(const MessageResult& other) const {
-    return status == other.status && message_id == other.message_id;
+  bool operator==(const DatagramResult& other) const {
+    return status == other.status && datagram_id == other.datagram_id;
   }
 
   QUICHE_EXPORT friend std::ostream& operator<<(std::ostream& os,
-                                                const MessageResult& mr);
+                                                const DatagramResult& mr);
 
-  MessageStatus status;
-  // Only valid when status is MESSAGE_STATUS_SUCCESS.
-  QuicMessageId message_id;
+  DatagramStatus status;
+  // Only valid when status is DATAGRAM_STATUS_SUCCESS.
+  QuicDatagramId datagram_id;
 };
 
-QUICHE_EXPORT std::string MessageResultToString(MessageResult message_result);
+QUICHE_EXPORT std::string DatagramResultToString(
+    DatagramResult datagram_result);
 
 enum WriteStreamDataResult {
   WRITE_SUCCESS,
@@ -830,13 +889,12 @@ using QuicSignatureAlgorithmVector = absl::InlinedVector<uint16_t, 8>;
 // overrides the configurations in SSL_CTX.
 struct QUICHE_EXPORT QuicSSLConfig {
   // Whether TLS early data should be enabled. If not set, default to enabled.
-  absl::optional<bool> early_data_enabled;
-  // Whether TLS session tickets are supported. If not set, default to
-  // supported.
-  absl::optional<bool> disable_ticket_support;
+  std::optional<bool> early_data_enabled;
+  // Whether TLS session tickets are disabled. Defaults to false (supported).
+  bool disable_ticket_support = false;
   // If set, used to configure the SSL object with
   // SSL_set_signing_algorithm_prefs.
-  absl::optional<QuicSignatureAlgorithmVector> signing_algorithm_prefs;
+  std::optional<QuicSignatureAlgorithmVector> signing_algorithm_prefs;
   // Client certificate mode for mTLS support. Only used at server side.
   ClientCertMode client_cert_mode = ClientCertMode::kNone;
   // As a client, the ECHConfigList to use with ECH. If empty, ECH is not
@@ -845,31 +903,65 @@ struct QUICHE_EXPORT QuicSSLConfig {
   // As a client, whether ECH GREASE is enabled. If `ech_config_list` is
   // not empty, this value does nothing.
   bool ech_grease_enabled = false;
+  // As a client, whether set BoringSSL's reject_unusable_ech_config. See
+  // BoringSSL's documentation for SSL_set_reject_unusable_ech_config in
+  // https://boringssl.googlesource.com/boringssl/+/HEAD/include/openssl/ssl.h.
+  bool reject_unusable_ech_config = false;
+  // If not nullopt, the TLS Trust Anchor IDs to send in the TLS handshake. (See
+  // https://tlswg.org/tls-trust-anchor-ids/draft-ietf-tls-trust-anchor-ids.html.)
+  // The value should be a series of Trust Anchor IDs in wire format (a series
+  // of non-empty, 8-bit length-prefixed strings). The list may be empty to
+  // signal support for the extension without advertising particular trust
+  // anchors. If nullopt, the Trust Anchor IDs extension will not be sent.
+  std::optional<std::string> trust_anchor_ids;
+
+  // If not nullopt, the number of bytes of padding to add to the TLS handshake.
+  // Only used by the client.
+  // This is experimental, and will be removed once the experiment is complete.
+  std::optional<uint16_t> server_padding_to_request = std::nullopt;
+
+  // Only used by the server. If true, the server will add padding to the
+  // server's TLS handshake when the client requests it via
+  // server_padding_to_request.
+  // This is experimental, and will be removed once the experiment is complete.
+  bool server_padding_enabled = false;
 };
+
+QUICHE_EXPORT bool operator==(const QuicSSLConfig& lhs,
+                              const QuicSSLConfig& rhs);
 
 // QuicDelayedSSLConfig contains a subset of SSL config that can be applied
 // after BoringSSL's early select certificate callback. This overwrites all SSL
 // configs applied before cert selection.
 struct QUICHE_EXPORT QuicDelayedSSLConfig {
   // Client certificate mode for mTLS support. Only used at server side.
-  // absl::nullopt means do not change client certificate mode.
-  absl::optional<ClientCertMode> client_cert_mode;
+  // std::nullopt means do not change client certificate mode.
+  std::optional<ClientCertMode> client_cert_mode = std::nullopt;
   // QUIC transport parameters as serialized by ProofSourceHandle.
-  absl::optional<std::vector<uint8_t>> quic_transport_parameters;
+  std::optional<std::vector<uint8_t>> quic_transport_parameters = std::nullopt;
+  // If not nullopt, the SSL compliance policy to use. See documentation for
+  // ssl_compliance_policy_t values in BoringSSL:
+  // https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#Compliance-policy-configurations
+  std::optional<ssl_compliance_policy_t> ssl_compliance_policy = std::nullopt;
+
+  bool operator==(const QuicDelayedSSLConfig& other) const = default;
 };
 
 // ParsedClientHello contains client hello information extracted from a fully
 // received client hello.
 struct QUICHE_EXPORT ParsedClientHello {
-  std::string sni;                         // QUIC crypto and TLS.
-  std::string uaid;                        // QUIC crypto only.
-  std::vector<uint16_t> supported_groups;  // TLS only.
-  std::vector<std::string> alpns;          // QUIC crypto and TLS.
+  std::string sni;                               // QUIC crypto and TLS.
+  std::string uaid;                              // QUIC crypto only.
+  std::vector<uint16_t> supported_groups;        // TLS only.
+  std::vector<uint16_t> cert_compression_algos;  // TLS only.
+  std::vector<std::string> alpns;                // QUIC crypto and TLS.
   // The unvalidated retry token from the last received packet of a potentially
   // multi-packet client hello. TLS only.
   std::string retry_token;
   bool resumption_attempted = false;  // TLS only.
   bool early_data_attempted = false;  // TLS only.
+
+  std::string ToString() const;
 };
 
 QUICHE_EXPORT bool operator==(const ParsedClientHello& a,
@@ -878,22 +970,11 @@ QUICHE_EXPORT bool operator==(const ParsedClientHello& a,
 QUICHE_EXPORT std::ostream& operator<<(std::ostream& os,
                                        const ParsedClientHello& parsed_chlo);
 
-// The two bits in the IP header for Explicit Congestion Notification can take
-// one of four values.
-enum QuicEcnCodepoint {
-  // The NOT-ECT codepoint, indicating the packet sender is not using (or the
-  // network has disabled) ECN.
-  ECN_NOT_ECT = 0,
-  // The ECT(1) codepoint, indicating the packet sender is using Low Latency,
-  // Low Loss, Scalable Throughput (L4S) ECN (RFC9330).
-  ECN_ECT1 = 1,
-  // The ECT(0) codepoint, indicating the packet sender is using classic ECN
-  // (RFC3168).
-  ECN_ECT0 = 2,
-  // The CE ("Congestion Experienced") codepoint, indicating the packet sender
-  // is using ECN, and a router is experiencing congestion.
-  ECN_CE = 3,
-};
+using QuicEcnCodepoint = quiche::QuicheEcnCodepoint;
+using quiche::ECN_CE;
+using quiche::ECN_ECT0;
+using quiche::ECN_ECT1;
+using quiche::ECN_NOT_ECT;
 
 QUICHE_EXPORT std::string EcnCodepointToString(QuicEcnCodepoint ecn);
 
@@ -911,10 +992,7 @@ struct QUICHE_EXPORT QuicEcnCounts {
                            std::to_string(ce));
   }
 
-  bool operator==(const QuicEcnCounts& other) const {
-    return (this->ect0 == other.ect0 && this->ect1 == other.ect1 &&
-            this->ce == other.ce);
-  }
+  bool operator==(const QuicEcnCounts& other) const = default;
 
   QuicPacketCount ect0 = 0;
   QuicPacketCount ect1 = 0;
@@ -931,6 +1009,16 @@ enum class QuicPriorityType : uint8_t {
 
 QUICHE_EXPORT std::string QuicPriorityTypeToString(QuicPriorityType type);
 QUICHE_EXPORT std::ostream& operator<<(std::ostream& os, QuicPriorityType type);
+
+// Individual QUIC RTT sample as it is reported to by the application.
+struct QUICHE_EXPORT QuicRttSample {
+  // The time delta between the time that the packet was received, and the time
+  // that the packet was acknowledged, adjusted for the ACK delay (see RFC 9000,
+  // Section 13.2.5).
+  QuicTimeDelta latest_rtt;
+
+  bool operator==(const QuicRttSample& other) const = default;
+};
 
 }  // namespace quic
 

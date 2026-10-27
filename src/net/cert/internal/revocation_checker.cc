@@ -4,29 +4,30 @@
 
 #include "net/cert/internal/revocation_checker.h"
 
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "base/logging.h"
-#include "base/strings/string_piece.h"
+#include "base/strings/string_view_util.h"
 #include "crypto/sha2.h"
 #include "net/cert/cert_net_fetcher.h"
-#include "net/cert/ocsp_verify_result.h"
-#include "net/cert/pki/common_cert_errors.h"
-#include "net/cert/pki/crl.h"
-#include "net/cert/pki/ocsp.h"
-#include "net/cert/pki/parsed_certificate.h"
-#include "net/cert/pki/trust_store.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/boringssl/src/include/openssl/pki/ocsp.h"
+#include "third_party/boringssl/src/pki/common_cert_errors.h"
+#include "third_party/boringssl/src/pki/crl.h"
+#include "third_party/boringssl/src/pki/ocsp.h"
+#include "third_party/boringssl/src/pki/parsed_certificate.h"
+#include "third_party/boringssl/src/pki/trust_store.h"
 #include "url/gurl.h"
 
 namespace net {
 
 namespace {
 
-void MarkCertificateRevoked(CertErrors* errors) {
+void MarkCertificateRevoked(bssl::CertErrors* errors) {
   // TODO(eroman): Add a parameter to the error indicating which mechanism
   // caused the revocation (i.e. CRLSet, OCSP, stapled OCSP, etc).
-  errors->AddError(cert_errors::kCertificateRevoked);
+  errors->AddError(bssl::cert_errors::kCertificateRevoked);
 }
 
 // Checks the revocation status of |certs[target_cert_index]| according to
@@ -34,27 +35,30 @@ void MarkCertificateRevoked(CertErrors* errors) {
 // |cert_errors|.
 //
 // TODO(eroman): Make the verification time an input.
-bool CheckCertRevocation(const ParsedCertificateList& certs,
+bool CheckCertRevocation(const bssl::ParsedCertificateList& certs,
                          size_t target_cert_index,
                          const RevocationPolicy& policy,
                          base::TimeTicks deadline,
-                         base::StringPiece stapled_ocsp_response,
-                         absl::optional<int64_t> max_age_seconds,
+                         std::string_view stapled_ocsp_response,
+                         std::optional<int64_t> max_age_seconds,
+                         base::Time current_time,
                          CertNetFetcher* net_fetcher,
-                         CertErrors* cert_errors,
-                         OCSPVerifyResult* stapled_ocsp_verify_result) {
+                         bssl::CertErrors* cert_errors,
+                         bssl::OCSPVerifyResult* stapled_ocsp_verify_result) {
   DCHECK_LT(target_cert_index, certs.size());
-  const ParsedCertificate* cert = certs[target_cert_index].get();
-  const ParsedCertificate* issuer_cert =
+  const bssl::ParsedCertificate* cert = certs[target_cert_index].get();
+  const bssl::ParsedCertificate* issuer_cert =
       target_cert_index + 1 < certs.size() ? certs[target_cert_index + 1].get()
                                            : nullptr;
 
+  time_t time_now = current_time.ToTimeT();
+
   // Check using stapled OCSP, if available.
   if (!stapled_ocsp_response.empty() && issuer_cert) {
-    OCSPVerifyResult::ResponseStatus response_details;
-    OCSPRevocationStatus ocsp_status = CheckOCSP(
-        stapled_ocsp_response, cert, issuer_cert, base::Time::Now().ToTimeT(),
-        max_age_seconds, &response_details);
+    bssl::OCSPVerifyResult::ResponseStatus response_details;
+    bssl::OCSPRevocationStatus ocsp_status =
+        bssl::CheckOCSP(stapled_ocsp_response, cert, issuer_cert, time_now,
+                        max_age_seconds, &response_details);
     if (stapled_ocsp_verify_result) {
       stapled_ocsp_verify_result->response_status = response_details;
       stapled_ocsp_verify_result->revocation_status = ocsp_status;
@@ -62,12 +66,12 @@ bool CheckCertRevocation(const ParsedCertificateList& certs,
 
     // TODO(eroman): Save the stapled OCSP response to cache.
     switch (ocsp_status) {
-      case OCSPRevocationStatus::REVOKED:
+      case bssl::OCSPRevocationStatus::REVOKED:
         MarkCertificateRevoked(cert_errors);
         return false;
-      case OCSPRevocationStatus::GOOD:
+      case bssl::OCSPRevocationStatus::GOOD:
         return true;
-      case OCSPRevocationStatus::UNKNOWN:
+      case bssl::OCSPRevocationStatus::UNKNOWN:
         // TODO(eroman): If the OCSP response was invalid, should we keep
         //               looking or fail?
         break;
@@ -110,7 +114,7 @@ bool CheckCertRevocation(const ParsedCertificateList& certs,
 
       // TODO(eroman): Duplication of work if there are multiple URLs to try.
       // TODO(eroman): Are there cases where we would need to POST instead?
-      absl::optional<std::string> get_url_str =
+      std::optional<std::string> get_url_str =
           CreateOCSPGetURL(cert, issuer_cert, ocsp_uri);
       if (!get_url_str.has_value()) {
         // An unexpected failure from BoringSSL, or the input was too large to
@@ -139,33 +143,30 @@ bool CheckCertRevocation(const ParsedCertificateList& certs,
       if (net_error != OK)
         continue;
 
-      OCSPVerifyResult::ResponseStatus response_details;
+      bssl::OCSPVerifyResult::ResponseStatus response_details;
 
-      OCSPRevocationStatus ocsp_status = CheckOCSP(
-          std::string_view(
-              reinterpret_cast<const char*>(ocsp_response_bytes.data()),
-              ocsp_response_bytes.size()),
-          cert, issuer_cert, base::Time::Now().ToTimeT(), max_age_seconds,
-          &response_details);
+      bssl::OCSPRevocationStatus ocsp_status = bssl::CheckOCSP(
+          base::as_string_view(ocsp_response_bytes), cert, issuer_cert,
+          time_now, max_age_seconds, &response_details);
 
       switch (ocsp_status) {
-        case OCSPRevocationStatus::REVOKED:
+        case bssl::OCSPRevocationStatus::REVOKED:
           MarkCertificateRevoked(cert_errors);
           return false;
-        case OCSPRevocationStatus::GOOD:
+        case bssl::OCSPRevocationStatus::GOOD:
           return true;
-        case OCSPRevocationStatus::UNKNOWN:
+        case bssl::OCSPRevocationStatus::UNKNOWN:
           break;
       }
     }
   }
 
   // Check CRLs.
-  ParsedExtension crl_dp_extension;
+  bssl::ParsedExtension crl_dp_extension;
   if (policy.crl_allowed &&
-      cert->GetExtension(der::Input(kCrlDistributionPointsOid),
+      cert->GetExtension(bssl::der::Input(bssl::kCrlDistributionPointsOid),
                          &crl_dp_extension)) {
-    std::vector<ParsedDistributionPoint> distribution_points;
+    std::vector<bssl::ParsedDistributionPoint> distribution_points;
     if (ParseCrlDistributionPoints(crl_dp_extension.value,
                                    &distribution_points)) {
       for (const auto& distribution_point : distribution_points) {
@@ -231,20 +232,17 @@ bool CheckCertRevocation(const ParsedCertificateList& certs,
           if (net_error != OK)
             continue;
 
-          CRLRevocationStatus crl_status = CheckCRL(
-              std::string_view(
-                  reinterpret_cast<const char*>(crl_response_bytes.data()),
-                  crl_response_bytes.size()),
-              certs, target_cert_index, distribution_point,
-              base::Time::Now().ToTimeT(), max_age_seconds);
+          bssl::CRLRevocationStatus crl_status = CheckCRL(
+              base::as_string_view(crl_response_bytes), certs,
+              target_cert_index, distribution_point, time_now, max_age_seconds);
 
           switch (crl_status) {
-            case CRLRevocationStatus::REVOKED:
+            case bssl::CRLRevocationStatus::REVOKED:
               MarkCertificateRevoked(cert_errors);
               return false;
-            case CRLRevocationStatus::GOOD:
+            case bssl::CRLRevocationStatus::GOOD:
               return true;
-            case CRLRevocationStatus::UNKNOWN:
+            case bssl::CRLRevocationStatus::UNKNOWN:
               break;
           }
         }
@@ -263,7 +261,7 @@ bool CheckCertRevocation(const ParsedCertificateList& certs,
     } else {
       // If the certificate lacked any (recognized) revocation mechanisms, and
       // the policy forbids it, fail revocation checking.
-      cert_errors->AddError(cert_errors::kNoRevocationMechanism);
+      cert_errors->AddError(bssl::cert_errors::kNoRevocationMechanism);
       return false;
     }
   }
@@ -274,22 +272,23 @@ bool CheckCertRevocation(const ParsedCertificateList& certs,
     return true;
 
   // Otherwise the policy doesn't allow revocation checking to fail.
-  cert_errors->AddError(cert_errors::kUnableToCheckRevocation);
+  cert_errors->AddError(bssl::cert_errors::kUnableToCheckRevocation);
   return false;
 }
 
 }  // namespace
 
 void CheckValidatedChainRevocation(
-    const ParsedCertificateList& certs,
+    const bssl::ParsedCertificateList& certs,
     const RevocationPolicy& policy,
     base::TimeTicks deadline,
-    base::StringPiece stapled_leaf_ocsp_response,
+    std::string_view stapled_leaf_ocsp_response,
+    base::Time current_time,
     CertNetFetcher* net_fetcher,
-    CertPathErrors* errors,
-    OCSPVerifyResult* stapled_ocsp_verify_result) {
+    bssl::CertPathErrors* errors,
+    bssl::OCSPVerifyResult* stapled_ocsp_verify_result) {
   if (stapled_ocsp_verify_result)
-    *stapled_ocsp_verify_result = OCSPVerifyResult();
+    *stapled_ocsp_verify_result = bssl::OCSPVerifyResult();
 
   // Check each certificate for revocation using OCSP/CRL. Checks proceed
   // from the root certificate towards the leaf certificate. Revocation errors
@@ -305,10 +304,10 @@ void CheckValidatedChainRevocation(
       continue;
 
     // TODO(eroman): Plumb stapled OCSP for non-leaf certificates from TLS?
-    base::StringPiece stapled_ocsp =
-        (i == 0) ? stapled_leaf_ocsp_response : base::StringPiece();
+    std::string_view stapled_ocsp =
+        (i == 0) ? stapled_leaf_ocsp_response : std::string_view();
 
-    absl::optional<int64_t> max_age_seconds;
+    std::optional<int64_t> max_age_seconds;
     if (policy.enforce_baseline_requirements) {
       max_age_seconds = ((i == 0) ? kMaxRevocationLeafUpdateAge
                                   : kMaxRevocationIntermediateUpdateAge)
@@ -318,8 +317,8 @@ void CheckValidatedChainRevocation(
     // Check whether this certificate's revocation status complies with the
     // policy.
     bool cert_ok = CheckCertRevocation(
-        certs, i, policy, deadline, stapled_ocsp, max_age_seconds, net_fetcher,
-        errors->GetErrorsForCert(i),
+        certs, i, policy, deadline, stapled_ocsp, max_age_seconds, current_time,
+        net_fetcher, errors->GetErrorsForCert(i),
         (i == 0) ? stapled_ocsp_verify_result : nullptr);
 
     if (!cert_ok) {
@@ -327,7 +326,7 @@ void CheckValidatedChainRevocation(
       // revoked and no need to check revocation status for the remaining
       // certificates.
       DCHECK(errors->GetErrorsForCert(i)->ContainsAnyErrorWithSeverity(
-          CertError::SEVERITY_HIGH));
+          bssl::CertError::SEVERITY_HIGH));
       break;
     }
   }
@@ -335,14 +334,14 @@ void CheckValidatedChainRevocation(
 
 CRLSet::Result CheckChainRevocationUsingCRLSet(
     const CRLSet* crl_set,
-    const ParsedCertificateList& certs,
-    CertPathErrors* errors) {
+    const bssl::ParsedCertificateList& certs,
+    bssl::CertPathErrors* errors) {
   // Iterate from the root certificate towards the leaf (the root certificate is
   // also checked for revocation by CRLSet).
-  std::string issuer_spki_hash;
+  std::array<uint8_t, 32> issuer_spki_hash;
   for (size_t reverse_i = 0; reverse_i < certs.size(); ++reverse_i) {
     size_t i = certs.size() - reverse_i - 1;
-    const ParsedCertificate* cert = certs[i].get();
+    const bssl::ParsedCertificate* cert = certs[i].get();
 
     // True if |cert| is the root of the chain.
     const bool is_root = reverse_i == 0;
@@ -350,25 +349,26 @@ CRLSet::Result CheckChainRevocationUsingCRLSet(
     const bool is_target = i == 0;
 
     // Check for revocation using the certificate's SPKI.
-    std::string spki_hash =
-        crypto::SHA256HashString(cert->tbs().spki_tlv.AsStringView());
-    CRLSet::Result result = crl_set->CheckSPKI(spki_hash);
+    std::array<uint8_t, 32> spki_hash =
+        crypto::SHA256Hash(cert->tbs().spki_tlv);
+    CRLSet::Result result = crl_set->CheckSPKI(base::as_string_view(spki_hash));
 
     // Check for revocation using the certificate's Subject.
     if (result != CRLSet::REVOKED) {
-      result = crl_set->CheckSubject(cert->tbs().subject_tlv.AsStringView(),
-                                     spki_hash);
+      result =
+          crl_set->CheckSubject(base::as_string_view(cert->tbs().subject_tlv),
+                                base::as_string_view(spki_hash));
     }
 
     // Check for revocation using the certificate's serial number and issuer's
     // SPKI.
     if (result != CRLSet::REVOKED && !is_root) {
-      result = crl_set->CheckSerial(cert->tbs().serial_number.AsStringView(),
-                                    issuer_spki_hash);
+      result = crl_set->CheckSerial(cert->tbs().serial_number,
+                                    base::as_string_view(issuer_spki_hash));
     }
 
     // Prepare for the next iteration.
-    issuer_spki_hash = std::move(spki_hash);
+    issuer_spki_hash = spki_hash;
 
     switch (result) {
       case CRLSet::REVOKED:

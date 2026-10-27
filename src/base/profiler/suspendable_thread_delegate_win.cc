@@ -5,13 +5,10 @@
 #include "base/profiler/suspendable_thread_delegate_win.h"
 
 #include <windows.h>
-#include <winternl.h>
 
 #include <vector>
 
 #include "base/check.h"
-#include "base/debug/alias.h"
-#include "base/memory/raw_ptr_exclusion.h"
 #include "base/profiler/native_unwinder_win.h"
 #include "build/build_config.h"
 
@@ -25,76 +22,6 @@
 namespace base {
 
 namespace {
-
-// The thread environment block internal type.
-struct TEB {
-  NT_TIB Tib;
-  // Rest of struct is ignored.
-};
-
-win::ScopedHandle GetCurrentThreadHandle() {
-  HANDLE thread;
-  CHECK(::DuplicateHandle(::GetCurrentProcess(), ::GetCurrentThread(),
-                          ::GetCurrentProcess(), &thread, 0, FALSE,
-                          DUPLICATE_SAME_ACCESS));
-  return win::ScopedHandle(thread);
-}
-
-win::ScopedHandle GetThreadHandle(PlatformThreadId thread_id) {
-  // TODO(https://crbug.com/947459): Move this logic to
-  // GetSamplingProfilerCurrentThreadToken() and pass the handle in
-  // SamplingProfilerThreadToken.
-  if (thread_id == ::GetCurrentThreadId())
-    return GetCurrentThreadHandle();
-
-  // TODO(http://crbug.com/947459): Remove the test_handle* CHECKs once we
-  // understand which flag is triggering the failure.
-  DWORD flags = 0;
-  base::debug::Alias(&flags);
-
-  flags |= THREAD_GET_CONTEXT;
-  win::ScopedHandle test_handle1(::OpenThread(flags, FALSE, thread_id));
-  CHECK(test_handle1.is_valid());
-
-  flags |= THREAD_QUERY_INFORMATION;
-  win::ScopedHandle test_handle2(::OpenThread(flags, FALSE, thread_id));
-  CHECK(test_handle2.is_valid());
-
-  flags |= THREAD_SUSPEND_RESUME;
-  win::ScopedHandle handle(::OpenThread(flags, FALSE, thread_id));
-  CHECK(handle.is_valid());
-  return handle;
-}
-
-// Returns the thread environment block pointer for |thread_handle|.
-const TEB* GetThreadEnvironmentBlock(PlatformThreadId thread_id,
-                                     HANDLE thread_handle) {
-  // TODO(https://crbug.com/947459): Move this logic to
-  // GetSamplingProfilerCurrentThreadToken() and pass the TEB* in
-  // SamplingProfilerThreadToken.
-  if (thread_id == ::GetCurrentThreadId())
-    return reinterpret_cast<TEB*>(NtCurrentTeb());
-
-  // Define types not in winternl.h needed to invoke NtQueryInformationThread().
-  constexpr auto ThreadBasicInformation = static_cast<THREADINFOCLASS>(0);
-  struct THREAD_BASIC_INFORMATION {
-    NTSTATUS ExitStatus;
-    RAW_PTR_EXCLUSION TEB* Teb;  // Filled in by the OS so cannot use raw_ptr<>.
-    CLIENT_ID ClientId;
-    KAFFINITY AffinityMask;
-    LONG Priority;
-    LONG BasePriority;
-  };
-
-  THREAD_BASIC_INFORMATION basic_info = {0};
-  NTSTATUS status = ::NtQueryInformationThread(
-      thread_handle, ThreadBasicInformation, &basic_info,
-      sizeof(THREAD_BASIC_INFORMATION), nullptr);
-  if (status != 0)
-    return nullptr;
-
-  return basic_info.Teb;
-}
 
 // Tests whether |stack_pointer| points to a location in the guard page. NO HEAP
 // ALLOCATIONS.
@@ -138,8 +65,9 @@ ScopedDisablePriorityBoost::ScopedDisablePriorityBoost(HANDLE thread_handle)
 }
 
 ScopedDisablePriorityBoost::~ScopedDisablePriorityBoost() {
-  if (got_previous_boost_state_)
+  if (got_previous_boost_state_) {
     ::SetThreadPriorityBoost(thread_handle_, boost_state_was_disabled_);
+  }
 }
 
 }  // namespace
@@ -156,8 +84,9 @@ SuspendableThreadDelegateWin::ScopedSuspendThread::ScopedSuspendThread(
 // NO HEAP ALLOCATIONS. The CHECK is OK because it provides a more noisy failure
 // mode than deadlocking.
 SuspendableThreadDelegateWin::ScopedSuspendThread::~ScopedSuspendThread() {
-  if (!was_successful_)
+  if (!was_successful_) {
     return;
+  }
 
   // Disable the priority boost that the thread would otherwise receive on
   // resume. We do this to avoid artificially altering the dynamics of the
@@ -172,7 +101,7 @@ SuspendableThreadDelegateWin::ScopedSuspendThread::~ScopedSuspendThread() {
   ScopedDisablePriorityBoost disable_priority_boost(thread_handle_);
   bool resume_thread_succeeded =
       ::ResumeThread(thread_handle_) != static_cast<DWORD>(-1);
-  CHECK(resume_thread_succeeded) << "ResumeThread failed: " << GetLastError();
+  PCHECK(resume_thread_succeeded) << "ResumeThread failed";
 }
 
 bool SuspendableThreadDelegateWin::ScopedSuspendThread::WasSuccessful() const {
@@ -185,10 +114,11 @@ bool SuspendableThreadDelegateWin::ScopedSuspendThread::WasSuccessful() const {
 SuspendableThreadDelegateWin::SuspendableThreadDelegateWin(
     SamplingProfilerThreadToken thread_token)
     : thread_id_(thread_token.id),
-      thread_handle_(GetThreadHandle(thread_token.id)),
-      thread_stack_base_address_(reinterpret_cast<uintptr_t>(
-          GetThreadEnvironmentBlock(thread_token.id, thread_handle_.get())
-              ->Tib.StackBase)) {}
+      thread_handle_(std::move(thread_token.thread_handle)),
+      thread_stack_base_address_(thread_token.stack_base_address) {
+  CHECK(thread_handle_.is_valid());
+  CHECK(thread_stack_base_address_);
+}
 
 SuspendableThreadDelegateWin::~SuspendableThreadDelegateWin() = default;
 
@@ -222,22 +152,44 @@ bool SuspendableThreadDelegateWin::CanCopyStack(uintptr_t stack_pointer) {
   return !PointsToGuardPage(stack_pointer);
 }
 
-std::vector<uintptr_t*> SuspendableThreadDelegateWin::GetRegistersToRewrite(
-    CONTEXT* thread_context) {
+std::vector<uintptr_t> SuspendableThreadDelegateWin::GetRegisters(
+    RegisterContext* thread_context) {
   // Return the set of non-volatile registers.
   return {
 #if defined(ARCH_CPU_X86_64)
-    &thread_context->R12, &thread_context->R13, &thread_context->R14,
-        &thread_context->R15, &thread_context->Rdi, &thread_context->Rsi,
-        &thread_context->Rbx, &thread_context->Rbp, &thread_context->Rsp
+      thread_context->Rbx, thread_context->Rbp, thread_context->Rsp
 #elif defined(ARCH_CPU_ARM64)
-    &thread_context->X19, &thread_context->X20, &thread_context->X21,
-        &thread_context->X22, &thread_context->X23, &thread_context->X24,
-        &thread_context->X25, &thread_context->X26, &thread_context->X27,
-        &thread_context->X28, &thread_context->Fp, &thread_context->Lr,
-        &thread_context->Sp
+      thread_context->X19, thread_context->X20, thread_context->X21,
+      thread_context->X22, thread_context->X23, thread_context->X24,
+      thread_context->X25, thread_context->X26, thread_context->X27,
+      thread_context->X28, thread_context->Fp,  thread_context->Lr,
+      thread_context->Sp
 #endif
   };
+}
+
+void SuspendableThreadDelegateWin::SetRegisters(
+    RegisterContext* thread_context,
+    const std::vector<uintptr_t>& registers) {
+#if defined(ARCH_CPU_X86_64)
+  thread_context->Rbx = registers[0];
+  thread_context->Rbp = registers[1];
+  thread_context->Rsp = registers[2];
+#elif defined(ARCH_CPU_ARM64)
+  thread_context->X19 = registers[0];
+  thread_context->X20 = registers[1];
+  thread_context->X21 = registers[2];
+  thread_context->X22 = registers[3];
+  thread_context->X23 = registers[4];
+  thread_context->X24 = registers[5];
+  thread_context->X25 = registers[6];
+  thread_context->X26 = registers[7];
+  thread_context->X27 = registers[8];
+  thread_context->X28 = registers[9];
+  thread_context->Fp = registers[10];
+  thread_context->Lr = registers[11];
+  thread_context->Sp = registers[12];
+#endif
 }
 
 }  // namespace base

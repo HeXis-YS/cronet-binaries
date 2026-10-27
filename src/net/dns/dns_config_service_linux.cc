@@ -12,12 +12,15 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/files/file_path.h"
 #include "base/files/file_path_watcher.h"
 #include "base/functional/bind.h"
@@ -26,7 +29,6 @@
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/sequence_checker.h"
 #include "base/threading/scoped_blocking_call.h"
 #include "base/time/time.h"
@@ -35,7 +37,6 @@
 #include "net/dns/nsswitch_reader.h"
 #include "net/dns/public/resolv_reader.h"
 #include "net/dns/serial_worker.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace net {
 
@@ -58,23 +59,25 @@ constexpr base::FilePath::CharType kFilePathResolv[] = _PATH_RESCONF;
 
 constexpr base::FilePath::CharType kFilePathNsswitch[] = _PATH_NSSWITCH_CONF;
 
-absl::optional<DnsConfig> ConvertResStateToDnsConfig(
+std::optional<DnsConfig> ConvertResStateToDnsConfig(
     const struct __res_state& res) {
-  absl::optional<std::vector<net::IPEndPoint>> nameservers =
-      GetNameservers(res);
+  std::optional<std::vector<net::IPEndPoint>> nameservers = GetNameservers(res);
   DnsConfig dns_config;
   dns_config.unhandled_options = false;
 
   if (!nameservers.has_value())
-    return absl::nullopt;
+    return std::nullopt;
 
   // Expected to be validated by GetNameservers()
   DCHECK(res.options & RES_INIT);
 
   dns_config.nameservers = std::move(nameservers.value());
   dns_config.search.clear();
-  for (int i = 0; (i < MAXDNSRCH) && res.dnsrch[i]; ++i) {
-    dns_config.search.emplace_back(res.dnsrch[i]);
+  for (const char* search : base::span(res.dnsrch).first<MAXDNSRCH>()) {
+    if (!search) {
+      break;
+    }
+    dns_config.search.emplace_back(search);
   }
 
   dns_config.ndots = res.ndots;
@@ -104,12 +107,12 @@ absl::optional<DnsConfig> ConvertResStateToDnsConfig(
   }
 
   if (dns_config.nameservers.empty())
-    return absl::nullopt;
+    return std::nullopt;
 
   // If any name server is 0.0.0.0, assume the configuration is invalid.
   for (const IPEndPoint& nameserver : dns_config.nameservers) {
     if (nameserver.address().IsZero())
-      return absl::nullopt;
+      return std::nullopt;
   }
   return dns_config;
 }
@@ -133,11 +136,11 @@ bool SetActionBehavior(const NsswitchReader::ServiceAction& action,
       }
     }
   } else {
-    if (in_out_parsed_behavior.count(action.status) >= 1 &&
-        in_out_parsed_behavior[action.status] != action.action) {
+    auto [it, inserted] =
+        in_out_parsed_behavior.try_emplace(action.status, action.action);
+    if (!inserted && it->second != action.action) {
       return false;
     }
-    in_out_parsed_behavior[action.status] = action.action;
   }
 
   return true;
@@ -149,7 +152,7 @@ bool SetActionBehavior(const NsswitchReader::ServiceAction& action,
 // `actions`.
 bool AreActionsCompatible(
     const std::vector<NsswitchReader::ServiceAction>& actions,
-    const std::map<NsswitchReader::Status, NsswitchReader::Action>
+    const std::map<NsswitchReader::Status, NsswitchReader::Action>&
         expected_actions) {
   std::map<NsswitchReader::Status, NsswitchReader::Action> parsed_behavior;
 
@@ -164,23 +167,19 @@ bool AreActionsCompatible(
   }
 
   // Default behavior if not configured.
-  if (parsed_behavior.count(NsswitchReader::Status::kSuccess) == 0)
-    parsed_behavior[NsswitchReader::Status::kSuccess] =
-        NsswitchReader::Action::kReturn;
-  if (parsed_behavior.count(NsswitchReader::Status::kNotFound) == 0)
-    parsed_behavior[NsswitchReader::Status::kNotFound] =
-        NsswitchReader::Action::kContinue;
-  if (parsed_behavior.count(NsswitchReader::Status::kUnavailable) == 0)
-    parsed_behavior[NsswitchReader::Status::kUnavailable] =
-        NsswitchReader::Action::kContinue;
-  if (parsed_behavior.count(NsswitchReader::Status::kTryAgain) == 0)
-    parsed_behavior[NsswitchReader::Status::kTryAgain] =
-        NsswitchReader::Action::kContinue;
+  parsed_behavior.try_emplace(NsswitchReader::Status::kSuccess,
+                              NsswitchReader::Action::kReturn);
+  parsed_behavior.try_emplace(NsswitchReader::Status::kNotFound,
+                              NsswitchReader::Action::kContinue);
+  parsed_behavior.try_emplace(NsswitchReader::Status::kUnavailable,
+                              NsswitchReader::Action::kContinue);
+  parsed_behavior.try_emplace(NsswitchReader::Status::kTryAgain,
+                              NsswitchReader::Action::kContinue);
 
-  for (const std::pair<const NsswitchReader::Status, NsswitchReader::Action>&
-           expected : expected_actions) {
-    if (parsed_behavior[expected.first] != expected.second)
+  for (const auto& [status, action] : expected_actions) {
+    if (parsed_behavior[status] != action) {
       return false;
+    }
   }
 
   return true;
@@ -204,7 +203,7 @@ enum class IncompatibleNsswitchReason {
 
 void RecordIncompatibleNsswitchReason(
     IncompatibleNsswitchReason reason,
-    absl::optional<NsswitchReader::Service> service_token) {
+    std::optional<NsswitchReader::Service> service_token) {
   if (service_token) {
     base::UmaHistogramEnumeration(
         "Net.DNS.DnsConfig.Nsswitch.IncompatibleService",
@@ -213,7 +212,8 @@ void RecordIncompatibleNsswitchReason(
 }
 
 bool IsNsswitchConfigCompatible(
-    const std::vector<NsswitchReader::ServiceSpecification>& nsswitch_hosts) {
+    const std::vector<NsswitchReader::ServiceSpecification>& nsswitch_hosts,
+    ResolvReader& resolv_reader) {
   bool files_found = false;
   for (const NsswitchReader::ServiceSpecification& specification :
        nsswitch_hosts) {
@@ -249,11 +249,25 @@ bool IsNsswitchConfigCompatible(
         }
         break;
 
+      case NsswitchReader::Service::kResolve:
+        // If /etc/resolv.conf points to systemd-resolved then treat nss-resolve
+        // the same as nss-dns. If it's not then consider the nsswitch
+        // configuration incompatible.
+        if (!resolv_reader.IsLikelySystemdResolved()) {
+          RecordIncompatibleNsswitchReason(
+              IncompatibleNsswitchReason::kIncompatibleService,
+              specification.service);
+          return false;
+        }
+        // systemd-resolved also supports looking up records from /etc/hosts.
+        files_found = true;
+        [[fallthrough]];
+
       case NsswitchReader::Service::kDns:
         if (!files_found) {
           RecordIncompatibleNsswitchReason(
               IncompatibleNsswitchReason::kFilesMissing,
-              /*service_token=*/absl::nullopt);
+              /*service_token=*/std::nullopt);
           return false;
         }
         // Chrome will always stop if DNS finds a result or will otherwise
@@ -276,7 +290,6 @@ bool IsNsswitchConfigCompatible(
       case NsswitchReader::Service::kMdns:
       case NsswitchReader::Service::kMdns4:
       case NsswitchReader::Service::kMdns6:
-      case NsswitchReader::Service::kResolve:
       case NsswitchReader::Service::kNis:
         RecordIncompatibleNsswitchReason(
             IncompatibleNsswitchReason::kIncompatibleService,
@@ -321,7 +334,7 @@ bool IsNsswitchConfigCompatible(
   }
 
   RecordIncompatibleNsswitchReason(IncompatibleNsswitchReason::kDnsMissing,
-                                   /*service_token=*/absl::nullopt);
+                                   /*service_token=*/std::nullopt);
   return false;
 }
 
@@ -371,12 +384,10 @@ class DnsConfigServiceLinux::Watcher : public DnsConfigService::Watcher {
 
  private:
   void OnResolvFilePathWatcherChange(const base::FilePath& path, bool error) {
-    base::UmaHistogramBoolean("Net.DNS.DnsConfig.Resolv.FileChange", true);
     OnConfigChanged(!error);
   }
 
   void OnNsswitchFilePathWatcherChange(const base::FilePath& path, bool error) {
-    base::UmaHistogramBoolean("Net.DNS.DnsConfig.Nsswitch.FileChange", true);
     OnConfigChanged(!error);
   }
 
@@ -453,12 +464,8 @@ class DnsConfigServiceLinux::ConfigReader : public SerialWorker {
         }
       }
 
-      base::UmaHistogramBoolean("Net.DNS.DnsConfig.Resolv.Read",
-                                dns_config_.has_value());
       if (!dns_config_.has_value())
         return;
-      base::UmaHistogramBoolean("Net.DNS.DnsConfig.Resolv.Valid",
-                                dns_config_->IsValid());
       base::UmaHistogramBoolean("Net.DNS.DnsConfig.Resolv.Compatible",
                                 !dns_config_->unhandled_options);
 
@@ -470,7 +477,7 @@ class DnsConfigServiceLinux::ConfigReader : public SerialWorker {
         std::vector<NsswitchReader::ServiceSpecification> nsswitch_hosts =
             nsswitch_reader_->ReadAndParseHosts();
         dns_config_->unhandled_options =
-            !IsNsswitchConfigCompatible(nsswitch_hosts);
+            !IsNsswitchConfigCompatible(nsswitch_hosts, *resolv_reader_);
         base::UmaHistogramBoolean("Net.DNS.DnsConfig.Nsswitch.Compatible",
                                   !dns_config_->unhandled_options);
       }
@@ -478,7 +485,7 @@ class DnsConfigServiceLinux::ConfigReader : public SerialWorker {
 
    private:
     friend class ConfigReader;
-    absl::optional<DnsConfig> dns_config_;
+    std::optional<DnsConfig> dns_config_;
     std::unique_ptr<ResolvReader> resolv_reader_;
     std::unique_ptr<NsswitchReader> nsswitch_reader_;
   };

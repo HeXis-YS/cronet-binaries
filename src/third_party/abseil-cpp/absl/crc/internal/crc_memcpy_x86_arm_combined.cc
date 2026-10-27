@@ -38,25 +38,18 @@
 // using 3 CRCs over fixed-size blocks where the zero-extensions required for
 // CRC32C::Concat can be precomputed.
 
-#ifdef __SSE4_2__
-#include <immintrin.h>
-#endif
-
-#ifdef _MSC_VER
-#include <intrin.h>
-#endif
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 
+#include "absl/base/attributes.h"
 #include "absl/base/config.h"
+#include "absl/base/internal/cpu_detect.h"
 #include "absl/base/optimization.h"
 #include "absl/base/prefetch.h"
 #include "absl/crc/crc32c.h"
-#include "absl/crc/internal/cpu_detect.h"
 #include "absl/crc/internal/crc32_x86_arm_combined_simd.h"
 #include "absl/crc/internal/crc_memcpy.h"
 #include "absl/strings/string_view.h"
@@ -67,6 +60,9 @@
 namespace absl {
 ABSL_NAMESPACE_BEGIN
 namespace crc_internal {
+
+using ::absl::base_internal::CpuType;
+using ::absl::base_internal::GetCpuType;
 
 namespace {
 
@@ -88,9 +84,11 @@ inline crc32c_t ShortCrcCopy(char* dst, const char* src, std::size_t length,
 constexpr size_t kIntLoadsPerVec = sizeof(V128) / sizeof(uint64_t);
 
 // Common function for copying the tails of multiple large regions.
+// Disable ubsan for benign unaligned access. See b/254108538.
 template <size_t vec_regions, size_t int_regions>
-inline void LargeTailCopy(crc32c_t* crcs, char** dst, const char** src,
-                          size_t region_size, size_t copy_rounds) {
+ABSL_ATTRIBUTE_NO_SANITIZE_UNDEFINED inline void LargeTailCopy(
+    crc32c_t* crcs, char** dst, const char** src, size_t region_size,
+    size_t copy_rounds) {
   std::array<V128, vec_regions> data;
   std::array<uint64_t, kIntLoadsPerVec * int_regions> int_data;
 
@@ -98,7 +96,7 @@ inline void LargeTailCopy(crc32c_t* crcs, char** dst, const char** src,
     for (size_t i = 0; i < vec_regions; i++) {
       size_t region = i;
 
-      auto* vsrc = reinterpret_cast<const V128u*>(*src + region_size * region);
+      auto* vsrc = reinterpret_cast<const V128*>(*src + region_size * region);
       auto* vdst = reinterpret_cast<V128*>(*dst + region_size * region);
 
       // Load the blocks, unaligned
@@ -127,8 +125,8 @@ inline void LargeTailCopy(crc32c_t* crcs, char** dst, const char** src,
         size_t data_index = i * kIntLoadsPerVec + j;
 
         int_data[data_index] = *(usrc + j);
-        crcs[region] = crc32c_t{static_cast<uint32_t>(CRC32_u64(
-            static_cast<uint32_t>(crcs[region]), int_data[data_index]))};
+        crcs[region] = crc32c_t{CRC32_u64(static_cast<uint32_t>(crcs[region]),
+                                          int_data[data_index])};
 
         *(udst + j) = int_data[data_index];
       }
@@ -155,8 +153,10 @@ class AcceleratedCrcMemcpyEngine : public CrcMemcpyEngine {
                    std::size_t length, crc32c_t initial_crc) const override;
 };
 
+// Disable ubsan for benign unaligned access. See b/254108538.
 template <size_t vec_regions, size_t int_regions>
-crc32c_t AcceleratedCrcMemcpyEngine<vec_regions, int_regions>::Compute(
+ABSL_ATTRIBUTE_NO_SANITIZE_UNDEFINED crc32c_t
+AcceleratedCrcMemcpyEngine<vec_regions, int_regions>::Compute(
     void* __restrict dst, const void* __restrict src, std::size_t length,
     crc32c_t initial_crc) const {
   constexpr std::size_t kRegions = vec_regions + int_regions;
@@ -196,7 +196,6 @@ crc32c_t AcceleratedCrcMemcpyEngine<vec_regions, int_regions>::Compute(
 
   // Start work on the CRC: undo the XOR from the previous calculation or set up
   // the initial value of the CRC.
-  // initial_crc ^= kCrcDataXor;
   initial_crc = crc32c_t{static_cast<uint32_t>(initial_crc) ^ kCrcDataXor};
 
   // Do an initial alignment copy, so we can use aligned store instructions to
@@ -262,7 +261,7 @@ crc32c_t AcceleratedCrcMemcpyEngine<vec_regions, int_regions>::Compute(
         size_t region = (j + i) % kRegions;
 
         auto* vsrc =
-            reinterpret_cast<const V128u*>(src_bytes + region_size * region);
+            reinterpret_cast<const V128*>(src_bytes + region_size * region);
         auto* vdst = reinterpret_cast<V128*>(dst_bytes + region_size * region);
 
         // Load and CRC data.
@@ -295,8 +294,8 @@ crc32c_t AcceleratedCrcMemcpyEngine<vec_regions, int_regions>::Compute(
 
           // Load and CRC the data.
           int_data[data_index] = *(usrc + i * kIntLoadsPerVec + k);
-          crcs[region] = crc32c_t{static_cast<uint32_t>(CRC32_u64(
-              static_cast<uint32_t>(crcs[region]), int_data[data_index]))};
+          crcs[region] = crc32c_t{CRC32_u64(static_cast<uint32_t>(crcs[region]),
+                                            int_data[data_index])};
 
           // Store the data.
           *(udst + i * kIntLoadsPerVec + k) = int_data[data_index];
@@ -418,6 +417,12 @@ CrcMemcpy::ArchSpecificEngines CrcMemcpy::GetArchSpecificEngines() {
       };
     // INTEL_SANDYBRIDGE performs better with SSE than AVX.
     case CpuType::kIntelSandybridge:
+    // Use SIMD memcpy on ARM cores.
+    case CpuType::kArmNeoverseN1:
+    case CpuType::kArmNeoverseN2:
+    case CpuType::kArmNeoverseV1:
+    case CpuType::kArmNeoverseV2:
+    case CpuType::kNvidiaGrace:
       return {
           /*.temporal=*/new AcceleratedCrcMemcpyEngine<3, 0>(),
           /*.non_temporal=*/new CrcNonTemporalMemcpyEngine(),

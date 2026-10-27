@@ -44,6 +44,7 @@ class QUICHE_EXPORT TlsHandshaker : public TlsConnection::Delegate,
   const std::string& error_detail() const override {
     return parser_error_detail_;
   }
+  absl::string_view extra_error_details() const { return extra_error_details_; }
 
   // The following methods provide implementations to subclasses of
   // TlsHandshaker which use them to implement methods of QuicCryptoStream.
@@ -111,7 +112,7 @@ class QUICHE_EXPORT TlsHandshaker : public TlsConnection::Delegate,
   // certificate_unknown. Implementations of VerifyCertChain may retain the
   // |out_alert| pointer while performing an async operation.
   virtual QuicAsyncStatus VerifyCertChain(
-      const std::vector<std::string>& certs, std::string* error_details,
+      const std::vector<absl::string_view>& certs, std::string* error_details,
       std::unique_ptr<ProofVerifyDetails>* details, uint8_t* out_alert,
       std::unique_ptr<ProofVerifierCallback> callback) = 0;
   // Called when certificate verification is completed.
@@ -121,9 +122,11 @@ class QUICHE_EXPORT TlsHandshaker : public TlsConnection::Delegate,
   // Returns the PRF used by the cipher suite negotiated in the TLS handshake.
   const EVP_MD* Prf(const SSL_CIPHER* cipher);
 
-  virtual const TlsConnection* tls_connection() const = 0;
+  virtual const TlsConnection& tls_connection() const = 0;
 
-  SSL* ssl() const { return tls_connection()->ssl(); }
+  virtual TlsConnection& tls_connection() = 0;
+
+  SSL* ssl() const { return tls_connection().ssl(); }
 
   QuicCryptoStream* stream() { return stream_; }
   HandshakerDelegateInterface* handshaker_delegate() {
@@ -172,6 +175,12 @@ class QUICHE_EXPORT TlsHandshaker : public TlsConnection::Delegate,
   void MessageCallback(bool is_write, int version, int content_type,
                        absl::string_view data) override;
 
+  void set_extra_error_details(std::string extra_error_details) {
+    extra_error_details_ = std::move(extra_error_details);
+  }
+
+  virtual const SSL_CIPHER* GetCipher() const;
+
  private:
   // ProofVerifierCallbackImpl handles the result of an asynchronous certificate
   // verification operation.
@@ -204,14 +213,16 @@ class QUICHE_EXPORT TlsHandshaker : public TlsConnection::Delegate,
 
   int expected_ssl_error_ = SSL_ERROR_WANT_READ;
   bool is_connection_closed_ = false;
-  const bool check_connected_before_set_read_secret_ =
-      GetQuicReloadableFlag(quic_check_connected_before_set_read_secret);
 
   QuicCryptoStream* stream_;
   HandshakerDelegateInterface* handshaker_delegate_;
 
   QuicErrorCode parser_error_ = QUIC_NO_ERROR;
   std::string parser_error_detail_;
+
+  // Arbitrary error string that will be added to the connection close error
+  // details when TlsHandshaker::CloseConnection is called.
+  std::string extra_error_details_;
 
   // The most recently derived 1-RTT read and write secrets, which are updated
   // on each key update.
@@ -227,7 +238,7 @@ class QUICHE_EXPORT TlsHandshaker : public TlsConnection::Delegate,
     // https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-parameters-6
     uint8_t desc;
   };
-  absl::optional<TlsAlert> last_tls_alert_;
+  std::optional<TlsAlert> last_tls_alert_;
 };
 
 }  // namespace quic

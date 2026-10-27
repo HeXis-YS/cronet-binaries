@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/values.h"
@@ -17,7 +18,6 @@
 #include "net/base/request_priority.h"
 #include "net/log/net_log_capture_mode.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class GURL;
 
@@ -30,20 +30,22 @@ namespace net {
 class SiteForCookies;
 
 // Returns a Value containing NetLog parameters for constructing a URLRequest.
-NET_EXPORT base::Value::Dict NetLogURLRequestConstructorParams(
+NET_EXPORT base::DictValue NetLogURLRequestConstructorParams(
     const GURL& url,
     RequestPriority priority,
-    NetworkTrafficAnnotationTag traffic_annotation);
+    NetworkTrafficAnnotationTag traffic_annotation,
+    NetLogCaptureMode capture_mode);
 
 // Returns a Value containing NetLog parameters for starting a URLRequest.
-NET_EXPORT base::Value::Dict NetLogURLRequestStartParams(
+NET_EXPORT base::DictValue NetLogURLRequestStartParams(
     const GURL& url,
     const std::string& method,
     int load_flags,
     const IsolationInfo& isolation_info,
     const SiteForCookies& site_for_cookies,
-    const absl::optional<url::Origin>& initiator,
-    int64_t upload_id);
+    const std::optional<url::Origin>& initiator,
+    int64_t upload_id,
+    NetLogCaptureMode capture_mode);
 
 }  // namespace net
 

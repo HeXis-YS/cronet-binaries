@@ -1,0 +1,31 @@
+--- a/src/.gn
++++ b/src/.gn
+@@ -2,8 +2,6 @@
+ # tree and to set startup options. For documentation on the values set in this
+ # file, run "gn help dotfile" at the command line.
+ 
+-import("//build/circular_includes_bedrock.gni")
+-import("//build/circular_includes_untriaged.gni")
+ import("//build/dotfile_settings.gni")
+ import("//third_party/angle/dotfile_settings.gni")
+ 
+@@ -11,7 +9,7 @@
+ buildconfig = "//build/config/BUILDCONFIG.gn"
+ 
+ # The hermetic Python interpreter to use by default.
+-script_executable = "//third_party/cpython3/host/bin/python3"
++script_executable = "python3"
+ 
+ # These arguments override the default values for items in a declare_args
+ # block. "gn args" in turn can override these.
+@@ -469,10 +467,3 @@
+       "//components/policy/BUILD.gn",
+     ]
+ 
+-# Entries in the allowlist should have a justification for why we need them. New
+-# entries should in this list should be reviewed by a member of the chrome build
+-# team.
+-# entries in this list should be reviewed by a member of the chrome build team.
+-allow_circular_includes_from_allowlist =
+-    allow_circular_includes_from_untriaged + project_bedrock_circular_includes +
+-    []

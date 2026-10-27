@@ -1,0 +1,99 @@
+--- a/src/base/allocator/partition_allocator/src/partition_alloc/BUILD.gn
++++ b/src/base/allocator/partition_allocator/src/partition_alloc/BUILD.gn
+@@ -1265,96 +1265,3 @@
+   }
+ }
+ 
+-source_set("test_support") {
+-  testonly = true
+-
+-  sources = [
+-    "extended_api.cc",
+-    "extended_api.h",
+-    "partition_alloc_base/test/gtest_util.h",
+-    "partition_alloc_base/test/move_only_int.h",
+-    "partition_alloc_base/threading/platform_thread_for_testing.h",
+-    "partition_alloc_base/timer/lap_timer.cc",
+-    "partition_alloc_base/timer/lap_timer.h",
+-    "partition_alloc_for_testing.h",
+-    "pointers/raw_ptr_counting_impl_for_test.cc",
+-    "pointers/raw_ptr_counting_impl_for_test.h",
+-    "use_death_tests.h",
+-  ]
+-  if (is_posix) {
+-    sources += [
+-      "partition_alloc_base/threading/platform_thread_posix_for_testing.cc",
+-    ]
+-  }
+-  if (is_fuchsia) {
+-    sources += [
+-      "partition_alloc_base/threading/platform_thread_fuchsia_for_testing.cc",
+-      "partition_alloc_base/threading/platform_thread_posix_for_testing.cc",
+-    ]
+-  }
+-  if (is_win) {
+-    sources +=
+-        [ "partition_alloc_base/threading/platform_thread_win_for_testing.cc" ]
+-  }
+-  if (is_apple) {
+-    sources += [
+-      "partition_alloc_base/threading/platform_thread_apple_for_testing.mm",
+-    ]
+-    frameworks = [
+-      "CoreFoundation.framework",
+-      "Foundation.framework",
+-    ]
+-  }
+-  if (is_linux || is_chromeos) {
+-    sources += [
+-      "partition_alloc_base/threading/platform_thread_linux_for_testing.cc",
+-    ]
+-  }
+-  if (is_android) {
+-    sources += [
+-      "partition_alloc_base/threading/platform_thread_android_for_testing.cc",
+-    ]
+-  }
+-  public_deps = [
+-    ":arm_bti_testfunctions",
+-    ":build_config",
+-    ":buildflags",
+-    ":partition_alloc",
+-    ":raw_ptr",
+-    "//testing/gtest",
+-  ]
+-
+-  # "extended_api.cc" depends on thread_cache_internal.h.
+-  deps = [ ":internal_headers" ]
+-
+-  public_configs = []
+-
+-  if (is_fuchsia) {
+-    public_deps += [
+-      "//third_party/fuchsia-sdk/sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp",
+-      "//third_party/fuchsia-sdk/sdk/pkg/fit",
+-      "//third_party/fuchsia-sdk/sdk/pkg/sync",
+-      "//third_party/fuchsia-sdk/sdk/pkg/sys_cpp",
+-      "//third_party/fuchsia-sdk/sdk/pkg/zx",
+-    ]
+-
+-    # Needed for users of spinning_mutex.h, which for performance reasons,
+-    # contains inlined calls to `libsync` inside the header file.
+-    # It appends an entry to the "libs" section of the dependent target.
+-    public_configs += [ ":fuchsia_sync_lib" ]
+-  }
+-
+-  configs -= partition_alloc_remove_configs
+-  configs += partition_alloc_add_configs
+-}
+-
+-source_set("arm_bti_testfunctions") {
+-  testonly = true
+-  sources = []
+-  if (target_cpu == "arm64" && (is_linux || is_android)) {
+-    sources = [
+-      "arm_bti_test_functions.S",
+-      "arm_bti_test_functions.h",
+-    ]
+-  }
+-}

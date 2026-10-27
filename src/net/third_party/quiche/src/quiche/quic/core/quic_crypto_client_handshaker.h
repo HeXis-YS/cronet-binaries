@@ -5,8 +5,10 @@
 #ifndef QUICHE_QUIC_CORE_QUIC_CRYPTO_CLIENT_HANDSHAKER_H_
 #define QUICHE_QUIC_CORE_QUIC_CRYPTO_CLIENT_HANDSHAKER_H_
 
+#include <optional>
 #include <string>
 
+#include "openssl/ssl.h"
 #include "quiche/quic/core/crypto/proof_verifier.h"
 #include "quiche/quic/core/crypto/quic_crypto_client_config.h"
 #include "quiche/quic/core/quic_crypto_client_stream.h"
@@ -41,6 +43,9 @@ class QUICHE_EXPORT QuicCryptoClientHandshaker
   bool IsResumption() const override;
   bool EarlyDataAccepted() const override;
   ssl_early_data_reason_t EarlyDataReason() const override;
+  std::optional<QuicWallTime> GetSessionTicketCreationTime() const override {
+    return std::nullopt;
+  }
   bool ReceivedInchoateReject() const override;
   int num_scup_messages_received() const override;
   std::string chlo_hash() const override;
@@ -74,6 +79,12 @@ class QUICHE_EXPORT QuicCryptoClientHandshaker
                             std::string* /*result*/) override {
     QUICHE_NOTREACHED();
     return false;
+  }
+  bool MatchedTrustAnchorIdForTesting() const override { return false; }
+  bool ServerPaddingSentForTesting() const override { return false; }
+  std::optional<ssl_compliance_policy_t> SslCompliancePolicyForTesting()
+      const override {
+    return std::nullopt;
   }
 
   // From QuicCryptoHandshaker

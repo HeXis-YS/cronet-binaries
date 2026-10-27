@@ -30,14 +30,14 @@ def ParseFileLists(path):
                 split_line = line[:-1]
                 continue
             line = line.strip()
-            if not line:
+            if not line or line.startswith('#'):
                 continue
             name, value = line.split('=')
             name = name.strip()
             value = value.replace("$(O)", "c")
             files = value.split()
             files.sort()
-            files = [file for file in files]
+            files = [file for file in files if file.endswith(('.c', '.h'))]
             ret[name] = files
     return ret
 
@@ -64,11 +64,11 @@ def main():
 # This file is created by generate_nasm_sources.py. Do not edit manually.
 """,
             file=out)
-        # Results in duplicated symbols in nasm.c
-        file_lists['LIBOBJ'].remove('nasmlib/errfile.c')
 
-        PrintFileList(out, "ndisasm_sources", file_lists['NDISASM'])
-        PrintFileList(out, "nasmlib_sources", file_lists['LIBOBJ'])
+        PrintFileList(out, "nasmlib_sources",
+                      file_lists['LIBOBJ_W'] + file_lists['LIBOBJ_NW'] +
+                      file_lists['WARNOBJ'] + file_lists['WARNFILES'] +
+                      file_lists['OUTPUTOBJ'] + file_lists['ZLIBOBJ'])
         PrintFileList(out, "nasm_sources", file_lists['NASM'])
 
 if __name__ == "__main__":

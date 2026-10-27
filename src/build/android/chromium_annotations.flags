@@ -15,15 +15,6 @@
 
 # Keeps for method level annotations.
 -keepclasseswithmembers,allowaccessmodification class ** {
-  @org.chromium.base.annotations.AccessedByNative <fields>;
-}
--keepclasseswithmembers,includedescriptorclasses,allowaccessmodification class ** {
-  @org.chromium.base.annotations.CalledByNative <methods>;
-}
--keepclasseswithmembers,includedescriptorclasses,allowaccessmodification class ** {
-  @org.chromium.base.annotations.CalledByNativeUnchecked <methods>;
-}
--keepclasseswithmembers,allowaccessmodification class ** {
   @org.chromium.build.annotations.UsedByReflection <methods>;
 }
 -keepclasseswithmembers,allowaccessmodification class ** {
@@ -66,4 +57,20 @@
 # Mark members annotated with IdentifierNameString as identifier name strings
 -identifiernamestring class * {
     @org.chromium.build.annotations.IdentifierNameString *;
+}
+
+# Mark fields with this to help R8 figure out that they cannot be null.
+# Use assumevalues in addition to assumenosideeffects block because Google3 proguard cannot parse
+# assumenosideeffects blocks which overwrite return value.
+-assumevalues class ** {
+  @org.chromium.build.annotations.OptimizeAsNonNull *** *(...) return _NONNULL_;
+}
+-assumenosideeffects class ** {
+  @org.chromium.build.annotations.OptimizeAsNonNull *** *(...);
+}
+-assumevalues class ** {
+  @org.chromium.build.annotations.OptimizeAsNonNull *** * return _NONNULL_;
+}
+-assumenosideeffects class ** {
+  @org.chromium.build.annotations.OptimizeAsNonNull *** *;
 }

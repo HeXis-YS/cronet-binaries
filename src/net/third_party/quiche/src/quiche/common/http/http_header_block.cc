@@ -7,6 +7,8 @@
 #include <string.h>
 
 #include <algorithm>
+#include <ios>
+#include <string>
 #include <utility>
 
 #include "absl/strings/str_cat.h"
@@ -49,6 +51,7 @@ HttpHeaderBlock::HeaderValue::HeaderValue(HttpHeaderStorage* storage,
 HttpHeaderBlock::HeaderValue::HeaderValue(HeaderValue&& other)
     : storage_(other.storage_),
       fragments_(std::move(other.fragments_)),
+      consolidated_(std::move(other.consolidated_)),
       pair_(std::move(other.pair_)),
       size_(other.size_),
       separator_size_(other.separator_size_) {}
@@ -57,6 +60,7 @@ HttpHeaderBlock::HeaderValue& HttpHeaderBlock::HeaderValue::operator=(
     HeaderValue&& other) {
   storage_ = other.storage_;
   fragments_ = std::move(other.fragments_);
+  consolidated_ = std::move(other.consolidated_);
   pair_ = std::move(other.pair_);
   size_ = other.size_;
   separator_size_ = other.separator_size_;
@@ -73,22 +77,31 @@ absl::string_view HttpHeaderBlock::HeaderValue::ConsolidatedValue() const {
   if (fragments_.empty()) {
     return absl::string_view();
   }
-  if (fragments_.size() > 1) {
-    fragments_ = {
+  if (fragments_.size() == 1 && consolidated_.empty()) {
+    consolidated_ = fragments_[0];
+  }
+  if (fragments_.size() > 1 && consolidated_.empty()) {
+    consolidated_ = {
         storage_->WriteFragments(fragments_, SeparatorForKey(pair_.first))};
   }
-  return fragments_[0];
+  return consolidated_;
 }
 
 void HttpHeaderBlock::HeaderValue::Append(absl::string_view fragment) {
   size_ += (fragment.size() + separator_size_);
   fragments_.push_back(fragment);
+  consolidated_ = {};
 }
 
 const std::pair<absl::string_view, absl::string_view>&
 HttpHeaderBlock::HeaderValue::as_pair() const {
   pair_.second = ConsolidatedValue();
   return pair_;
+}
+
+absl::Span<const absl::string_view> HttpHeaderBlock::HeaderValue::fragments()
+    const {
+  return fragments_;
 }
 
 HttpHeaderBlock::iterator::iterator(MapType::const_iterator it) : it_(it) {}
@@ -143,9 +156,7 @@ HttpHeaderBlock::ValueProxy& HttpHeaderBlock::ValueProxy::operator=(
   if (lookup_result_ == block_->map_.end()) {
     QUICHE_DVLOG(1) << "Inserting: (" << key_ << ", " << value << ")";
     lookup_result_ =
-        block_->map_
-            .emplace(std::make_pair(
-                key_, HeaderValue(storage, key_, storage->Write(value))))
+        block_->map_.try_emplace(key_, storage, key_, storage->Write(value))
             .first;
   } else {
     QUICHE_DVLOG(1) << "Updating key: " << key_ << " with value: " << value;
@@ -243,7 +254,8 @@ void HttpHeaderBlock::clear() {
   storage_.Clear();
 }
 
-void HttpHeaderBlock::insert(const HttpHeaderBlock::value_type& value) {
+HttpHeaderBlock::InsertResult HttpHeaderBlock::insert(
+    const HttpHeaderBlock::value_type& value) {
   // TODO(birenroy): Write new value in place of old value, if it fits.
   value_size_ += value.second.size();
 
@@ -252,12 +264,14 @@ void HttpHeaderBlock::insert(const HttpHeaderBlock::value_type& value) {
     QUICHE_DVLOG(1) << "Inserting: (" << value.first << ", " << value.second
                     << ")";
     AppendHeader(value.first, value.second);
+    return InsertResult::kInserted;
   } else {
     QUICHE_DVLOG(1) << "Updating key: " << iter->first
                     << " with value: " << value.second;
     value_size_ -= iter->second.SizeEstimate();
     iter->second =
         HeaderValue(&storage_, iter->first, storage_.Write(value.second));
+    return InsertResult::kReplaced;
   }
 }
 
@@ -277,6 +291,16 @@ HttpHeaderBlock::ValueProxy HttpHeaderBlock::operator[](
     out_key = iter->first;
   }
   return ValueProxy(this, iter, out_key, &value_size_);
+}
+
+void HttpHeaderBlock::ForEach(
+    quiche::UnretainedCallback<void(absl::string_view, absl::string_view)> fn)
+    const {
+  for (const auto& [name, header_value] : map_) {
+    for (absl::string_view value : header_value.fragments()) {
+      fn(name, value);
+    }
+  }
 }
 
 void HttpHeaderBlock::AppendValueOrAddHeader(const absl::string_view key,
@@ -299,8 +323,7 @@ void HttpHeaderBlock::AppendValueOrAddHeader(const absl::string_view key,
 void HttpHeaderBlock::AppendHeader(const absl::string_view key,
                                    const absl::string_view value) {
   auto backed_key = WriteKey(key);
-  map_.emplace(std::make_pair(
-      backed_key, HeaderValue(&storage_, backed_key, storage_.Write(value))));
+  map_.try_emplace(backed_key, &storage_, backed_key, storage_.Write(value));
 }
 
 absl::string_view HttpHeaderBlock::WriteKey(const absl::string_view key) {

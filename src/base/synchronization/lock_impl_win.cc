@@ -6,6 +6,8 @@
 
 #include <windows.h>
 
+#include "base/synchronization/lock_metrics_recorder.h"
+
 namespace base {
 namespace internal {
 
@@ -13,7 +15,8 @@ LockImpl::LockImpl() : native_handle_(SRWLOCK_INIT) {}
 
 LockImpl::~LockImpl() = default;
 
-void LockImpl::LockInternal() {
+void LockImpl::LockInternal(const LockMetricTagList& tags) {
+  LockMetricsRecorder::ScopedLockAcquisitionTimer timer(tags);
   ::AcquireSRWLockExclusive(reinterpret_cast<PSRWLOCK>(&native_handle_));
 }
 

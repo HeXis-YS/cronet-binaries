@@ -5,23 +5,43 @@
 #ifndef QUICHE_QUIC_CORE_TLS_SERVER_HANDSHAKER_H_
 #define QUICHE_QUIC_CORE_TLS_SERVER_HANDSHAKER_H_
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "absl/base/nullability.h"
 #include "absl/strings/string_view.h"
-#include "openssl/pool.h"
+#include "absl/types/span.h"
+#include "openssl/base.h"
 #include "openssl/ssl.h"
+#include "quiche/quic/core/crypto/crypto_handshake.h"
+#include "quiche/quic/core/crypto/crypto_message_parser.h"
+#include "quiche/quic/core/crypto/proof_source.h"
+#include "quiche/quic/core/crypto/proof_verifier.h"
 #include "quiche/quic/core/crypto/quic_crypto_server_config.h"
+#include "quiche/quic/core/crypto/quic_decrypter.h"
+#include "quiche/quic/core/crypto/quic_encrypter.h"
+#include "quiche/quic/core/crypto/tls_connection.h"
 #include "quiche/quic/core/crypto/tls_server_connection.h"
-#include "quiche/quic/core/proto/cached_network_parameters_proto.h"
+#include "quiche/quic/core/crypto/transport_parameters.h"
+#include "quiche/quic/core/frames/quic_connection_close_frame.h"
+#include "quiche/quic/core/quic_config.h"
+#include "quiche/quic/core/quic_connection_context.h"
 #include "quiche/quic/core/quic_connection_id.h"
+#include "quiche/quic/core/quic_connection_stats.h"
 #include "quiche/quic/core/quic_crypto_server_stream_base.h"
 #include "quiche/quic/core/quic_crypto_stream.h"
+#include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_time_accumulator.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/tls_handshaker.h"
-#include "quiche/quic/platform/api/quic_export.h"
-#include "quiche/quic/platform/api/quic_flag_utils.h"
-#include "quiche/quic/platform/api/quic_flags.h"
+#include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/common/platform/api/quiche_export.h"
+#include "quiche/common/platform/api/quiche_reference_counted.h"
 
 namespace quic {
 
@@ -58,7 +78,7 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
   void OnPacketDecrypted(EncryptionLevel level) override;
   void OnOneRttPacketAcknowledged() override {}
   void OnHandshakePacketSent() override {}
-  void OnConnectionClosed(QuicErrorCode error,
+  void OnConnectionClosed(const QuicConnectionCloseFrame& frame,
                           ConnectionCloseSource source) override;
   void OnHandshakeDoneReceived() override;
   std::string GetAddressToken(
@@ -71,10 +91,17 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
   bool ExportKeyingMaterial(absl::string_view label, absl::string_view context,
                             size_t result_len, std::string* result) override;
   SSL* GetSsl() const override;
+  void ResetSsl() override;
   bool IsCryptoFrameExpectedForEncryptionLevel(
       EncryptionLevel level) const override;
   EncryptionLevel GetEncryptionLevelToSendCryptoDataOfSpace(
       PacketNumberSpace space) const override;
+
+  // Overrides to support cached info after ResetSsl is called in QUIC session.
+  absl::string_view Sni() const override;
+  const SSL_CIPHER* Ciphersuite() const override;
+  absl::string_view Alpn() const override;
+  uint16_t TlsGroupId() const override;
 
   // From QuicCryptoServerStreamBase and TlsHandshaker
   ssl_early_data_reason_t EarlyDataReason() const override;
@@ -98,6 +125,10 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
   virtual std::string GetAcceptChValueForHostname(
       const std::string& hostname) const;
 
+  // Returns whether server uses new ALPS codepoint to negotiate application
+  // settings. If client sends new ALPS codepoint in ClientHello, return true.
+  bool UseAlpsNewCodepoint() const;
+
   // Get the ClientCertMode that is currently in effect on this handshaker.
   ClientCertMode client_cert_mode() const {
     return tls_connection_.ssl_config().client_cert_mode;
@@ -116,12 +147,18 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
 
   virtual bool ValidateHostname(const std::string& hostname) const;
 
-  const TlsConnection* tls_connection() const override {
-    return &tls_connection_;
+  const TlsConnection& tls_connection() const override {
+    return tls_connection_;
   }
 
-  virtual void ProcessAdditionalTransportParameters(
-      const TransportParameters& /*params*/) {}
+  TlsConnection& tls_connection() override { return tls_connection_; }
+
+  // Returns true if the handshake should continue. If false is returned, the
+  // caller should fail the handshake.
+  virtual bool ProcessAdditionalTransportParameters(
+      const TransportParameters& /*params*/) {
+    return true;
+  }
 
   // Called when a potentially async operation is done and the done callback
   // needs to advance the handshake.
@@ -131,7 +168,7 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
   void FinishHandshake() override;
   void ProcessPostHandshakeMessage() override {}
   QuicAsyncStatus VerifyCertChain(
-      const std::vector<std::string>& certs, std::string* error_details,
+      const std::vector<absl::string_view>& certs, std::string* error_details,
       std::unique_ptr<ProofVerifyDetails>* details, uint8_t* out_alert,
       std::unique_ptr<ProofVerifierCallback> callback) override;
   void OnProofVerifyDetailsAvailable(
@@ -163,7 +200,7 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
   TlsConnection::Delegate* ConnectionDelegate() override { return this; }
 
   // The status of cert selection. nullopt means it hasn't started.
-  const absl::optional<QuicAsyncStatus>& select_cert_status() const {
+  const std::optional<QuicAsyncStatus>& select_cert_status() const {
     return select_cert_status_;
   }
   // Whether |cert_verify_sig_| contains a valid signature.
@@ -174,11 +211,9 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
   bool HasValidSignature(size_t max_signature_size) const;
 
   // ProofSourceHandleCallback implementation:
-  void OnSelectCertificateDone(
-      bool ok, bool is_sync, const ProofSource::Chain* chain,
-      absl::string_view handshake_hints,
-      absl::string_view ticket_encryption_key, bool cert_matched_sni,
-      QuicDelayedSSLConfig delayed_ssl_config) override;
+  void OnSelectCertificateDone(bool ok, bool is_sync, SSLConfig ssl_config,
+                               absl::string_view ticket_encryption_key,
+                               bool cert_matched_sni) override;
 
   void OnComputeSignatureDone(
       bool ok, bool is_sync, std::string signature,
@@ -190,7 +225,18 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
 
   bool WillNotCallComputeSignature() const override;
 
+  std::optional<uint16_t> GetCiphersuite() const override;
+
+  uint16_t GetNegotiatedCurve() const override;
+
   void SetIgnoreTicketOpen(bool value) { ignore_ticket_open_ = value; }
+
+  const SSL_CIPHER* GetCipher() const override {
+    if (cached_ssl_info_.has_value()) {
+      return cached_ssl_info_->cipher;
+    }
+    return TlsHandshaker::GetCipher();
+  }
 
  private:
   class QUICHE_EXPORT DecryptCallback : public ProofSource::DecryptCallback {
@@ -214,26 +260,28 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
   // source.
   class QUICHE_EXPORT DefaultProofSourceHandle : public ProofSourceHandle {
    public:
-    DefaultProofSourceHandle(TlsServerHandshaker* handshaker,
-                             ProofSource* proof_source);
+    DefaultProofSourceHandle(TlsServerHandshaker* absl_nonnull handshaker,
+                             ProofSource* absl_nonnull proof_source);
 
     ~DefaultProofSourceHandle() override;
 
     // Close the handle. Cancel the pending signature operation, if any.
     void CloseHandle() override;
 
-    // Delegates to proof_source_->GetCertChain.
-    // Returns QUIC_SUCCESS or QUIC_FAILURE. Never returns QUIC_PENDING.
+    // Delegates to `proof_source_->GetCertChains()`.
+    //
+    // Returns `QUIC_SUCCESS` or `QUIC_FAILURE`. Never returns `QUIC_PENDING`.
     QuicAsyncStatus SelectCertificate(
         const QuicSocketAddress& server_address,
         const QuicSocketAddress& client_address,
         const QuicConnectionId& original_connection_id,
         absl::string_view ssl_capabilities, const std::string& hostname,
-        absl::string_view client_hello, const std::string& alpn,
-        absl::optional<std::string> alps,
+        const SSL_CLIENT_HELLO& client_hello, const std::string& alpn,
+        std::optional<std::string> alps,
         const std::vector<uint8_t>& quic_transport_params,
-        const absl::optional<std::vector<uint8_t>>& early_data_context,
-        const QuicSSLConfig& ssl_config) override;
+        const std::optional<std::vector<uint8_t>>& early_data_context,
+        const QuicSSLConfig& ssl_config,
+        bool disable_alps_explicit_codepoint) override;
 
     // Delegates to proof_source_->ComputeTlsSignature.
     // Returns QUIC_SUCCESS, QUIC_FAILURE or QUIC_PENDING.
@@ -245,7 +293,9 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
                                      size_t max_signature_size) override;
 
    protected:
-    ProofSourceHandleCallback* callback() override { return handshaker_; }
+    ProofSourceHandleCallback* absl_nullable callback() override {
+      return handshaker_;
+    }
 
    private:
     class QUICHE_EXPORT DefaultSignatureCallback
@@ -283,18 +333,18 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
     };
 
     // Not nullptr on construction. Set to nullptr when cancelled.
-    TlsServerHandshaker* handshaker_;  // Not owned.
-    ProofSource* proof_source_;        // Not owned.
-    DefaultSignatureCallback* signature_callback_ = nullptr;
+    TlsServerHandshaker* absl_nullable handshaker_;  // Not owned.
+    ProofSource* absl_nullable proof_source_;        // Not owned.
+    DefaultSignatureCallback* absl_nullable signature_callback_ = nullptr;
   };
 
   struct QUICHE_EXPORT SetTransportParametersResult {
     bool success = false;
     // Empty vector if QUIC transport params are not set successfully.
     std::vector<uint8_t> quic_transport_params;
-    // absl::nullopt if there is no application state to begin with.
+    // std::nullopt if there is no application state to begin with.
     // Empty vector if application state is not set successfully.
-    absl::optional<std::vector<uint8_t>> early_data_context;
+    std::optional<std::vector<uint8_t>> early_data_context;
   };
 
   SetTransportParametersResult SetTransportParameters();
@@ -307,7 +357,7 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
 
   struct QUICHE_EXPORT SetApplicationSettingsResult {
     bool success = false;
-    // TODO(b/239676439): Change type to absl::optional<std::string> and make
+    // TODO(b/239676439): Change type to std::optional<std::string> and make
     // sure SetApplicationSettings() returns nullopt if no ALPS data.
     std::string alps_buffer;
   };
@@ -323,7 +373,12 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
   }
 
   std::unique_ptr<ProofSourceHandle> proof_source_handle_;
-  ProofSource* proof_source_;
+  ProofSource* absl_nullable proof_source_;
+
+  // proof_verifier_ is an optional object that can verify a client's
+  // certificate chain. If this is null, then client certificates will always be
+  // considered valid.
+  ProofVerifier* absl_nullable proof_verifier_;
 
   // State to handle potentially asynchronous session ticket decryption.
   // |ticket_decryption_callback_| points to the non-owned callback that was
@@ -345,16 +400,33 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
   // Force SessionTicketOpen to return ssl_ticket_aead_ignore_ticket if called.
   bool ignore_ticket_open_ = false;
 
+  // True if new ALPS codepoint in the ClientHello.
+  bool alps_new_codepoint_received_ = false;
+
   // nullopt means select cert hasn't started.
-  absl::optional<QuicAsyncStatus> select_cert_status_;
+  std::optional<QuicAsyncStatus> select_cert_status_;
 
   std::string cert_verify_sig_;
   std::unique_ptr<ProofSource::Details> proof_source_details_;
 
   // Count the duration of the current async operation, if any.
-  absl::optional<QuicTimeAccumulator> async_op_timer_;
+  std::optional<QuicTimeAccumulator> async_op_timer_;
 
   std::unique_ptr<ApplicationState> application_state_;
+
+  // Used to cache the state of the SSL object after it is reset.
+  struct CachedSSLInfo {
+    bool is_resumption = false;
+    bool is_zero_rtt = false;
+    uint16_t tls_group_id = 0;
+    ssl_early_data_reason_t early_data_reason = ssl_early_data_unknown;
+    // Note SSL_get_current_cipher returns a static allocated pointer and as a
+    // result it is safe to cache a raw pointer here.
+    const SSL_CIPHER* cipher = nullptr;
+    std::string alpn;
+    std::string sni;
+  };
+  std::optional<CachedSSLInfo> cached_ssl_info_;
 
   // Pre-shared key used during the handshake.
   std::string pre_shared_key_;
@@ -376,6 +448,9 @@ class QUICHE_EXPORT TlsServerHandshaker : public TlsHandshaker,
 
   bool cert_matched_sni_ = false;
   TransportParameters server_params_;
+
+  // Functor for performing ALPN.  Unset if not using handshake hints.
+  ALPNSelectFunc select_alpn_;
 };
 
 }  // namespace quic

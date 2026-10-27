@@ -7,11 +7,15 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <net/if.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
+#include <cstddef>
+#include <ctime>
 #include <type_traits>
 #include <utility>
 
@@ -27,8 +31,11 @@ class KernelInterface {
   virtual int ioctl(int fd, int request, void* argp) = 0;
   virtual int open(const char* pathname, int flags) = 0;
   virtual ssize_t read(int fd, void* buf, size_t count) = 0;
+  virtual ssize_t readv(int fd, const struct iovec* iov, int iovcnt) = 0;
   virtual ssize_t recvfrom(int sockfd, void* buf, size_t len, int flags,
                            struct sockaddr* src_addr, socklen_t* addrlen) = 0;
+  virtual int recvmmsg(int sockfd, struct mmsghdr* msgvec, unsigned int vlen,
+                       int flags, struct timespec* timeout) = 0;
   virtual ssize_t sendmsg(int sockfd, const struct msghdr* msg, int flags) = 0;
   virtual ssize_t sendto(int sockfd, const void* buf, size_t len, int flags,
                          const struct sockaddr* dest_addr,
@@ -37,6 +44,10 @@ class KernelInterface {
   virtual int setsockopt(int fd, int level, int optname, const void* optval,
                          socklen_t optlen) = 0;
   virtual ssize_t write(int fd, const void* buf, size_t count) = 0;
+  virtual ssize_t writev(int fd, const struct iovec* iov, int iovcnt) = 0;
+  virtual int getsockname(int sockfd, struct sockaddr* addr,
+                          socklen_t* addrlen) = 0;
+  virtual unsigned int if_nametoindex(const char* ifname) = 0;
 };
 
 // It is unfortunate to have R here, but std::result_of cannot be used.
@@ -87,11 +98,20 @@ class ParametrizedKernel final : public KernelInterface {
     static Runner syscall("read");
     return syscall.Run(&::read, fd, buf, count);
   }
+  ssize_t readv(int fd, const struct iovec* iov, int iovcnt) override {
+    static Runner syscall("readv");
+    return syscall.Run(&::readv, fd, iov, iovcnt);
+  }
   ssize_t recvfrom(int sockfd, void* buf, size_t len, int flags,
                    struct sockaddr* src_addr, socklen_t* addrlen) override {
     static Runner syscall("recvfrom");
     return syscall.RetryOnError(&::recvfrom, static_cast<ssize_t>(-1), sockfd,
                                 buf, len, flags, src_addr, addrlen);
+  }
+  int recvmmsg(int sockfd, struct mmsghdr* msgvec, unsigned int vlen, int flags,
+               struct timespec* timeout) override {
+    static Runner syscall("recvmmsg");
+    return syscall.Run(&::recvmmsg, sockfd, msgvec, vlen, flags, timeout);
   }
   ssize_t sendmsg(int sockfd, const struct msghdr* msg, int flags) override {
     static Runner syscall("sendmsg");
@@ -116,6 +136,19 @@ class ParametrizedKernel final : public KernelInterface {
   ssize_t write(int fd, const void* buf, size_t count) override {
     static Runner syscall("write");
     return syscall.Run(&::write, fd, buf, count);
+  }
+  ssize_t writev(int fd, const struct iovec* iov, int iovcnt) override {
+    static Runner syscall("writev");
+    return syscall.Run(&::writev, fd, iov, iovcnt);
+  }
+  int getsockname(int sockfd, struct sockaddr* addr,
+                  socklen_t* addrlen) override {
+    static Runner syscall("getsockname");
+    return syscall.Run(&::getsockname, sockfd, addr, addrlen);
+  }
+  unsigned int if_nametoindex(const char* ifname) override {
+    static Runner syscall("if_nametoindex");
+    return syscall.Run(&::if_nametoindex, ifname);
   }
 };
 

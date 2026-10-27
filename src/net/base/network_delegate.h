@@ -7,23 +7,24 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <set>
 #include <string>
 
 #include "base/functional/callback.h"
 #include "base/gtest_prod_util.h"
 #include "base/threading/thread_checker.h"
+#include "base/types/optional_ref.h"
 #include "net/base/auth.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/net_export.h"
 #include "net/cookies/canonical_cookie.h"
 #include "net/cookies/cookie_inclusion_status.h"
 #include "net/cookies/cookie_setting_override.h"
+#include "net/cookies/cookie_util.h"
 #include "net/cookies/site_for_cookies.h"
-#include "net/first_party_sets/first_party_set_metadata.h"
-#include "net/first_party_sets/first_party_sets_cache_filter.h"
 #include "net/proxy_resolution/proxy_retry_info.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "net/url_request/redirect_info.h"
 
 class GURL;
 
@@ -32,6 +33,8 @@ class Origin;
 }
 
 namespace net {
+
+class SSLInfo;
 
 // NOTE: Layering violations!
 // We decided to accept these violations (depending
@@ -62,7 +65,7 @@ class NET_EXPORT NetworkDelegate {
                              CompletionOnceCallback callback,
                              GURL* new_url);
   using OnBeforeStartTransactionCallback =
-      base::OnceCallback<void(int, const absl::optional<HttpRequestHeaders>&)>;
+      base::OnceCallback<void(int, const std::optional<HttpRequestHeaders>&)>;
   int NotifyBeforeStartTransaction(URLRequest* request,
                                    const HttpRequestHeaders& headers,
                                    OnBeforeStartTransactionCallback callback);
@@ -72,22 +75,28 @@ class NET_EXPORT NetworkDelegate {
       const HttpResponseHeaders* original_response_headers,
       scoped_refptr<HttpResponseHeaders>* override_response_headers,
       const IPEndPoint& remote_endpoint,
-      absl::optional<GURL>* preserve_fragment_on_redirect_url);
+      std::optional<GURL>* preserve_fragment_on_redirect_url,
+      const std::optional<net::SSLInfo>& ssl_info);
   void NotifyBeforeRedirect(URLRequest* request,
                             const GURL& new_location);
+  void NotifyBeforeRetry(URLRequest* request);
   void NotifyResponseStarted(URLRequest* request, int net_error);
   void NotifyCompleted(URLRequest* request, bool started, int net_error);
   void NotifyURLRequestDestroyed(URLRequest* request);
   void NotifyPACScriptError(int line_number, const std::u16string& error);
   bool AnnotateAndMoveUserBlockedCookies(
       const URLRequest& request,
-      const net::FirstPartySetMetadata& first_party_set_metadata,
       CookieAccessResultList& maybe_included_cookies,
       CookieAccessResultList& excluded_cookies);
   bool CanSetCookie(const URLRequest& request,
                     const net::CanonicalCookie& cookie,
                     CookieOptions* options,
                     CookieInclusionStatus* inclusion_status);
+  bool ShouldForceIgnoreSiteForCookies(const URLRequest& request);
+
+  std::optional<cookie_util::StorageAccessStatus> GetStorageAccessStatus(
+      const URLRequest& request,
+      base::optional_ref<const RedirectInfo> redirect_info) const;
 
   // PrivacySetting is kStateDisallowed iff the given |url| has to be
   // requested over connection that is not tracked by the server.
@@ -125,6 +134,14 @@ class NET_EXPORT NetworkDelegate {
   // `mayble_included_cookies`, and moves the contents of
   // `maybe_included_cookies` to `excluded_cookies`.
   static void ExcludeAllCookies(
+      net::CookieInclusionStatus::ExclusionReason reason,
+      net::CookieAccessResultList& maybe_included_cookies,
+      net::CookieAccessResultList& excluded_cookies);
+
+  // Does the same as ExcludeAllCookies but will still include
+  // cookies that are partitioned if cookies are not disabled
+  // globally.
+  static void ExcludeAllCookiesExceptPartitioned(
       net::CookieInclusionStatus::ExclusionReason reason,
       net::CookieAccessResultList& maybe_included_cookies,
       net::CookieAccessResultList& excluded_cookies);
@@ -212,12 +229,15 @@ class NET_EXPORT NetworkDelegate {
       const HttpResponseHeaders* original_response_headers,
       scoped_refptr<HttpResponseHeaders>* override_response_headers,
       const IPEndPoint& remote_endpoint,
-      absl::optional<GURL>* preserve_fragment_on_redirect_url) = 0;
+      std::optional<GURL>* preserve_fragment_on_redirect_url,
+      const std::optional<net::SSLInfo>& ssl_info) = 0;
 
   // Called right after a redirect response code was received. |new_location| is
   // only valid for the duration of the call.
   virtual void OnBeforeRedirect(URLRequest* request,
                                 const GURL& new_location) = 0;
+
+  virtual void OnBeforeRetry(URLRequest* request) = 0;
 
   // This corresponds to URLRequestDelegate::OnResponseStarted.
   virtual void OnResponseStarted(URLRequest* request, int net_error) = 0;
@@ -247,7 +267,6 @@ class NET_EXPORT NetworkDelegate {
   // otherwise.
   virtual bool OnAnnotateAndMoveUserBlockedCookies(
       const URLRequest& request,
-      const net::FirstPartySetMetadata& first_party_set_metadata,
       net::CookieAccessResultList& maybe_included_cookies,
       net::CookieAccessResultList& excluded_cookies) = 0;
 
@@ -258,10 +277,17 @@ class NET_EXPORT NetworkDelegate {
   // the proper exclusion reasons, if not then proper reasons need to be
   // manually added in the caller. This method will never be invoked when
   // LOAD_DO_NOT_SAVE_COOKIES is specified.
-  virtual bool OnCanSetCookie(const URLRequest& request,
-                              const CanonicalCookie& cookie,
-                              CookieOptions* options,
-                              CookieInclusionStatus* inclusion_status) = 0;
+  virtual bool OnCanSetCookie(
+      const URLRequest& request,
+      const CanonicalCookie& cookie,
+      CookieOptions* options,
+      CookieInclusionStatus* inclusion_status) = 0;
+
+  // Returns true if the site for cookies should be ignored for the request.
+  // This is typically used for requests initiated by extensions, where the
+  // request's initiator is granted cross-origin access, allowing it to
+  // send cookies to the target URL.
+  virtual bool OnShouldForceIgnoreSiteForCookies(const URLRequest& request) = 0;
 
   virtual PrivacySetting OnForcePrivacyMode(
       const URLRequest& request) const = 0;
@@ -288,6 +314,11 @@ class NET_EXPORT NetworkDelegate {
 
   virtual bool OnCanUseReportingClient(const url::Origin& origin,
                                        const GURL& endpoint) const = 0;
+
+  virtual std::optional<cookie_util::StorageAccessStatus>
+  OnGetStorageAccessStatus(
+      const URLRequest& request,
+      base::optional_ref<const RedirectInfo> redirect_info) const = 0;
 };
 
 }  // namespace net

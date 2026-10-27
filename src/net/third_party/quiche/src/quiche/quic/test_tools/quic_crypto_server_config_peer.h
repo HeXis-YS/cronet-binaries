@@ -5,6 +5,7 @@
 #ifndef QUICHE_QUIC_TEST_TOOLS_QUIC_CRYPTO_SERVER_CONFIG_PEER_H_
 #define QUICHE_QUIC_TEST_TOOLS_QUIC_CRYPTO_SERVER_CONFIG_PEER_H_
 
+#include "absl/base/thread_annotations.h"
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/crypto/quic_crypto_server_config.h"
 
@@ -40,7 +41,7 @@ class QuicCryptoServerConfigPeer {
   // Attempts to validate the tokens in |srct|.
   HandshakeFailureReason ValidateSourceAddressTokens(
       std::string config_id, absl::string_view srct, const QuicIpAddress& ip,
-      QuicWallTime now, CachedNetworkParameters* cached_network_params);
+      QuicWallTime now, CachedNetworkParameters& cached_network_params);
 
   // Attempts to validate the single source address token in |token|.
   HandshakeFailureReason ValidateSingleSourceAddressToken(
@@ -65,7 +66,7 @@ class QuicCryptoServerConfigPeer {
   // ConfigsDebug returns a std::string that contains debugging information
   // about the set of Configs loaded in |server_config_| and their status.
   std::string ConfigsDebug()
-      QUIC_SHARED_LOCKS_REQUIRED(server_config_->configs_lock_);
+      ABSL_SHARED_LOCKS_REQUIRED(server_config_->configs_lock_);
 
   void SelectNewPrimaryConfig(int seconds);
 
@@ -77,6 +78,8 @@ class QuicCryptoServerConfigPeer {
   uint32_t source_address_token_future_secs();
 
   uint32_t source_address_token_lifetime_secs();
+
+  QuicSSLConfig* mutable_ssl_config();
 
  private:
   QuicCryptoServerConfig* server_config_;

@@ -56,7 +56,7 @@ class QUICHE_EXPORT QuicLRUCache {
     if (it != cache_.end()) {
       cache_.erase(it);
     }
-    cache_.emplace(key, std::move(value));
+    cache_.try_emplace(key, std::move(value));
 
     if (cache_.size() > capacity_) {
       cache_.pop_front();
@@ -72,7 +72,7 @@ class QUICHE_EXPORT QuicLRUCache {
 
     std::unique_ptr<V> value = std::move(iter->second);
     cache_.erase(iter);
-    auto result = cache_.emplace(key, std::move(value));
+    auto result = cache_.try_emplace(key, std::move(value));
     QUICHE_DCHECK(result.second);
     return result.first;
   }
@@ -82,6 +82,15 @@ class QUICHE_EXPORT QuicLRUCache {
   // Removes all entries from the cache.
   void Clear() { cache_.clear(); }
 
+  // Update the maximum size of the cache. If new capacity is smaller than
+  // current size, evicts the oldest entries.
+  void UpdateMaxSize(size_t capacity) {
+    capacity_ = capacity;
+    while (cache_.size() > capacity_) {
+      cache_.pop_front();
+    }
+  }
+
   // Returns maximum size of the cache.
   size_t MaxSize() const { return capacity_; }
 
@@ -90,7 +99,7 @@ class QUICHE_EXPORT QuicLRUCache {
 
  private:
   quiche::QuicheLinkedHashMap<K, std::unique_ptr<V>, Hash, Eq> cache_;
-  const size_t capacity_;
+  size_t capacity_;
 };
 
 }  // namespace quic

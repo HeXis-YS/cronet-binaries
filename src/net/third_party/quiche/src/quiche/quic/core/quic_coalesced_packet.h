@@ -13,8 +13,8 @@ namespace test {
 class QuicCoalescedPacketPeer;
 }
 
-// QuicCoalescedPacket is used to buffer multiple packets which can be coalesced
-// into the same UDP datagram.
+// QuicConnection uses QuicCoalescedPacket to buffer multiple packets which can
+// be coalesced into the same UDP datagram.
 class QUICHE_EXPORT QuicCoalescedPacket {
  public:
   QuicCoalescedPacket();
@@ -27,7 +27,7 @@ class QUICHE_EXPORT QuicCoalescedPacket {
                            const QuicSocketAddress& peer_address,
                            quiche::QuicheBufferAllocator* allocator,
                            QuicPacketLength current_max_packet_length,
-                           QuicEcnCodepoint ecn_codepoint);
+                           QuicEcnCodepoint ecn_codepoint, uint32_t flow_label);
 
   // Clears this coalesced packet.
   void Clear();
@@ -69,6 +69,12 @@ class QUICHE_EXPORT QuicCoalescedPacket {
 
   QuicEcnCodepoint ecn_codepoint() const { return ecn_codepoint_; }
 
+  uint32_t flow_label() const { return flow_label_; }
+
+  void AllowMaxPacketLengthToIncrease() {
+    max_packet_length_may_increase_ = true;
+  }
+
  private:
   friend class test::QuicCoalescedPacketPeer;
 
@@ -95,6 +101,15 @@ class QUICHE_EXPORT QuicCoalescedPacket {
 
   // A coalesced packet shares an ECN codepoint.
   QuicEcnCodepoint ecn_codepoint_;
+
+  // A coalesced packet shares an single flow label.
+  uint32_t flow_label_;
+
+  // In most cases, the max_packet_length remains constant while construction
+  // of a packet is in progress. However, when a SCONE indicator is planned for
+  // inclusion and then that inclusion is cancelled, the max_packet_length may
+  // increase.
+  bool max_packet_length_may_increase_ = false;
 };
 
 }  // namespace quic

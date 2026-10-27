@@ -6,6 +6,7 @@
 
 #include <sys/types.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -21,8 +22,10 @@
 #include "absl/strings/string_view.h"
 #include "quiche/balsa/balsa_enums.h"
 #include "quiche/balsa/header_properties.h"
+#include "quiche/common/platform/api/quiche_flags.h"
 #include "quiche/common/platform/api/quiche_header_policy.h"
 #include "quiche/common/platform/api/quiche_logging.h"
+#include "quiche/common/quiche_feature_flags_list.h"
 
 namespace {
 
@@ -196,7 +199,7 @@ void BalsaHeaders::ParseTokenList(absl::string_view header_value,
     // found. marked.
     const char* nws = start;
 
-    // search for next whitspace or separator char.
+    // search for next whitespace or separator char.
     while (*start != ',' && static_cast<unsigned char>(*start) > ' ') {
       ++start;
       if (start == end) {
@@ -228,6 +231,7 @@ void BalsaHeaders::Clear() {
   whitespace_4_idx_ = 0;
   header_lines_.clear();
   header_lines_.shrink_to_fit();
+  header_lines_removed_ = 0;
 }
 
 void BalsaHeaders::CopyFrom(const BalsaHeaders& other) {
@@ -250,6 +254,7 @@ void BalsaHeaders::CopyFrom(const BalsaHeaders& other) {
   non_whitespace_3_idx_ = other.non_whitespace_3_idx_;
   whitespace_4_idx_ = other.whitespace_4_idx_;
   header_lines_ = other.header_lines_;
+  header_lines_removed_ = other.header_lines_removed_;
 }
 
 void BalsaHeaders::AddAndMakeDescription(absl::string_view key,
@@ -322,10 +327,6 @@ void BalsaHeaders::AppendAndMakeDescription(absl::string_view key,
 // header we're removing is one of those headers.
 void BalsaHeaders::MaybeClearSpecialHeaderValues(absl::string_view key) {
   if (absl::EqualsIgnoreCase(key, kContentLength)) {
-    if (transfer_encoding_is_chunked_) {
-      return;
-    }
-
     content_length_status_ = BalsaHeadersEnums::NO_CONTENT_LENGTH;
     content_length_ = 0;
     return;
@@ -342,6 +343,7 @@ void BalsaHeaders::RemoveAllOfHeaderStartingAt(absl::string_view key,
   MaybeClearSpecialHeaderValues(key);
   while (start != header_lines_.end()) {
     start->skip = true;
+    ++header_lines_removed_;
     ++start;
     start = GetHeaderLinesIterator(key, start);
   }
@@ -387,6 +389,7 @@ void BalsaHeaders::AppendToHeader(absl::string_view key,
 
   // Invalidate the old header line and add the new one.
   i->skip = true;
+  ++header_lines_removed_;
   header_lines_.push_back(hld);
 }
 
@@ -408,6 +411,7 @@ void BalsaHeaders::AppendToHeaderWithCommaAndSpace(absl::string_view key,
 
   // Invalidate the old header line and add the new one.
   i->skip = true;
+  ++header_lines_removed_;
   header_lines_.push_back(hld);
 }
 
@@ -627,6 +631,7 @@ void BalsaHeaders::RemoveAllOfHeaderInList(const HeaderTokenList& keys) {
   // Better performance can be achieved by asking caller to lower case
   // the keys and RemoveAllOfheaderInlist just does lookup.
   absl::flat_hash_set<std::string> lowercase_keys;
+  lowercase_keys.reserve(keys.size());
   for (const auto& key : keys) {
     MaybeClearSpecialHeaderValues(key);
     lowercase_keys.insert(absl::AsciiStrToLower(key));
@@ -644,6 +649,7 @@ void BalsaHeaders::RemoveAllOfHeaderInList(const HeaderTokenList& keys) {
     std::string lowercase_key = absl::AsciiStrToLower(key);
     if (lowercase_keys.count(lowercase_key) != 0) {
       line.skip = true;
+      ++header_lines_removed_;
     }
   }
 }
@@ -672,6 +678,27 @@ void BalsaHeaders::RemoveAllHeadersWithPrefix(absl::string_view prefix) {
           GetPtr(line.buffer_base_idx) + line.first_char_idx, key_len);
       MaybeClearSpecialHeaderValues(current_key);
       line.skip = true;
+      ++header_lines_removed_;
+    }
+  }
+}
+
+void BalsaHeaders::RemoveHeadersIf(
+    std::function<bool(const absl::string_view, const absl::string_view)>
+        predicate) {
+  for (HeaderLines::size_type i = 0; i < header_lines_.size(); ++i) {
+    if (header_lines_[i].skip) {
+      continue;
+    }
+
+    HeaderLineDescription& line = header_lines_[i];
+    const absl::string_view key(
+        GetPtr(line.buffer_base_idx) + line.first_char_idx,
+        line.key_end_idx - line.first_char_idx);
+    const absl::string_view value = GetValueFromHeaderLineDescription(line);
+    if (predicate(key, value)) {
+      line.skip = true;
+      ++header_lines_removed_;
     }
   }
 }
@@ -773,6 +800,7 @@ size_t BalsaHeaders::RemoveValue(absl::string_view key,
     if (values.size() == needle.size()) {
       if (values == needle) {
         line->skip = true;
+        ++header_lines_removed_;
         removals++;
       }
       continue;
@@ -835,6 +863,7 @@ size_t BalsaHeaders::RemoveValue(absl::string_view key,
     if (insertion <= value_begin) {
       // All values removed.
       line->skip = true;
+      ++header_lines_removed_;
     } else {
       line->last_char_idx = insertion - buf;
     }
@@ -890,6 +919,43 @@ bool BalsaHeaders::ForEachHeader(
     }
   }
   return true;
+}
+
+// Folds header lines that are marked as having continuation lines (and then
+// unmarks them as having continuation lines). We can assume that any \r\n and
+// any \n is being continued since it wouldn't show up as one header line
+// otherwise. We therefore need to replace any \r\n and any \n with spaces, and
+// any subsequent spaces or tabs with spaces.
+//
+// See: https://tools.ietf.org/html/rfc7230#section-3.2.4
+void BalsaHeaders::FoldContinuationLines() {
+  const int header_lines_size = header_lines_.size();
+  for (int i = 0; i < header_lines_size; ++i) {
+    HeaderLineDescription& desc = header_lines_[i];
+    if (!desc.skip && desc.has_continuation_line) {
+      bool processing_continuation = false;
+      const char* begin = GetPtr(desc.buffer_base_idx) + desc.value_begin_idx;
+      const char* end = GetPtr(desc.buffer_base_idx) + desc.last_char_idx;
+      for (char* c = const_cast<char*>(begin); c < end; ++c) {
+        if (processing_continuation && (*c == '\t' || *c == ' ')) {
+          *c = ' ';
+          continue;
+        }
+        if (*c == '\n') {
+          // We can safely assume the next character is a space or a tab because
+          // we wouldn't have included \n in the header line otherwise.
+          *c = ' ';
+          if (c != begin && *(c - 1) == '\r') {
+            *(c - 1) = ' ';
+          }
+          processing_continuation = true;
+          continue;
+        }
+        processing_continuation = false;
+      }
+      desc.has_continuation_line = false;
+    }
+  }
 }
 
 void BalsaHeaders::DumpToPrefixedString(const char* spaces,
@@ -1117,9 +1183,8 @@ void BalsaHeaders::RemoveLastTokenFromHeaderValue(absl::string_view key) {
   // Tokenize just that line.
   BalsaHeaders::HeaderTokenList tokens;
   // Find where this line is stored.
-  const char* stream_begin = GetPtr(header_line->buffer_base_idx);
   absl::string_view value(
-      stream_begin + header_line->value_begin_idx,
+      GetPtr(header_line->buffer_base_idx) + header_line->value_begin_idx,
       header_line->last_char_idx - header_line->value_begin_idx);
   // Tokenize.
   ParseTokenList(value, &tokens);
@@ -1129,14 +1194,16 @@ void BalsaHeaders::RemoveLastTokenFromHeaderValue(absl::string_view key) {
         << "Attempting to remove a token from an empty header value "
         << "for header \"" << key << "\"";
     header_line->skip = true;  // remove the whole line
+    ++header_lines_removed_;
   } else if (tokens.size() == 1) {
     header_line->skip = true;  // remove the whole line
+    ++header_lines_removed_;
   } else {
     // Shrink the line size and leave the extra data in the buffer.
     absl::string_view new_last_token = tokens[tokens.size() - 2];
     const char* last_char_address =
         new_last_token.data() + new_last_token.size() - 1;
-    const char* stream_begin = GetPtr(header_line->buffer_base_idx);
+    const char* const stream_begin = GetPtr(header_line->buffer_base_idx);
 
     header_line->last_char_idx = last_char_address - stream_begin + 1;
   }

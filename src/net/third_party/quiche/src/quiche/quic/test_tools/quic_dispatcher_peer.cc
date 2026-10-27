@@ -4,6 +4,11 @@
 
 #include "quiche/quic/test_tools/quic_dispatcher_peer.h"
 
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "quiche/quic/core/quic_dispatcher.h"
 #include "quiche/quic/core/quic_packet_writer_wrapper.h"
 
@@ -54,7 +59,7 @@ QuicAlarmFactory* QuicDispatcherPeer::GetAlarmFactory(
 }
 
 // static
-QuicDispatcher::WriteBlockedList* QuicDispatcherPeer::GetWriteBlockedList(
+QuicBlockedWriterList* QuicDispatcherPeer::GetWriteBlockedList(
     QuicDispatcher* dispatcher) {
   return &dispatcher->write_blocked_list_;
 }
@@ -80,26 +85,15 @@ void QuicDispatcherPeer::set_new_sessions_allowed_per_event_loop(
 }
 
 // static
-void QuicDispatcherPeer::SendPublicReset(
-    QuicDispatcher* dispatcher, const QuicSocketAddress& self_address,
-    const QuicSocketAddress& peer_address, QuicConnectionId connection_id,
-    bool ietf_quic, size_t received_packet_length,
-    std::unique_ptr<QuicPerPacketContext> packet_context) {
+void QuicDispatcherPeer::SendPublicReset(QuicDispatcher* dispatcher,
+                                         const QuicSocketAddress& self_address,
+                                         const QuicSocketAddress& peer_address,
+                                         QuicConnectionId connection_id,
+                                         bool ietf_quic,
+                                         size_t received_packet_length) {
   dispatcher->time_wait_list_manager()->SendPublicReset(
       self_address, peer_address, connection_id, ietf_quic,
-      received_packet_length, std::move(packet_context));
-}
-
-// static
-std::unique_ptr<QuicPerPacketContext> QuicDispatcherPeer::GetPerPacketContext(
-    QuicDispatcher* dispatcher) {
-  return dispatcher->GetPerPacketContext();
-}
-
-// static
-void QuicDispatcherPeer::RestorePerPacketContext(
-    QuicDispatcher* dispatcher, std::unique_ptr<QuicPerPacketContext> context) {
-  dispatcher->RestorePerPacketContext(std::move(context));
+      received_packet_length);
 }
 
 // static

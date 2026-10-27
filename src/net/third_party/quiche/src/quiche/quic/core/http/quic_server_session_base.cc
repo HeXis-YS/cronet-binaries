@@ -4,8 +4,17 @@
 
 #include "quiche/quic/core/http/quic_server_session_base.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <limits>
+#include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 
+#include "quiche/quic/core/frames/quic_crypto_frame.h"
+#include "quiche/quic/core/frames/quic_frame.h"
+#include "quiche/quic/core/http/quic_spdy_session.h"
 #include "quiche/quic/core/proto/cached_network_parameters_proto.h"
 #include "quiche/quic/core/quic_connection.h"
 #include "quiche/quic/core/quic_stream.h"
@@ -17,6 +26,7 @@
 #include "quiche/quic/platform/api/quic_flag_utils.h"
 #include "quiche/quic/platform/api/quic_flags.h"
 #include "quiche/quic/platform/api/quic_logging.h"
+#include "quiche/common/platform/api/quiche_flag_utils.h"
 #include "quiche/common/platform/api/quiche_logging.h"
 
 namespace quic {
@@ -26,14 +36,16 @@ QuicServerSessionBase::QuicServerSessionBase(
     QuicConnection* connection, Visitor* visitor,
     QuicCryptoServerStreamBase::Helper* helper,
     const QuicCryptoServerConfig* crypto_config,
-    QuicCompressedCertsCache* compressed_certs_cache)
-    : QuicSpdySession(connection, visitor, config, supported_versions),
-      crypto_config_(crypto_config),
-      compressed_certs_cache_(compressed_certs_cache),
-      helper_(helper),
+    QuicCompressedCertsCache* compressed_certs_cache,
+    QuicPriorityType priority_type)
+    : QuicSpdySession(connection, visitor, config, supported_versions,
+                      priority_type),
       bandwidth_resumption_enabled_(false),
+      compressed_certs_cache_(compressed_certs_cache),
       bandwidth_estimate_sent_to_client_(QuicBandwidth::Zero()),
-      last_scup_time_(QuicTime::Zero()) {}
+      crypto_config_(crypto_config),
+      last_scup_time_(QuicTime::Zero()),
+      helper_(helper) {}
 
 QuicServerSessionBase::~QuicServerSessionBase() {}
 
@@ -53,7 +65,7 @@ void QuicServerSessionBase::OnConfigNegotiated() {
   // Set the initial rtt from cached_network_params.min_rtt_ms, which comes from
   // a validated address token. This will override the initial rtt that may have
   // been set by the transport parameters.
-  if (version().UsesTls() && cached_network_params != nullptr) {
+  if (version().IsIetfQuic() && cached_network_params != nullptr) {
     if (cached_network_params->serving_region() == serving_region_) {
       QUIC_CODE_COUNT(quic_server_received_network_params_at_same_region);
       if (config()->HasReceivedConnectionOptions() &&
@@ -77,7 +89,7 @@ void QuicServerSessionBase::OnConfigNegotiated() {
   }
 
   if (GetQuicReloadableFlag(quic_enable_disable_resumption) &&
-      version().UsesTls() &&
+      version().IsIetfQuic() &&
       ContainsQuicTag(config()->ReceivedConnectionOptions(), kNRES) &&
       crypto_stream_->ResumptionAttempted()) {
     QUIC_RELOADABLE_FLAG_COUNT(quic_enable_disable_resumption);
@@ -99,7 +111,7 @@ void QuicServerSessionBase::OnConfigNegotiated() {
   // resumption.
   if (cached_network_params != nullptr &&
       cached_network_params->serving_region() == serving_region_) {
-    if (!version().UsesTls()) {
+    if (!version().IsIetfQuic()) {
       // Log the received connection parameters, regardless of how they
       // get used for bandwidth resumption.
       connection()->OnReceiveConnectionState(*cached_network_params);
@@ -185,12 +197,12 @@ void QuicServerSessionBase::OnCongestionWindowChange(QuicTime now) {
     return;
   }
 
-  if (version().UsesTls()) {
-    if (version().HasIetfQuicFrames() && MaybeSendAddressToken()) {
+  if (version().IsIetfQuic()) {
+    if (MaybeSendAddressToken()) {
       bandwidth_estimate_sent_to_client_ = new_bandwidth_estimate;
     }
   } else {
-    absl::optional<CachedNetworkParameters> cached_network_params =
+    std::optional<CachedNetworkParameters> cached_network_params =
         GenerateCachedNetworkParameters();
 
     if (cached_network_params.has_value()) {
@@ -203,7 +215,7 @@ void QuicServerSessionBase::OnCongestionWindowChange(QuicTime now) {
               bandwidth_estimate_sent_to_client_),
           cached_network_params->bandwidth_estimate_bytes_per_second());
 
-      crypto_stream_->SendServerConfigUpdate(&cached_network_params.value());
+      crypto_stream_->SendServerConfigUpdate(&*cached_network_params);
 
       connection()->OnSendConnectionState(*cached_network_params);
     }
@@ -246,21 +258,6 @@ bool QuicServerSessionBase::ShouldCreateOutgoingBidirectionalStream() {
   return CanOpenNextOutgoingBidirectionalStream();
 }
 
-bool QuicServerSessionBase::ShouldCreateOutgoingUnidirectionalStream() {
-  if (!connection()->connected()) {
-    QUIC_BUG(quic_bug_12513_3)
-        << "ShouldCreateOutgoingUnidirectionalStream called when disconnected";
-    return false;
-  }
-  if (!crypto_stream_->encryption_established()) {
-    QUIC_BUG(quic_bug_10393_5)
-        << "Encryption not established so no outgoing stream created.";
-    return false;
-  }
-
-  return CanOpenNextOutgoingUnidirectionalStream();
-}
-
 QuicCryptoServerStreamBase* QuicServerSessionBase::GetMutableCryptoStream() {
   return crypto_stream_.get();
 }
@@ -277,7 +274,7 @@ int32_t QuicServerSessionBase::BandwidthToCachedParameterBytesPerSecond(
 }
 
 void QuicServerSessionBase::SendSettingsToCryptoStream() {
-  if (!version().UsesTls()) {
+  if (!version().IsIetfQuic()) {
     return;
   }
   std::string settings_frame = HttpEncoder::SerializeSettingsFrame(settings());
@@ -293,16 +290,19 @@ void QuicServerSessionBase::SendSettingsToCryptoStream() {
 QuicSSLConfig QuicServerSessionBase::GetSSLConfig() const {
   QUICHE_DCHECK(crypto_config_ && crypto_config_->proof_source());
 
-  QuicSSLConfig ssl_config = QuicSpdySession::GetSSLConfig();
+  QuicSSLConfig ssl_config = crypto_config_->ssl_config();
 
   ssl_config.disable_ticket_support =
       GetQuicFlag(quic_disable_server_tls_resumption);
+
+  ssl_config.server_padding_enabled =
+      GetQuicRestartFlag(tls_server_padding_support);
 
   if (!crypto_config_ || !crypto_config_->proof_source()) {
     return ssl_config;
   }
 
-  absl::InlinedVector<uint16_t, 8> signature_algorithms =
+  QuicSignatureAlgorithmVector signature_algorithms =
       crypto_config_->proof_source()->SupportedTlsSignatureAlgorithms();
   if (!signature_algorithms.empty()) {
     ssl_config.signing_algorithm_prefs = std::move(signature_algorithms);
@@ -311,7 +311,39 @@ QuicSSLConfig QuicServerSessionBase::GetSSLConfig() const {
   return ssl_config;
 }
 
-absl::optional<CachedNetworkParameters>
+bool QuicServerSessionBase::OnFrameAcked(const quic::QuicFrame& frame,
+                                         quic::QuicTime::Delta ack_delay_time,
+                                         quic::QuicTime receive_timestamp,
+                                         bool is_retransmission) {
+  bool result = QuicSpdySession::OnFrameAcked(
+      frame, ack_delay_time, receive_timestamp, is_retransmission);
+  if (!reset_ssl_after_handshake_ || ssl_reset_) {
+    return result;
+  }
+  if (frame.type == quic::HANDSHAKE_DONE_FRAME) {
+    handshake_done_acked_ = true;
+  }
+  // When resumption is enabled, the resumption tickets must have been
+  // buffered at the time the handshake_done frame is ACKed.
+  if (handshake_done_acked_ && !HasUnackedCryptoData()) {
+    QUICHE_CODE_COUNT(quic_reset_ssl_after_handshake);
+    crypto_stream_->ResetSsl();
+    ssl_reset_ = true;
+  }
+  return result;
+}
+
+void QuicServerSessionBase::OnCryptoFrame(const quic::QuicCryptoFrame& frame) {
+  if (ssl_reset_) {
+    // This code path can happen due to retransmission of crypto data but
+    // should be rare. Add a code count to monitor.
+    QUICHE_CODE_COUNT(quic_reset_ssl_after_handshake);
+    return;
+  }
+  QuicSpdySession::OnCryptoFrame(frame);
+}
+
+std::optional<CachedNetworkParameters>
 QuicServerSessionBase::GenerateCachedNetworkParameters() const {
   const QuicSentPacketManager& sent_packet_manager =
       connection()->sent_packet_manager();

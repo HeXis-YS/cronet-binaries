@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <string>
 
@@ -23,8 +24,8 @@
 #include "quiche/quic/platform/api/quic_flag_utils.h"
 #include "quiche/quic/platform/api/quic_flags.h"
 #include "quiche/common/platform/api/quiche_logging.h"
-#include "quiche/common/platform/api/quiche_mem_slice.h"
 #include "quiche/common/quiche_endian.h"
+#include "quiche/common/quiche_mem_slice.h"
 
 namespace quic {
 namespace {
@@ -248,6 +249,7 @@ bool QuicUtils::IsRetransmittableFrame(QuicFrameType type) {
     case MTU_DISCOVERY_FRAME:
     case PATH_CHALLENGE_FRAME:
     case PATH_RESPONSE_FRAME:
+    case IMMEDIATE_ACK_FRAME:
       return false;
     default:
       return true;
@@ -257,7 +259,7 @@ bool QuicUtils::IsRetransmittableFrame(QuicFrameType type) {
 // static
 bool QuicUtils::IsHandshakeFrame(const QuicFrame& frame,
                                  QuicTransportVersion transport_version) {
-  if (!QuicVersionUsesCryptoFrames(transport_version)) {
+  if (!VersionIsIetfQuic(transport_version)) {
     return frame.type == STREAM_FRAME &&
            frame.stream_frame.stream_id == GetCryptoStreamId(transport_version);
   } else {
@@ -312,22 +314,21 @@ bool QuicUtils::IsIetfPacketShortHeader(uint8_t first_byte) {
 
 // static
 QuicStreamId QuicUtils::GetInvalidStreamId(QuicTransportVersion version) {
-  return VersionHasIetfQuicFrames(version)
-             ? std::numeric_limits<QuicStreamId>::max()
-             : 0;
+  return VersionIsIetfQuic(version) ? std::numeric_limits<QuicStreamId>::max()
+                                    : 0;
 }
 
 // static
 QuicStreamId QuicUtils::GetCryptoStreamId(QuicTransportVersion version) {
-  QUIC_BUG_IF(quic_bug_12982_1, QuicVersionUsesCryptoFrames(version))
+  QUIC_BUG_IF(quic_bug_12982_1, VersionIsIetfQuic(version))
       << "CRYPTO data aren't in stream frames; they have no stream ID.";
-  return QuicVersionUsesCryptoFrames(version) ? GetInvalidStreamId(version) : 1;
+  return VersionIsIetfQuic(version) ? GetInvalidStreamId(version) : 1;
 }
 
 // static
 bool QuicUtils::IsCryptoStreamId(QuicTransportVersion version,
                                  QuicStreamId stream_id) {
-  if (QuicVersionUsesCryptoFrames(version)) {
+  if (VersionIsIetfQuic(version)) {
     return false;
   }
   return stream_id == GetCryptoStreamId(version);
@@ -335,7 +336,7 @@ bool QuicUtils::IsCryptoStreamId(QuicTransportVersion version,
 
 // static
 QuicStreamId QuicUtils::GetHeadersStreamId(QuicTransportVersion version) {
-  QUICHE_DCHECK(!VersionUsesHttp3(version));
+  QUICHE_DCHECK(!VersionIsIetfQuic(version));
   return GetFirstBidirectionalStreamId(version, Perspective::IS_CLIENT);
 }
 
@@ -345,7 +346,7 @@ bool QuicUtils::IsClientInitiatedStreamId(QuicTransportVersion version,
   if (id == GetInvalidStreamId(version)) {
     return false;
   }
-  return VersionHasIetfQuicFrames(version) ? id % 2 == 0 : id % 2 != 0;
+  return VersionIsIetfQuic(version) ? id % 2 == 0 : id % 2 != 0;
 }
 
 // static
@@ -354,7 +355,7 @@ bool QuicUtils::IsServerInitiatedStreamId(QuicTransportVersion version,
   if (id == GetInvalidStreamId(version)) {
     return false;
   }
-  return VersionHasIetfQuicFrames(version) ? id % 2 != 0 : id % 2 == 0;
+  return VersionIsIetfQuic(version) ? id % 2 != 0 : id % 2 == 0;
 }
 
 // static
@@ -372,7 +373,7 @@ bool QuicUtils::IsOutgoingStreamId(ParsedQuicVersion version, QuicStreamId id,
 // static
 bool QuicUtils::IsBidirectionalStreamId(QuicStreamId id,
                                         ParsedQuicVersion version) {
-  QUICHE_DCHECK(version.HasIetfQuicFrames());
+  QUICHE_DCHECK(version.IsIetfQuic());
   return id % 4 < 2;
 }
 
@@ -380,7 +381,7 @@ bool QuicUtils::IsBidirectionalStreamId(QuicStreamId id,
 StreamType QuicUtils::GetStreamType(QuicStreamId id, Perspective perspective,
                                     bool peer_initiated,
                                     ParsedQuicVersion version) {
-  QUICHE_DCHECK(version.HasIetfQuicFrames());
+  QUICHE_DCHECK(version.IsIetfQuic());
   if (IsBidirectionalStreamId(id, version)) {
     return BIDIRECTIONAL;
   }
@@ -406,16 +407,14 @@ StreamType QuicUtils::GetStreamType(QuicStreamId id, Perspective perspective,
 
 // static
 QuicStreamId QuicUtils::StreamIdDelta(QuicTransportVersion version) {
-  return VersionHasIetfQuicFrames(version) ? 4 : 2;
+  return VersionIsIetfQuic(version) ? 4 : 2;
 }
 
 // static
 QuicStreamId QuicUtils::GetFirstBidirectionalStreamId(
     QuicTransportVersion version, Perspective perspective) {
-  if (VersionHasIetfQuicFrames(version)) {
+  if (VersionIsIetfQuic(version)) {
     return perspective == Perspective::IS_CLIENT ? 0 : 1;
-  } else if (QuicVersionUsesCryptoFrames(version)) {
-    return perspective == Perspective::IS_CLIENT ? 1 : 2;
   }
   return perspective == Perspective::IS_CLIENT ? 3 : 2;
 }
@@ -423,10 +422,8 @@ QuicStreamId QuicUtils::GetFirstBidirectionalStreamId(
 // static
 QuicStreamId QuicUtils::GetFirstUnidirectionalStreamId(
     QuicTransportVersion version, Perspective perspective) {
-  if (VersionHasIetfQuicFrames(version)) {
+  if (VersionIsIetfQuic(version)) {
     return perspective == Perspective::IS_CLIENT ? 2 : 3;
-  } else if (QuicVersionUsesCryptoFrames(version)) {
-    return perspective == Perspective::IS_CLIENT ? 1 : 2;
   }
   return perspective == Perspective::IS_CLIENT ? 3 : 2;
 }
@@ -434,7 +431,7 @@ QuicStreamId QuicUtils::GetFirstUnidirectionalStreamId(
 // static
 QuicStreamId QuicUtils::GetMaxClientInitiatedBidirectionalStreamId(
     QuicTransportVersion version) {
-  if (VersionHasIetfQuicFrames(version)) {
+  if (VersionIsIetfQuic(version)) {
     // Client initiated bidirectional streams have stream IDs divisible by 4.
     return std::numeric_limits<QuicStreamId>::max() - 3;
   }
@@ -474,10 +471,10 @@ QuicConnectionId QuicUtils::CreateRandomConnectionId(
 // static
 QuicConnectionId QuicUtils::CreateZeroConnectionId(
     QuicTransportVersion version) {
-  if (!VersionAllowsVariableLengthConnectionIds(version)) {
+  if (!VersionIsIetfQuic(version)) {
     char connection_id_bytes[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     return QuicConnectionId(static_cast<char*>(connection_id_bytes),
-                            ABSL_ARRAYSIZE(connection_id_bytes));
+                            std::size(connection_id_bytes));
   }
   return EmptyQuicConnectionId();
 }
@@ -500,7 +497,7 @@ bool QuicUtils::IsConnectionIdLengthValidForVersion(
   const uint8_t connection_id_length8 =
       static_cast<uint8_t>(connection_id_length);
   // Versions that do not support variable lengths only support length 8.
-  if (!VersionAllowsVariableLengthConnectionIds(transport_version)) {
+  if (!VersionIsIetfQuic(transport_version)) {
     return connection_id_length8 == kQuicDefaultConnectionIdLength;
   }
   return connection_id_length8 <= kQuicMaxConnectionIdWithLengthPrefixLength;
@@ -508,13 +505,14 @@ bool QuicUtils::IsConnectionIdLengthValidForVersion(
 
 // static
 bool QuicUtils::IsConnectionIdValidForVersion(
-    QuicConnectionId connection_id, QuicTransportVersion transport_version) {
+    const QuicConnectionId& connection_id,
+    QuicTransportVersion transport_version) {
   return IsConnectionIdLengthValidForVersion(connection_id.length(),
                                              transport_version);
 }
 
 StatelessResetToken QuicUtils::GenerateStatelessResetToken(
-    QuicConnectionId connection_id) {
+    const QuicConnectionId& connection_id) {
   static_assert(sizeof(absl::uint128) == sizeof(StatelessResetToken),
                 "bad size");
   static_assert(alignof(absl::uint128) >= alignof(StatelessResetToken),
@@ -604,7 +602,7 @@ bool QuicUtils::AreStatelessResetTokensEqual(
 
 bool IsValidWebTransportSessionId(WebTransportSessionId id,
                                   ParsedQuicVersion version) {
-  QUICHE_DCHECK(version.UsesHttp3());
+  QUICHE_DCHECK(version.IsIetfQuic());
   return (id <= std::numeric_limits<QuicStreamId>::max()) &&
          QuicUtils::IsBidirectionalStreamId(id, version) &&
          QuicUtils::IsClientInitiatedStreamId(version.transport_version, id);
@@ -616,6 +614,23 @@ QuicByteCount MemSliceSpanTotalSize(absl::Span<quiche::QuicheMemSlice> span) {
     total += slice.length();
   }
   return total;
+}
+
+absl::string_view PosixBasename(absl::string_view path) {
+  constexpr char kPathSeparator = '/';
+  size_t pos = path.find_last_of(kPathSeparator);
+
+  // Handle the case with no `kPathSeparator` in `path`.
+  if (pos == absl::string_view::npos) {
+    return path;
+  }
+
+  // Handle the case with a single leading `kPathSeparator` in `path`.
+  if (pos == 0) {
+    return absl::ClippedSubstr(path, 1);
+  }
+
+  return absl::ClippedSubstr(path, pos + 1);
 }
 
 std::string RawSha256(absl::string_view input) {

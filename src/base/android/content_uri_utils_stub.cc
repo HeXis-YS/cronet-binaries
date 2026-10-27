@@ -5,14 +5,43 @@
 #include "base/android/content_uri_utils.h"
 
 namespace base {
+namespace internal {
 
-bool ContentUriExists(const FilePath& content_uri) {
+bool ContentUriExists(const FilePath&) {
   return false;
 }
 
-File OpenContentUriForRead(const FilePath& content_uri) {
+std::optional<std::string> TranslateOpenFlagsToJavaMode(uint32_t) {
   return {};
 }
+
+base::android::ScopedJavaLocalRef<jobject> OpenContentUri(const FilePath&, uint32_t) {
+  return {};
+}
+
+int ContentUriGetFd(const base::android::JavaRef<jobject>&) {
+  return -1;
+}
+
+void ContentUriClose(const base::android::JavaRef<jobject>&) {
+}
+
+bool ContentUriGetFileInfo(const FilePath&, FileEnumerator::FileInfo*) {
+  return false;
+}
+
+std::vector<FileEnumerator::FileInfo> ListContentUriDirectory(const FilePath&, int) {
+  return {};
+}
+
+bool DeleteContentUri(const FilePath& content_uri) {
+  return false;
+}
+
+bool IsDocumentUri(const FilePath& content_uri) {
+  return false;
+}
+}  // namespace internal
 
 std::string GetContentUriMimeType(const FilePath& content_uri) {
   return {};
@@ -23,12 +52,26 @@ bool MaybeGetFileDisplayName(const FilePath& content_uri,
   return false;
 }
 
-bool DeleteContentUri(const FilePath& content_uri) {
-  return false;
-}
-
-FilePath GetContentUriFromFilePath(const FilePath& file_path) {
+FilePath ContentUriBuildDocumentUriUsingTree(const FilePath&,
+                                             const std::string&) {
   return {};
 }
 
+FilePath
+ContentUriGetChildDocumentOrQuery(const FilePath&,
+                                  const std::string&,
+                                  const std::string&,
+                                  bool,
+                                  bool) {
+  return {};
+}
+
+bool ContentUriIsCreateChildDocumentQuery(const FilePath&) {
+  return false;
+}
+
+FilePath
+ContentUriGetDocumentFromQuery(const FilePath&, bool) {
+  return {};
+}
 }  // namespace base

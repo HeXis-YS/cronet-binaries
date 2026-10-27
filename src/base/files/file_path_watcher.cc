@@ -55,6 +55,15 @@ bool FilePathWatcher::WatchWithOptions(const FilePath& path,
   return impl_->WatchWithOptions(path, options, callback);
 }
 
+bool FilePathWatcher::WatchWithChangeInfo(
+    const FilePath& path,
+    const WatchOptions& options,
+    const CallbackWithChangeInfo& callback) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  DCHECK(path.IsAbsolute());
+  return impl_->WatchWithChangeInfo(path, options, callback);
+}
+
 bool FilePathWatcher::PlatformDelegate::WatchWithOptions(
     const FilePath& path,
     const WatchOptions& options,
@@ -62,9 +71,30 @@ bool FilePathWatcher::PlatformDelegate::WatchWithOptions(
   return Watch(path, options.type, callback);
 }
 
+bool FilePathWatcher::PlatformDelegate::WatchWithChangeInfo(
+    const FilePath& path,
+    const WatchOptions& options,
+    const CallbackWithChangeInfo& callback) {
+  return Watch(path, options.type, base::BindRepeating(callback, ChangeInfo()));
+}
+
 FilePathWatcher::FilePathWatcher(std::unique_ptr<PlatformDelegate> delegate) {
   DETACH_FROM_SEQUENCE(sequence_checker_);
   impl_ = std::move(delegate);
 }
+
+#if BUILDFLAG(IS_WIN)
+Lock& FilePathWatcher::GetWatchThreadLockForTest() {
+  return impl_->GetWatchThreadLockForTest();  // IN-TEST
+}
+
+const void* FilePathWatcher::GetOverlappedPointerForTest() {
+  return impl_->GetOverlappedPointerForTest();  // IN-TEST
+}
+
+void FilePathWatcher::SetNextReadDirectoryChangesErrorForTest(uint32_t error) {
+  impl_->SetNextReadDirectoryChangesErrorForTest(error);  // IN-TEST
+}
+#endif
 
 }  // namespace base

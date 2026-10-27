@@ -5,10 +5,13 @@
 #include "quiche/common/quiche_data_writer.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
+#include <string>
 
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "quiche/common/moq_varint.h"
 #include "quiche/common/platform/api/quiche_bug_tracker.h"
 #include "quiche/common/quiche_endian.h"
 
@@ -99,7 +102,8 @@ bool QuicheDataWriter::WriteBytes(const void* data, size_t data_len) {
     return false;
   }
 
-  memcpy(dest, data, data_len);
+  std::copy(static_cast<const char*>(data),
+            static_cast<const char*>(data) + data_len, dest);
 
   length_ += data_len;
   return true;
@@ -111,7 +115,7 @@ bool QuicheDataWriter::WriteRepeatedByte(uint8_t byte, size_t count) {
     return false;
   }
 
-  memset(dest, byte, count);
+  std::fill(dest, dest + count, byte);
 
   length_ += count;
   return true;
@@ -122,7 +126,7 @@ void QuicheDataWriter::WritePadding() {
   if (length_ > capacity_) {
     return;
   }
-  memset(buffer_ + length_, 0x00, capacity_ - length_);
+  std::fill(buffer_ + length_, buffer_ + capacity_, 0x00);
   length_ = capacity_;
 }
 
@@ -218,6 +222,10 @@ bool QuicheDataWriter::WriteVarInt62(uint64_t value) {
   return false;
 }
 
+bool QuicheDataWriter::WriteMoqVarInt(uint64_t value) {
+  return WriteMoqVarint(*this, value);
+}
+
 bool QuicheDataWriter::WriteStringPieceVarInt62(
     const absl::string_view& string_piece) {
   if (!WriteVarInt62(string_piece.size())) {
@@ -229,6 +237,12 @@ bool QuicheDataWriter::WriteStringPieceVarInt62(
     }
   }
   return true;
+}
+
+bool QuicheDataWriter::WriteStringPieceMoqVarInt(
+    absl::string_view string_piece) {
+  return WriteMoqVarInt(string_piece.size()) &&
+         WriteBytes(string_piece.data(), string_piece.size());
 }
 
 // static

@@ -1,0 +1,26 @@
+From 1a9f41b0995be58036357a8ae4ceec50ec3218d3 Mon Sep 17 00:00:00 2001
+From: klzgrad <kizdiv@gmail.com>
+Date: Tue, 14 Mar 2023 06:41:58 +0800
+Subject: [PATCH] third_party/brotli: Fix missing import in BUILD.gn
+
+is_ubsan is not declared when imported from net/BUILD.gn
+---
+ src/third_party/brotli/BUILD.gn | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/third_party/brotli/BUILD.gn b/src/third_party/brotli/BUILD.gn
+index 6ae10fd5d..bea17f257 100644
+--- a/src/third_party/brotli/BUILD.gn
++++ b/src/third_party/brotli/BUILD.gn
+@@ -6,6 +6,8 @@ if (is_win) {
+   import("//build/config/win/visual_studio_version.gni")
+ }
+ 
++import("//build/config/sanitizers/sanitizers.gni")
++
+ config("brotli_defines") {
+   # By default, brotli depends on undefined behavior, but setting
+   # BROTLI_BUILD_PORTABLE should result in a build which does not.
+-- 
+2.53.0
+

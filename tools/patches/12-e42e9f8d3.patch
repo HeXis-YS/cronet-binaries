@@ -1,0 +1,25 @@
+From e42e9f8d323d17b6fd893672699f631d98824e78 Mon Sep 17 00:00:00 2001
+From: klzgrad <kizdiv@gmail.com>
+Date: Wed, 4 May 2022 10:31:50 +0800
+Subject: [PATCH] build: Use thinlto max optimization for everything
+
+---
+ src/build/config/BUILDCONFIG.gn | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/build/config/BUILDCONFIG.gn b/src/build/config/BUILDCONFIG.gn
+index 538bb3d72..73df16c6c 100644
+--- a/src/build/config/BUILDCONFIG.gn
++++ b/src/build/config/BUILDCONFIG.gn
+@@ -384,7 +384,7 @@ default_compiler_configs = [
+   "//build/config/compiler:sanitize_c_array_bounds",
+   "//build/config/compiler:sanitize_return",
+   "//build/config/compiler:thin_archive",
+-  "//build/config/compiler:thinlto_optimize_default",
++  "//build/config/compiler:thinlto_optimize_max",
+   "//build/config/compiler:tot_warnings",
+   "//build/config/coverage:default_coverage",
+   "//build/config/sanitizers:default_sanitizer_flags",
+-- 
+2.53.0
+

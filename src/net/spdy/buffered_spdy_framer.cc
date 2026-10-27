@@ -16,7 +16,7 @@ namespace net {
 namespace {
 
 // GOAWAY frame debug data is only buffered up to this many bytes.
-size_t kGoAwayDebugDataMaxSize = 1024;
+constexpr size_t kGoAwayDebugDataMaxSize = 1024;
 
 }  // namespace
 
@@ -28,7 +28,7 @@ BufferedSpdyFramer::BufferedSpdyFramer(uint32_t max_header_list_size,
       net_log_(net_log),
       time_func_(time_func) {
   // Do not bother decoding response header payload above the limit.
-  deframer_.GetHpackDecoder()->set_max_decode_buffer_size_bytes(
+  deframer_.GetHpackDecoder().set_max_decode_buffer_size_bytes(
       max_header_list_size_);
 }
 
@@ -183,9 +183,9 @@ bool BufferedSpdyFramer::OnGoAwayFrameData(const char* goaway_data,
     }
     return true;
   }
-  visitor_->OnGoAway(goaway_fields_->last_accepted_stream_id,
-                     goaway_fields_->error_code, goaway_fields_->debug_data);
-  goaway_fields_.reset();
+  std::unique_ptr<GoAwayFields> fields = std::move(goaway_fields_);
+  visitor_->OnGoAway(fields->last_accepted_stream_id, fields->error_code,
+                     fields->debug_data);
   return true;
 }
 
@@ -227,7 +227,7 @@ size_t BufferedSpdyFramer::ProcessInput(const char* data, size_t len) {
 }
 
 void BufferedSpdyFramer::UpdateHeaderDecoderTableSize(uint32_t value) {
-  deframer_.GetHpackDecoder()->ApplyHeaderTableSizeSetting(value);
+  deframer_.GetHpackDecoder().ApplyHeaderTableSizeSetting(value);
 }
 
 http2::Http2DecoderAdapter::SpdyFramerError

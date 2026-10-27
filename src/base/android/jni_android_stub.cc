@@ -11,29 +11,7 @@
 
 namespace base {
 namespace android {
-JNIEnv* AttachCurrentThread() {
-  return nullptr;
-}
-
-JNIEnv* AttachCurrentThreadWithName(const std::string& thread_name) {
-  return nullptr;
-}
-
-void DetachFromVM() {
-}
-
 void InitVM(JavaVM* vm) {
-}
-
-bool IsVMInitialized() {
-  return false;
-}
-
-JavaVM* GetVM() {
-  return nullptr;
-}
-
-void DisableJvmForTesting() {
 }
 
 void InitGlobalClassLoader(JNIEnv* env) {
@@ -102,14 +80,6 @@ template jmethodID MethodID::LazyGet<MethodID::TYPE_STATIC>(
 template jmethodID MethodID::LazyGet<MethodID::TYPE_INSTANCE>(
     JNIEnv* env, jclass clazz, const char* method_name,
     const char* jni_signature, std::atomic<jmethodID>* atomic_method_id);
-
-bool HasException(JNIEnv* env) {
-  return false;
-}
-
-bool ClearException(JNIEnv* env) {
-  return true;
-}
 
 void CheckException(JNIEnv* env) {
 }

@@ -4,18 +4,31 @@
 
 #include "quiche/quic/test_tools/quic_connection_peer.h"
 
+#include <cstdint>
+#include <memory>
+#include <string>
+
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/congestion_control/send_algorithm_interface.h"
+#include "quiche/quic/core/quic_connection.h"
+#include "quiche/quic/core/quic_connection_alarms.h"
 #include "quiche/quic/core/quic_packet_writer.h"
 #include "quiche/quic/core/quic_received_packet_manager.h"
+#include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/platform/api/quic_flags.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
 #include "quiche/quic/test_tools/quic_connection_id_manager_peer.h"
 #include "quiche/quic/test_tools/quic_framer_peer.h"
 #include "quiche/quic/test_tools/quic_sent_packet_manager_peer.h"
+#include "quiche/quic/test_tools/quic_test_utils.h"
 
 namespace quic {
 namespace test {
+
+// static
+void QuicConnectionAlarmsPeer::Fire(QuicAlarmProxy alarm) {
+  alarm.multiplexer_->Fire(alarm.slot_);
+}
 
 // static
 void QuicConnectionPeer::SetSendAlgorithm(
@@ -117,48 +130,51 @@ QuicFramer* QuicConnectionPeer::GetFramer(QuicConnection* connection) {
 }
 
 // static
-QuicAlarm* QuicConnectionPeer::GetAckAlarm(QuicConnection* connection) {
-  return connection->ack_alarm_.get();
+QuicAlarmProxy QuicConnectionPeer::GetAckAlarm(QuicConnection* connection) {
+  return QuicAlarmProxy(&connection->alarms_, QuicAlarmSlot::kAck);
 }
 
 // static
-QuicAlarm* QuicConnectionPeer::GetPingAlarm(QuicConnection* connection) {
-  return connection->ping_manager_.alarm_.get();
+QuicAlarmProxy QuicConnectionPeer::GetPingAlarm(QuicConnection* connection) {
+  return QuicAlarmProxy(&connection->alarms_, QuicAlarmSlot::kPing);
 }
 
 // static
-QuicAlarm* QuicConnectionPeer::GetRetransmissionAlarm(
+QuicAlarmProxy QuicConnectionPeer::GetRetransmissionAlarm(
     QuicConnection* connection) {
-  return connection->retransmission_alarm_.get();
+  return QuicAlarmProxy(&connection->alarms_, QuicAlarmSlot::kRetransmission);
 }
 
 // static
-QuicAlarm* QuicConnectionPeer::GetSendAlarm(QuicConnection* connection) {
-  return connection->send_alarm_.get();
+QuicAlarmProxy QuicConnectionPeer::GetSendAlarm(QuicConnection* connection) {
+  return QuicAlarmProxy(&connection->alarms_, QuicAlarmSlot::kSend);
 }
 
 // static
-QuicAlarm* QuicConnectionPeer::GetMtuDiscoveryAlarm(
+QuicAlarmProxy QuicConnectionPeer::GetMtuDiscoveryAlarm(
     QuicConnection* connection) {
-  return connection->mtu_discovery_alarm_.get();
+  return QuicAlarmProxy(&connection->alarms_, QuicAlarmSlot::kMtuDiscovery);
 }
 
 // static
-QuicAlarm* QuicConnectionPeer::GetProcessUndecryptablePacketsAlarm(
+QuicAlarmProxy QuicConnectionPeer::GetProcessUndecryptablePacketsAlarm(
     QuicConnection* connection) {
-  return connection->process_undecryptable_packets_alarm_.get();
+  return QuicAlarmProxy(&connection->alarms_,
+                        QuicAlarmSlot::kProcessUndecryptablePackets);
 }
 
 // static
-QuicAlarm* QuicConnectionPeer::GetDiscardPreviousOneRttKeysAlarm(
+QuicAlarmProxy QuicConnectionPeer::GetDiscardPreviousOneRttKeysAlarm(
     QuicConnection* connection) {
-  return connection->discard_previous_one_rtt_keys_alarm_.get();
+  return QuicAlarmProxy(&connection->alarms_,
+                        QuicAlarmSlot::kDiscardPreviousOneRttKeys);
 }
 
 // static
-QuicAlarm* QuicConnectionPeer::GetDiscardZeroRttDecryptionKeysAlarm(
+QuicAlarmProxy QuicConnectionPeer::GetDiscardZeroRttDecryptionKeysAlarm(
     QuicConnection* connection) {
-  return connection->discard_zero_rtt_decryption_keys_alarm_.get();
+  return QuicAlarmProxy(&connection->alarms_,
+                        QuicAlarmSlot::kDiscardZeroRttDecryptionKeys);
 }
 
 // static
@@ -202,13 +218,12 @@ void QuicConnectionPeer::TearDownLocalConnectionState(
 }
 
 // static
-QuicEncryptedPacket* QuicConnectionPeer::GetConnectionClosePacket(
-    QuicConnection* connection) {
-  if (connection->termination_packets_ == nullptr ||
-      connection->termination_packets_->empty()) {
+const QuicEncryptedPacket* QuicConnectionPeer::GetConnectionClosePacket(
+    const QuicConnection* connection) {
+  if (!connection->HasTerminationPackets()) {
     return nullptr;
   }
-  return (*connection->termination_packets_)[0].get();
+  return connection->termination_info()->termination_packets[0].get();
 }
 
 // static
@@ -276,12 +291,6 @@ bool QuicConnectionPeer::SupportsReleaseTime(QuicConnection* connection) {
 }
 
 // static
-QuicConnection::PacketContent QuicConnectionPeer::GetCurrentPacketContent(
-    QuicConnection* connection) {
-  return connection->current_packet_content_;
-}
-
-// static
 void QuicConnectionPeer::AddBytesReceived(QuicConnection* connection,
                                           size_t length) {
   if (connection->EnforceAntiAmplificationLimit()) {
@@ -322,9 +331,10 @@ QuicNetworkBlackholeDetector& QuicConnectionPeer::GetBlackholeDetector(
 }
 
 // static
-QuicAlarm* QuicConnectionPeer::GetBlackholeDetectorAlarm(
+QuicAlarmProxy QuicConnectionPeer::GetBlackholeDetectorAlarm(
     QuicConnection* connection) {
-  return connection->blackhole_detector_.alarm_.get();
+  return QuicAlarmProxy(&connection->alarms_,
+                        QuicAlarmSlot::kNetworkBlackholeDetector);
 }
 
 // static
@@ -352,9 +362,10 @@ QuicTime QuicConnectionPeer::GetIdleNetworkDeadline(
 }
 
 // static
-QuicAlarm* QuicConnectionPeer::GetIdleNetworkDetectorAlarm(
+QuicAlarmProxy QuicConnectionPeer::GetIdleNetworkDetectorAlarm(
     QuicConnection* connection) {
-  return connection->idle_network_detector_.alarm_.get();
+  return QuicAlarmProxy(&connection->alarms_,
+                        QuicAlarmSlot::kIdleNetworkDetector);
 }
 
 // static
@@ -364,9 +375,9 @@ QuicIdleNetworkDetector& QuicConnectionPeer::GetIdleNetworkDetector(
 }
 
 // static
-QuicAlarm* QuicConnectionPeer::GetMultiPortProbingAlarm(
+QuicAlarmProxy QuicConnectionPeer::GetMultiPortProbingAlarm(
     QuicConnection* connection) {
-  return connection->multi_port_probing_alarm_.get();
+  return QuicAlarmProxy(&connection->alarms_, QuicAlarmSlot::kMultiPortProbing);
 }
 
 // static
@@ -538,12 +549,6 @@ QuicSocketAddress QuicConnectionPeer::GetReceivedServerPreferredAddress(
 }
 
 // static
-QuicSocketAddress QuicConnectionPeer::GetSentServerPreferredAddress(
-    QuicConnection* connection) {
-  return connection->sent_server_preferred_address_;
-}
-
-// static
 bool QuicConnectionPeer::TestLastReceivedPacketInfoDefaults() {
   QuicConnection::ReceivedPacketInfo info{QuicTime::Zero()};
   QUIC_DVLOG(2)
@@ -554,7 +559,7 @@ bool QuicConnectionPeer::TestLastReceivedPacketInfoDefaults() {
       << " receipt_time passed: " << (info.receipt_time == QuicTime::Zero())
       << " received_bytes_counted passed: " << !info.received_bytes_counted
       << " destination_connection_id passed: "
-      << (info.destination_connection_id == QuicConnectionId())
+      << (info.header.destination_connection_id == QuicConnectionId())
       << " length passed: " << (info.length == 0)
       << " decrypted passed: " << !info.decrypted << " decrypted_level passed: "
       << (info.decrypted_level == ENCRYPTION_INITIAL)
@@ -562,12 +567,12 @@ bool QuicConnectionPeer::TestLastReceivedPacketInfoDefaults() {
       << " ecn_codepoint passed: " << (info.ecn_codepoint == ECN_NOT_ECT)
       << " sizeof(ReceivedPacketInfo) passed: "
       << (sizeof(size_t) != 8 ||
-          sizeof(QuicConnection::ReceivedPacketInfo) == 280);
+          sizeof(QuicConnection::ReceivedPacketInfo) == 248);
   return info.destination_address == QuicSocketAddress() &&
          info.source_address == QuicSocketAddress() &&
          info.receipt_time == QuicTime::Zero() &&
          !info.received_bytes_counted && info.length == 0 &&
-         info.destination_connection_id == QuicConnectionId() &&
+         info.header.destination_connection_id == QuicConnectionId() &&
          !info.decrypted && info.decrypted_level == ENCRYPTION_INITIAL &&
          // There's no simple way to compare all the values of QuicPacketHeader.
          info.frames.empty() && info.ecn_codepoint == ECN_NOT_ECT &&
@@ -576,22 +581,69 @@ bool QuicConnectionPeer::TestLastReceivedPacketInfoDefaults() {
          // have changed. Please add the relevant conditions and update the
          // length below.
          (sizeof(size_t) != 8 ||
-          sizeof(QuicConnection::ReceivedPacketInfo) == 280);
+          sizeof(QuicConnection::ReceivedPacketInfo) == 248);
 }
 
 // static
 void QuicConnectionPeer::DisableEcnCodepointValidation(
     QuicConnection* connection) {
-  // disable_ecn_codepoint_validation_ doesn't work correctly if the flag
-  // isn't set; all tests that don't set the flag should hit this bug.
-  QUIC_BUG_IF(quic_bug_518619343_03, !GetQuicReloadableFlag(quic_send_ect1))
-      << "Test disables ECN validation without setting quic_send_ect1";
   connection->disable_ecn_codepoint_validation_ = true;
+  QuicSentPacketManagerPeer::SetEcnQueried(GetSentPacketManager(connection),
+                                           true);
 }
 
 // static
 void QuicConnectionPeer::OnForwardProgressMade(QuicConnection* connection) {
   connection->OnForwardProgressMade();
+}
+
+// static
+bool QuicConnectionPeer::CanReceiveAckFrequencyFrames(
+    QuicConnection* connection) {
+  return connection->can_receive_ack_frequency_immediate_ack_;
+}
+
+// static
+uint8_t QuicConnectionPeer::GetNumPtosForRetransmittableOnWireTimeout(
+    const QuicConnection* connection) {
+  return connection->ping_manager_
+      .num_ptos_for_retransmittable_on_wire_timeout_;
+}
+
+// static
+uint64_t QuicConnectionPeer::GetPeerReorderingThreshold(
+    QuicConnection* connection) {
+  if (!connection->version().IsIetfQuic()) {
+    return connection->uber_received_packet_manager_
+        .received_packet_managers_[0]
+        .reordering_threshold_;
+  }
+  return connection->uber_received_packet_manager_
+      .received_packet_managers_[APPLICATION_DATA]
+      .reordering_threshold_;
+}
+
+// static
+bool QuicConnectionPeer::ConnectionMigrationDisabled(
+    QuicConnection* connection) {
+  return connection->active_migration_disabled_;
+}
+
+// static
+void QuicConnectionPeer::SetSpinBitEnabled(QuicConnection* connection,
+                                           bool enabled) {
+  connection->spin_bit_enabled_ = enabled;
+}
+
+// static
+bool QuicConnectionPeer::GetSpinBitEnabled(QuicConnection* connection) {
+  return connection->spin_bit_enabled_;
+}
+
+// static
+QuicConnection::ReceivedPacketInfo&
+QuicConnectionPeer::GetLastReceivedPacketInfo(QuicConnection* connection) {
+  return connection->last_received_packet_info_;
 }
 
 }  // namespace test

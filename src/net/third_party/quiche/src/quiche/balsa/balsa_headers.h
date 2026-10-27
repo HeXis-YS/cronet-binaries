@@ -12,6 +12,7 @@
 #include <functional>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <utility>
@@ -23,9 +24,9 @@
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/string_view.h"
-#include "absl/types/optional.h"
 #include "quiche/balsa/balsa_enums.h"
 #include "quiche/balsa/header_api.h"
+#include "quiche/balsa/http_validation_policy.h"
 #include "quiche/balsa/standard_header_map.h"
 #include "quiche/common/platform/api/quiche_bug_tracker.h"
 #include "quiche/common/platform/api/quiche_export.h"
@@ -283,13 +284,13 @@ class QUICHE_EXPORT BalsaBuffer {
     can_write_to_contiguous_buffer_ = b.can_write_to_contiguous_buffer_;
   }
 
-  const char* StartOfFirstBlock() const {
+  char* StartOfFirstBlock() const {
     QUICHE_BUG_IF(bug_if_1182_1, blocks_.empty())
         << "First block not allocated yet!";
     return blocks_.empty() ? nullptr : blocks_[0].buffer.get();
   }
 
-  const char* EndOfFirstBlock() const {
+  char* EndOfFirstBlock() const {
     QUICHE_BUG_IF(bug_if_1182_2, blocks_.empty())
         << "First block not allocated yet!";
     return blocks_.empty() ? nullptr : blocks_[0].start_of_unused_bytes();
@@ -403,6 +404,7 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
     size_t last_char_idx;
     BalsaBuffer::Blocks::size_type buffer_base_idx;
     bool skip;
+    bool has_continuation_line = false;
   };
 
   using HeaderTokenList = std::vector<absl::string_view>;
@@ -452,7 +454,6 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
   BalsaHeaders()
       : balsa_buffer_(4096),
         content_length_(0),
-        content_length_status_(BalsaHeadersEnums::NO_CONTENT_LENGTH),
         parsed_response_code_(0),
         firstline_buffer_base_idx_(0),
         whitespace_1_idx_(0),
@@ -462,12 +463,13 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
         whitespace_3_idx_(0),
         non_whitespace_3_idx_(0),
         whitespace_4_idx_(0),
-        transfer_encoding_is_chunked_(false) {}
+        content_length_status_(BalsaHeadersEnums::NO_CONTENT_LENGTH),
+        transfer_encoding_is_chunked_(false),
+        header_lines_removed_(0) {}
 
   explicit BalsaHeaders(size_t bufsize)
       : balsa_buffer_(bufsize),
         content_length_(0),
-        content_length_status_(BalsaHeadersEnums::NO_CONTENT_LENGTH),
         parsed_response_code_(0),
         firstline_buffer_base_idx_(0),
         whitespace_1_idx_(0),
@@ -477,6 +479,7 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
         whitespace_3_idx_(0),
         non_whitespace_3_idx_(0),
         whitespace_4_idx_(0),
+        content_length_status_(BalsaHeadersEnums::NO_CONTENT_LENGTH),
         transfer_encoding_is_chunked_(false) {}
 
   // Copying BalsaHeaders is expensive, so require that it be visible.
@@ -645,6 +648,11 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
 
   // Removes all headers starting with 'key' [case insensitive]
   void RemoveAllHeadersWithPrefix(absl::string_view prefix) override;
+
+  // Removes all headers that satisfy the predicate.
+  void RemoveHeadersIf(
+      std::function<bool(const absl::string_view, const absl::string_view)>
+          predicate);
 
   // Returns true if we have at least one header with given prefix
   // [case insensitive]. Currently for test use only.
@@ -824,7 +832,7 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
     }
   }
 
-  // Dump the textural representation of the header object to a string, which
+  // Dump the textual representation of the header object to a string, which
   // is suitable for writing out to logs. All CRLF will be printed out as \n.
   // This function can be called on a header object in any state. Raw header
   // data will be printed out if the header object is not completely parsed,
@@ -839,6 +847,8 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
       quiche::UnretainedCallback<bool(const absl::string_view key,
                                       const absl::string_view value)>
           fn) const override;
+
+  void FoldContinuationLines();
 
   void DumpToPrefixedString(const char* spaces, std::string* str) const;
 
@@ -1005,6 +1015,13 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
 
   bool IsEmpty() const override;
 
+  size_t size() const override {
+    if (header_lines_removed_ > header_lines_.size()) {
+      return 0;
+    }
+    return header_lines_.size() - header_lines_removed_;
+  }
+
   // From HeaderApi and ConstHeaderApi.
   absl::string_view Authority() const override;
   void ReplaceOrAppendAuthority(absl::string_view value) override;
@@ -1044,9 +1061,13 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
   friend class HTTPMessage;
   friend class test::BalsaHeadersTestPeer;
 
-  friend bool ParseHTTPFirstLine(const char* begin, const char* end,
-                                 bool is_request, BalsaHeaders* headers,
-                                 BalsaFrameEnums::ErrorCode* error_code);
+  friend bool ParseHTTPFirstLine(
+      char*& begin, char* end, bool is_request, BalsaHeaders* headers,
+      BalsaFrameEnums::ErrorCode* error_code,
+      HttpValidationPolicy::FirstLineValidationOption whitespace_option,
+      HttpValidationPolicy::FirstLineValidationOption multiple_spaces_option,
+      bool& has_multiple_spaces, bool& has_cr_tab,
+      bool& multiple_spaces_sanitized, bool& cr_tab_sanitized);
 
   // Reverse iterators have been removed for lack of use, refer to
   // cl/30618773 in case they are needed.
@@ -1073,11 +1094,11 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
     balsa_buffer_.NoMoreWriteToContiguousBuffer();
   }
 
-  const char* OriginalHeaderStreamBegin() const {
+  char* OriginalHeaderStreamBegin() const {
     return balsa_buffer_.StartOfFirstBlock();
   }
 
-  const char* OriginalHeaderStreamEnd() const {
+  char* OriginalHeaderStreamEnd() const {
     return balsa_buffer_.EndOfFirstBlock();
   }
 
@@ -1130,9 +1151,7 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
                                     absl::string_view firstline_b,
                                     absl::string_view firstline_c);
   BalsaBuffer balsa_buffer_;
-
   size_t content_length_;
-  BalsaHeadersEnums::ContentLengthStatus content_length_status_;
   size_t parsed_response_code_;
   // HTTP firstlines all have the following structure:
   //  LWS         NONWS  LWS    NONWS   LWS    NONWS   NOTCRLF  CRLF
@@ -1158,6 +1177,7 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
   //   nws3 == non_whitespace_3_idx_
   //    ws4 == whitespace_4_idx_
   BalsaBuffer::Blocks::size_type firstline_buffer_base_idx_;
+
   size_t whitespace_1_idx_;
   size_t non_whitespace_1_idx_;
   size_t whitespace_2_idx_;
@@ -1166,21 +1186,33 @@ class QUICHE_EXPORT BalsaHeaders : public HeaderApi {
   size_t non_whitespace_3_idx_;
   size_t whitespace_4_idx_;
 
+  HeaderLines header_lines_;
+  BalsaHeadersEnums::ContentLengthStatus content_length_status_;
+
   bool transfer_encoding_is_chunked_;
 
   // If true, QUICHE_BUG if a header that starts with an invalid prefix is
   // explicitly set.
   bool enforce_header_policy_ = true;
 
-  HeaderLines header_lines_;
+  // Track number of header lines removed for correctness of the size() method.
+  // We cannot just return header_lines_.size() because that would include the
+  // removed lines (which are marked as "skip"). We also cannot easily just
+  // track the total number of lines as they are added/removed, because those
+  // are originally added by the framer.
+  size_t header_lines_removed_;
 };
 
 // Base class for iterating the headers in a BalsaHeaders object, returning a
 // pair of string_view's for each header.
-class QUICHE_EXPORT BalsaHeaders::iterator_base
-    : public std::iterator<std::forward_iterator_tag,
-                           std::pair<absl::string_view, absl::string_view>> {
+class QUICHE_EXPORT BalsaHeaders::iterator_base {
  public:
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = std::pair<absl::string_view, absl::string_view>;
+  using difference_type = std::ptrdiff_t;
+  using pointer = value_type*;
+  using reference = value_type&;
+
   iterator_base() : headers_(nullptr), idx_(0) {}
 
   std::pair<absl::string_view, absl::string_view>& operator*() const {
@@ -1260,13 +1292,12 @@ class QUICHE_EXPORT BalsaHeaders::iterator_base
                          absl::string_view(stream_begin + line.value_begin_idx,
                                            line.ValuesLength()));
     }
-    return value_.value();
+    return *value_;
   }
 
   const BalsaHeaders* headers_;
   HeaderLines::size_type idx_;
-  mutable absl::optional<std::pair<absl::string_view, absl::string_view>>
-      value_;
+  mutable std::optional<std::pair<absl::string_view, absl::string_view>> value_;
 };
 
 // A const iterator for all the header lines.

@@ -63,7 +63,7 @@ class BASE_EXPORT MessagePumpKqueue : public MessagePump,
   // events.
   class MachPortWatcher {
    public:
-    virtual ~MachPortWatcher() {}
+    virtual ~MachPortWatcher() = default;
     virtual void OnMachMessageReceived(mach_port_t port) = 0;
   };
 
@@ -105,17 +105,16 @@ class BASE_EXPORT MessagePumpKqueue : public MessagePump,
 
   ~MessagePumpKqueue() override;
 
+  // Initializes features for this class. See `base::features::Init()`.
   static void InitializeFeatures();
 
   // MessagePump:
   void Run(Delegate* delegate) override;
-  // Simplified version of the loop used under experiment (crbug.com/1200141)
-  void RunSimplified(Delegate* delegate);
   void Quit() override;
   void ScheduleWork() override;
   void ScheduleDelayedWork(
       const Delegate::NextWorkInfo& next_work_info) override;
-  TimeTicks AjdustDelayedRunTime(TimeTicks earliest_time,
+  TimeTicks AdjustDelayedRunTime(TimeTicks earliest_time,
                                  TimeTicks run_time,
                                  TimeTicks latest_time) override;
 
@@ -157,10 +156,10 @@ class BASE_EXPORT MessagePumpKqueue : public MessagePump,
   // scheduled wakeup. Clears the wakeup timer if |wakeup_time| is
   // base::TimeTicks::Max().
   // Updates |scheduled_wakeup_time_| to follow.
-  void MaybeUpdateWakeupTimer(const base::TimeTicks& wakeup_time,
+  void MaybeUpdateWakeupTimer(base::TimeTicks wakeup_time,
                               base::TimeDelta leeway);
 
-  void SetWakeupTimerEvent(const base::TimeTicks& wakeup_time,
+  void SetWakeupTimerEvent(base::TimeTicks wakeup_time,
                            base::TimeDelta leeway,
                            kevent64_s* timer_event);
 

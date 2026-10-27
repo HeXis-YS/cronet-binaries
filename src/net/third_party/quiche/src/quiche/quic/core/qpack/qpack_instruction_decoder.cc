@@ -5,10 +5,12 @@
 #include "quiche/quic/core/qpack/qpack_instruction_decoder.h"
 
 #include <algorithm>
+#include <string>
 #include <utility>
 
 #include "absl/strings/string_view.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
+#include "quiche/quic/platform/api/quic_flags.h"
 #include "quiche/quic/platform/api/quic_logging.h"
 
 namespace quic {
@@ -25,13 +27,13 @@ QpackInstructionDecoder::QpackInstructionDecoder(const QpackLanguage* language,
                                                  Delegate* delegate)
     : language_(language),
       delegate_(delegate),
-      s_bit_(false),
       varint_(0),
       varint2_(0),
+      s_bit_(false),
       is_huffman_encoded_(false),
-      string_length_(0),
       error_detected_(false),
-      state_(State::kStartInstruction) {}
+      state_(State::kStartInstruction),
+      string_length_(0) {}
 
 bool QpackInstructionDecoder::Decode(absl::string_view data) {
   QUICHE_DCHECK(!data.empty());
@@ -240,11 +242,11 @@ bool QpackInstructionDecoder::DoVarintDone() {
     return true;
   }
 
-  string_length_ = varint_decoder_.value();
-  if (string_length_ > kStringLiteralLengthLimit) {
-    OnError(ErrorCode::STRING_LITERAL_TOO_LONG, "String literal too long.");
-    return false;
-  }
+    if (varint_decoder_.value() > kStringLiteralLengthLimit) {
+      OnError(ErrorCode::STRING_LITERAL_TOO_LONG, "String literal too long.");
+      return false;
+    }
+    string_length_ = varint_decoder_.value();
 
   std::string* const string =
       (field_->type == QpackInstructionFieldType::kName) ? &name_ : &value_;

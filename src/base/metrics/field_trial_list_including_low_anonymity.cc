@@ -3,15 +3,17 @@
 // found in the LICENSE file.
 
 #include "base/metrics/field_trial_list_including_low_anonymity.h"
+
 #include "base/metrics/field_trial.h"
 
 namespace base {
 
 // static
 void FieldTrialListIncludingLowAnonymity::GetActiveFieldTrialGroups(
-    FieldTrial::ActiveGroups* active_groups) {
+    FieldTrial::ActiveGroups* active_groups,
+    bool include_runtime_overrides) {
   return FieldTrialList::GetActiveFieldTrialGroupsInternal(
-      active_groups, /*include_low_anonymity=*/true);
+      active_groups, /*include_low_anonymity=*/true, include_runtime_overrides);
 }
 
 // static

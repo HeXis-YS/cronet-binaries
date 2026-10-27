@@ -1,0 +1,10 @@
+--- a/src/third_party/perfetto/src/tracing/BUILD.gn
++++ b/src/third_party/perfetto/src/tracing/BUILD.gn
+@@ -12,7 +12,6 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-import("../../gn/fuzzer.gni")
+ import("../../gn/perfetto.gni")
+ import("../../gn/test.gni")
+ 

@@ -1,35 +1,5 @@
-/* ----------------------------------------------------------------------- *
- *   
- *   Copyright 1996-2016 The NASM Authors - All Rights Reserved
- *   See the file AUTHORS included with the NASM distribution for
- *   the specific copyright holders.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following
- *   conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright
- *     notice, this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above
- *     copyright notice, this list of conditions and the following
- *     disclaimer in the documentation and/or other materials provided
- *     with the distribution.
- *     
- *     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
- *     CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
- *     INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- *     MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- *     DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- *     CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *     SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- *     NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- *     LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- *     HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- *     OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
- *     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * ----------------------------------------------------------------------- */
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright 1996-2020 The NASM Authors - All Rights Reserved */
 
 #include "ver.h"
 #include "version.h"
@@ -42,46 +12,38 @@ const char nasm_compile_options[] = ""
 #endif
     ;
 
-/* These are used by some backends. */
-static const char __nasm_comment[] =
-    "The Netwide Assembler " NASM_VER;
+bool reproducible;              /* Reproducible output */
 
-static const char __nasm_signature[] =
-    "NASM " NASM_VER;
-
-/* These are constant so we could pass regression tests  */
-static const char __nasm_comment_const[] ="The Netwide Assembler CONST";
-static const char __nasm_signature_const[] = "NASM CONST";
-
-int nasm_test_run(void)
+/* These are used by some backends. For a reproducible build,
+ * these cannot contain version numbers.
+ */
+static const char * const _nasm_comment[2] =
 {
-	return getenv("NASM_TEST_RUN") ? 1 : 0;
+    "The Netwide Assembler " NASM_VER,
+    "The Netwide Assembler"
+};
+
+static const char * const _nasm_signature[2] = {
+    "NASM " NASM_VER,
+    "NASM"
+};
+
+const char * pure_func nasm_comment(void)
+{
+    return _nasm_comment[reproducible];
 }
 
-const char *nasm_comment(void)
+size_t pure_func nasm_comment_len(void)
 {
-	if (!nasm_test_run())
-		return __nasm_comment;
-	return __nasm_comment_const;
+    return strlen(nasm_comment());
 }
 
-size_t nasm_comment_len(void)
+const char * pure_func nasm_signature(void)
 {
-	if (!nasm_test_run())
-		return strlen(__nasm_comment);
-	return strlen(__nasm_comment_const);
+    return _nasm_signature[reproducible];
 }
 
-const char *nasm_signature(void)
+size_t pure_func nasm_signature_len(void)
 {
-	if (!nasm_test_run())
-		return __nasm_signature;
-	return __nasm_signature_const;
-}
-
-size_t nasm_signature_len(void)
-{
-	if (!nasm_test_run())
-		return strlen(__nasm_signature);
-	return strlen(__nasm_signature_const);
+    return strlen(nasm_signature());
 }

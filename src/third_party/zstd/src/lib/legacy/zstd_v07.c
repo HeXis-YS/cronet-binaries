@@ -24,6 +24,7 @@
 #define HUFv07_STATIC_LINKING_ONLY   /* HUFv07_TABLELOG_ABSOLUTEMAX */
 #define ZSTDv07_STATIC_LINKING_ONLY
 
+#include "../common/compiler.h"
 #include "../common/error_private.h"
 
 
@@ -2786,9 +2787,9 @@ typedef struct {
     U32  cachedLitLength;
     const BYTE* cachedLiterals;
     ZSTDv07_stats_t stats;
-} seqStore_t;
+} SeqStore_t;
 
-void ZSTDv07_seqToCodes(const seqStore_t* seqStorePtr, size_t const nbSeq);
+void ZSTDv07_seqToCodes(const SeqStore_t* seqStorePtr, size_t const nbSeq);
 
 /* custom memory allocation functions */
 static const ZSTDv07_customMem defaultCustomMem = { ZSTDv07_defaultAllocFunction, ZSTDv07_defaultFreeFunction, NULL };
@@ -4006,8 +4007,8 @@ size_t ZSTDv07_decompressContinue(ZSTDv07_DCtx* dctx, void* dst, size_t dstCapac
             }
             dctx->stage = ZSTDds_decodeBlockHeader;
             dctx->expected = ZSTDv07_blockHeaderSize;
-            dctx->previousDstEnd = (char*)dst + rSize;
             if (ZSTDv07_isError(rSize)) return rSize;
+            dctx->previousDstEnd = (char*)dst + rSize;
             if (dctx->fParams.checksumFlag) XXH64_update(&dctx->xxhState, dst, rSize);
             return rSize;
         }

@@ -8,6 +8,7 @@
 #include <stddef.h>
 
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -15,6 +16,7 @@
 #include <vector>
 
 #include "base/check_op.h"
+#include "base/containers/heap_array.h"
 #include "base/functional/callback.h"
 #include "base/notreached.h"
 #include "base/strings/string_util.h"
@@ -46,6 +48,14 @@ inline DWORD to_wchar_size(DWORD byte_size) {
 constexpr REGSAM kWow64AccessMask = KEY_WOW64_32KEY | KEY_WOW64_64KEY;
 
 constexpr DWORD kInvalidIterValue = static_cast<DWORD>(-1);
+
+// Returns true if `key` is a predefined registry handle.
+bool IsPredefinedKey(HKEY key) {
+  // Predefined keys are sign-extended 32-bit values with the high bit set.
+  // It is safe to cast them to intptr_t and check if they are negative.
+  // Valid user-mode handles are positive indices into a handle table.
+  return reinterpret_cast<intptr_t>(key) < 0;
+}
 
 }  // namespace
 
@@ -79,7 +89,7 @@ bool RegKey::Watcher::StartWatching(HKEY key, ChangeCallback callback) {
   DCHECK(callback_.is_null());
 
   if (!watch_event_.is_valid()) {
-    watch_event_.Set(CreateEvent(nullptr, TRUE, FALSE, nullptr));
+    watch_event_.Set(::CreateEvent(nullptr, TRUE, FALSE, nullptr));
   }
 
   if (!watch_event_.is_valid()) {
@@ -153,8 +163,8 @@ LONG RegKey::CreateWithDisposition(HKEY rootkey,
   DCHECK(rootkey && subkey && access && disposition);
   HKEY subhkey = nullptr;
   LONG result =
-      RegCreateKeyEx(rootkey, subkey, 0, nullptr, REG_OPTION_NON_VOLATILE,
-                     access, nullptr, &subhkey, disposition);
+      ::RegCreateKeyEx(rootkey, subkey, 0, nullptr, REG_OPTION_NON_VOLATILE,
+                       access, nullptr, &subhkey, disposition);
   if (result == ERROR_SUCCESS) {
     Close();
     key_ = subhkey;
@@ -180,11 +190,11 @@ LONG RegKey::CreateKey(const wchar_t* name, REGSAM access) {
   // http://msdn.microsoft.com/en-us/library/windows/desktop/aa384129.aspx.
   if ((access & kWow64AccessMask) != wow64access_) {
     NOTREACHED();
-    return ERROR_INVALID_PARAMETER;
   }
   HKEY subkey = nullptr;
-  LONG result = RegCreateKeyEx(key_, name, 0, nullptr, REG_OPTION_NON_VOLATILE,
-                               access, nullptr, &subkey, nullptr);
+  LONG result =
+      ::RegCreateKeyEx(key_, name, 0, nullptr, REG_OPTION_NON_VOLATILE, access,
+                       nullptr, &subkey, nullptr);
   if (result == ERROR_SUCCESS) {
     Close();
     key_ = subkey;
@@ -214,10 +224,9 @@ LONG RegKey::OpenKey(const wchar_t* relative_key_name, REGSAM access) {
   // http://msdn.microsoft.com/en-us/library/windows/desktop/aa384129.aspx.
   if ((access & kWow64AccessMask) != wow64access_) {
     NOTREACHED();
-    return ERROR_INVALID_PARAMETER;
   }
   HKEY subkey = nullptr;
-  LONG result = RegOpenKeyEx(key_, relative_key_name, 0, access, &subkey);
+  LONG result = ::RegOpenKeyEx(key_, relative_key_name, 0, access, &subkey);
 
   // We have to close the current opened key before replacing it with the new
   // one.
@@ -231,7 +240,9 @@ LONG RegKey::OpenKey(const wchar_t* relative_key_name, REGSAM access) {
 
 void RegKey::Close() {
   if (key_) {
-    ::RegCloseKey(key_);
+    if (!IsPredefinedKey(key_)) {
+      ::RegCloseKey(key_);
+    }
     key_ = nullptr;
     wow64access_ = 0;
   }
@@ -253,7 +264,7 @@ HKEY RegKey::Take() {
 }
 
 bool RegKey::HasValue(const wchar_t* name) const {
-  return RegQueryValueEx(key_, name, nullptr, nullptr, nullptr, nullptr) ==
+  return ::RegQueryValueEx(key_, name, nullptr, nullptr, nullptr, nullptr) ==
          ERROR_SUCCESS;
 }
 
@@ -385,8 +396,8 @@ LONG RegKey::ReadValue(const wchar_t* name,
                        void* data,
                        DWORD* dsize,
                        DWORD* dtype) const {
-  LONG result = RegQueryValueEx(key_, name, nullptr, dtype,
-                                reinterpret_cast<LPBYTE>(data), dsize);
+  LONG result = ::RegQueryValueEx(key_, name, nullptr, dtype,
+                                  reinterpret_cast<LPBYTE>(data), dsize);
   return result;
 }
 
@@ -469,7 +480,7 @@ LONG RegKey::Open(HKEY rootkey,
   DCHECK(rootkey && subkey && access);
   HKEY subhkey = nullptr;
 
-  LONG result = RegOpenKeyEx(rootkey, subkey, options, access, &subhkey);
+  LONG result = ::RegOpenKeyEx(rootkey, subkey, options, access, &subhkey);
   if (result == ERROR_SUCCESS) {
     Close();
     key_ = subhkey;
@@ -493,11 +504,11 @@ expected<bool, LONG> RegKey::IsLink() const {
   return unexpected(result);
 }
 
-absl::optional<LONG> RegKey::DeleteIfLink() {
+std::optional<LONG> RegKey::DeleteIfLink() {
   if (auto is_link = IsLink(); !is_link.has_value()) {
     return is_link.error();  // Failed to determine if a link.
   } else if (is_link.value() == false) {
-    return absl::nullopt;  // Not a link.
+    return std::nullopt;  // Not a link.
   }
 
   const NTSTATUS delete_result = ::NtDeleteKey(key_);
@@ -542,16 +553,16 @@ LONG RegKey::RegDelRecurse(HKEY root_key, const wchar_t* name, REGSAM access) {
 
   // Enumerate the keys.
   const DWORD kMaxKeyNameLength = 256;  // Includes string terminator.
-  auto subkey_buffer = std::make_unique<wchar_t[]>(kMaxKeyNameLength);
+  auto subkey_buffer = base::HeapArray<wchar_t>::WithSize(kMaxKeyNameLength);
   while (true) {
     DWORD key_size = kMaxKeyNameLength;
-    if (::RegEnumKeyEx(target_key.key_, 0, &subkey_buffer[0], &key_size,
+    if (::RegEnumKeyEx(target_key.key_, 0, subkey_buffer.data(), &key_size,
                        nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) {
       break;
     }
     CHECK_LT(key_size, kMaxKeyNameLength);
     CHECK_EQ(subkey_buffer[key_size], L'\0');
-    if (RegDelRecurse(target_key.key_, &subkey_buffer[0], access) !=
+    if (RegDelRecurse(target_key.key_, subkey_buffer.data(), access) !=
         ERROR_SUCCESS) {
       break;
     }
@@ -581,7 +592,7 @@ void RegistryValueIterator::Initialize(HKEY root_key,
                                        REGSAM wow64access) {
   DCHECK_EQ(wow64access & ~kWow64AccessMask, static_cast<REGSAM>(0));
   LONG result =
-      RegOpenKeyEx(root_key, folder_key, 0, KEY_READ | wow64access, &key_);
+      ::RegOpenKeyEx(root_key, folder_key, 0, KEY_READ | wow64access, &key_);
   if (result != ERROR_SUCCESS) {
     key_ = nullptr;
   } else {
@@ -602,8 +613,9 @@ void RegistryValueIterator::Initialize(HKEY root_key,
 }
 
 RegistryValueIterator::~RegistryValueIterator() {
-  if (key_)
+  if (key_) {
     ::RegCloseKey(key_);
+  }
 }
 
 DWORD RegistryValueIterator::ValueCount() const {
@@ -611,8 +623,9 @@ DWORD RegistryValueIterator::ValueCount() const {
   LONG result =
       ::RegQueryInfoKey(key_, nullptr, nullptr, nullptr, nullptr, nullptr,
                         nullptr, &count, nullptr, nullptr, nullptr, nullptr);
-  if (result != ERROR_SUCCESS)
+  if (result != ERROR_SUCCESS) {
     return 0;
+  }
 
   return count;
 }
@@ -622,8 +635,9 @@ bool RegistryValueIterator::Valid() const {
 }
 
 void RegistryValueIterator::operator++() {
-  if (index_ != kInvalidIterValue)
+  if (index_ != kInvalidIterValue) {
     --index_;
+  }
   Read();
 }
 
@@ -645,8 +659,9 @@ bool RegistryValueIterator::Read() {
       // ms724872(v=vs.85).aspx).
       // Resize the buffers and retry if their size caused the failure.
       DWORD value_size_in_wchars = to_wchar_size(value_size_);
-      if (value_size_in_wchars + 1 > value_.size())
+      if (value_size_in_wchars + 1 > value_.size()) {
         value_.resize(value_size_in_wchars + 1, '\0');
+      }
       value_size_ = static_cast<DWORD>((value_.size() - 1) * sizeof(wchar_t));
       name_size = name_size == capacity ? MAX_REGISTRY_NAME_SIZE : capacity;
       result = ::RegEnumValue(
@@ -681,8 +696,9 @@ RegistryKeyIterator::RegistryKeyIterator(HKEY root_key,
 }
 
 RegistryKeyIterator::~RegistryKeyIterator() {
-  if (key_)
+  if (key_) {
     ::RegCloseKey(key_);
+  }
 }
 
 DWORD RegistryKeyIterator::SubkeyCount() const {
@@ -690,8 +706,9 @@ DWORD RegistryKeyIterator::SubkeyCount() const {
   LONG result =
       ::RegQueryInfoKey(key_, nullptr, nullptr, nullptr, &count, nullptr,
                         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
-  if (result != ERROR_SUCCESS)
+  if (result != ERROR_SUCCESS) {
     return 0;
+  }
 
   return count;
 }
@@ -701,8 +718,9 @@ bool RegistryKeyIterator::Valid() const {
 }
 
 void RegistryKeyIterator::operator++() {
-  if (index_ != kInvalidIterValue)
+  if (index_ != kInvalidIterValue) {
     --index_;
+  }
   Read();
 }
 
@@ -712,8 +730,9 @@ bool RegistryKeyIterator::Read() {
     FILETIME written;
     LONG r = ::RegEnumKeyEx(key_, index_, name_, &ncount, nullptr, nullptr,
                             nullptr, &written);
-    if (ERROR_SUCCESS == r)
+    if (ERROR_SUCCESS == r) {
       return true;
+    }
   }
 
   name_[0] = '\0';
@@ -725,7 +744,7 @@ void RegistryKeyIterator::Initialize(HKEY root_key,
                                      REGSAM wow64access) {
   DCHECK_EQ(wow64access & ~kWow64AccessMask, static_cast<REGSAM>(0));
   LONG result =
-      RegOpenKeyEx(root_key, folder_key, 0, KEY_READ | wow64access, &key_);
+      ::RegOpenKeyEx(root_key, folder_key, 0, KEY_READ | wow64access, &key_);
   if (result != ERROR_SUCCESS) {
     key_ = nullptr;
   } else {

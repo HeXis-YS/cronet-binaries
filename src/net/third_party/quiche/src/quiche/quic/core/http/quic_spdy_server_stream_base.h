@@ -13,7 +13,7 @@ class QUICHE_EXPORT QuicSpdyServerStreamBase : public QuicSpdyStream {
  public:
   QuicSpdyServerStreamBase(QuicStreamId id, QuicSpdySession* session,
                            StreamType type);
-  QuicSpdyServerStreamBase(PendingStream* pending, QuicSpdySession* session);
+  QuicSpdyServerStreamBase(PendingStream& pending, QuicSpdySession* session);
   QuicSpdyServerStreamBase(const QuicSpdyServerStreamBase&) = delete;
   QuicSpdyServerStreamBase& operator=(const QuicSpdyServerStreamBase&) = delete;
 
@@ -23,7 +23,7 @@ class QUICHE_EXPORT QuicSpdyServerStreamBase : public QuicSpdyStream {
   void StopReading() override;
 
  protected:
-  bool ValidatedReceivedHeaders(const QuicHeaderList& header_list) override;
+  bool ValidateReceivedHeaders(const QuicHeaderList& header_list) override;
 };
 
 }  // namespace quic

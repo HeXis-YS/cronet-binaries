@@ -1,0 +1,54 @@
+From 955d991c7aacb9e246f4073dc283ee59aea4a432 Mon Sep 17 00:00:00 2001
+From: klzgrad <kizdiv@gmail.com>
+Date: Sat, 12 Sep 2026 19:16:13 +0800
+Subject: [PATCH] libc++: Fix noexception build
+
+---
+ .../src/src/support/runtime/exception_pointer_msvc.ipp    | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/third_party/libc++/src/src/support/runtime/exception_pointer_msvc.ipp b/src/third_party/libc++/src/src/support/runtime/exception_pointer_msvc.ipp
+index 4b877deee..ecac25dc6 100644
+--- a/src/third_party/libc++/src/src/support/runtime/exception_pointer_msvc.ipp
++++ b/src/third_party/libc++/src/src/support/runtime/exception_pointer_msvc.ipp
+@@ -258,7 +258,9 @@ void __assign_cpp_exception_ptr_from_record(void*& __dest, const EHExceptionReco
+     return;
+   }
+ 
++#if _LIBCPP_HAS_EXCEPTIONS
+   try {
++#endif // _LIBCPP_HAS_EXCEPTIONS
+     __copy_exception_object(static_cast<__exception_ptr_normal*>(__rx_raw) + 1,
+                             __record.params.pExceptionObject,
+                             __type
+@@ -272,6 +274,7 @@ void __assign_cpp_exception_ptr_from_record(void*& __dest, const EHExceptionReco
+     reinterpret_cast<EHExceptionRecord&>(const_cast<__exception_ptr_normal*>(__rx)->__record_).params.pExceptionObject =
+         static_cast<__exception_ptr_normal*>(__rx_raw) + 1;
+     __dest = const_cast<__exception_ptr_normal*>(__rx);
++#if _LIBCPP_HAS_EXCEPTIONS
+   } catch (...) { // Copying the exception object threw an exception.
+     // Exception thrown by the original exception's copy ctor.
+     const auto* __inner_record_ptr = __get_current_exception();
+@@ -341,6 +344,7 @@ void __assign_cpp_exception_ptr_from_record(void*& __dest, const EHExceptionReco
+         static_cast<__exception_ptr_normal*>(__rx_raw) + 1;
+     __dest = const_cast<__exception_ptr_normal*>(__rx);
+   }
++#endif // _LIBCPP_HAS_EXCEPTIONS
+ }
+ 
+ } // namespace
+@@ -404,7 +408,11 @@ exception_ptr current_exception() noexcept {
+ 
+ [[noreturn]] void rethrow_exception(exception_ptr __p) {
+   if (!__p)
++#if _LIBCPP_HAS_EXCEPTIONS
+     throw bad_exception();
++#else
++    terminate();
++#endif // _LIBCPP_HAS_EXCEPTIONS
+ 
+   auto* __rep = static_cast<__exception_ptr_storage*>(__p.__ptr_);
+   auto __record_copy = __rep->__record_;
+-- 
+2.53.0
+

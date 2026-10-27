@@ -4,7 +4,12 @@
 
 #include "quiche/quic/core/quic_connection_id_manager.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "quiche/quic/core/quic_clock.h"
 #include "quiche/quic/core/quic_connection_id.h"
@@ -230,6 +235,7 @@ bool QuicPeerIssuedConnectionIdManager::IsConnectionIdActive(
 std::vector<uint64_t> QuicPeerIssuedConnectionIdManager::
     ConsumeToBeRetiredConnectionIdSequenceNumbers() {
   std::vector<uint64_t> result;
+  result.reserve(to_be_retired_connection_id_data_.size());
   for (auto const& cid_data : to_be_retired_connection_id_data_) {
     result.push_back(cid_data.sequence_number);
   }
@@ -298,9 +304,9 @@ QuicSelfIssuedConnectionIdManager::~QuicSelfIssuedConnectionIdManager() {
   retire_connection_id_alarm_->Cancel();
 }
 
-absl::optional<QuicNewConnectionIdFrame>
+std::optional<QuicNewConnectionIdFrame>
 QuicSelfIssuedConnectionIdManager::MaybeIssueNewConnectionId() {
-  absl::optional<QuicConnectionId> new_cid =
+  std::optional<QuicConnectionId> new_cid =
       connection_id_generator_.GenerateNextConnectionId(last_connection_id_);
   if (!new_cid.has_value()) {
     return {};
@@ -320,9 +326,9 @@ QuicSelfIssuedConnectionIdManager::MaybeIssueNewConnectionId() {
   return frame;
 }
 
-absl::optional<QuicNewConnectionIdFrame> QuicSelfIssuedConnectionIdManager::
+std::optional<QuicNewConnectionIdFrame> QuicSelfIssuedConnectionIdManager::
     MaybeIssueNewConnectionIdForPreferredAddress() {
-  absl::optional<QuicNewConnectionIdFrame> frame = MaybeIssueNewConnectionId();
+  std::optional<QuicNewConnectionIdFrame> frame = MaybeIssueNewConnectionId();
   QUICHE_DCHECK(!frame.has_value() || (frame->sequence_number == 1u));
   return frame;
 }
@@ -368,12 +374,18 @@ QuicErrorCode QuicSelfIssuedConnectionIdManager::OnRetireConnectionIdFrame(
   active_connection_ids_.erase(it);
   MaybeSendNewConnectionIds();
 
+  if (active_connection_ids_.empty()) {
+    *error_detail = "The last active connection ID should not be retired.";
+    return IETF_QUIC_PROTOCOL_VIOLATION;
+  }
   return QUIC_NO_ERROR;
 }
 
 std::vector<QuicConnectionId>
 QuicSelfIssuedConnectionIdManager::GetUnretiredConnectionIds() const {
   std::vector<QuicConnectionId> unretired_ids;
+  unretired_ids.reserve(to_be_retired_connection_ids_.size() +
+                        active_connection_ids_.size());
   for (const auto& cid_pair : to_be_retired_connection_ids_) {
     unretired_ids.push_back(cid_pair.first);
   }
@@ -413,8 +425,7 @@ void QuicSelfIssuedConnectionIdManager::RetireConnectionId() {
 
 void QuicSelfIssuedConnectionIdManager::MaybeSendNewConnectionIds() {
   while (active_connection_ids_.size() < active_connection_id_limit_) {
-    absl::optional<QuicNewConnectionIdFrame> frame =
-        MaybeIssueNewConnectionId();
+    std::optional<QuicNewConnectionIdFrame> frame = MaybeIssueNewConnectionId();
     if (!frame.has_value()) {
       break;
     }
@@ -434,7 +445,7 @@ bool QuicSelfIssuedConnectionIdManager::HasConnectionIdToConsume() const {
   return false;
 }
 
-absl::optional<QuicConnectionId>
+std::optional<QuicConnectionId>
 QuicSelfIssuedConnectionIdManager::ConsumeOneConnectionId() {
   for (const auto& active_cid_data : active_connection_ids_) {
     if (active_cid_data.second >
@@ -447,7 +458,7 @@ QuicSelfIssuedConnectionIdManager::ConsumeOneConnectionId() {
       return active_cid_data.first;
     }
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 bool QuicSelfIssuedConnectionIdManager::IsConnectionIdInUse(

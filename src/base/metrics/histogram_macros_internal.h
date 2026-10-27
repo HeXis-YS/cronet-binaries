@@ -11,48 +11,40 @@
 #include <limits>
 #include <memory>
 #include <type_traits>
+#include <utility>
 
 #include "base/dcheck_is_on.h"
 #include "base/metrics/histogram.h"
+#include "base/metrics/histogram_base.h"
 #include "base/metrics/sparse_histogram.h"
+#include "base/no_destructor.h"
 #include "base/time/time.h"
 
 // This is for macros and helpers internal to base/metrics. They should not be
 // used outside of this directory. For writing to UMA histograms, see
 // histogram_macros.h.
 
-namespace base {
-namespace internal {
+namespace base::internal {
 
-// Helper traits for deducing the boundary value for enums.
-template <typename Enum, typename SFINAE = void>
-struct EnumSizeTraits {
-  static constexpr Enum Count() {
-    static_assert(
-        sizeof(Enum) == 0,
-        "enumerator must define kMaxValue enumerator to use this macro!");
-    return Enum();
-  }
-};
-
-// Since the UMA histogram macros expect a value one larger than the max defined
-// enumerator value, add one.
+// Helper trait for deducing the boundary value for enums.
 template <typename Enum>
-struct EnumSizeTraits<
-    Enum,
-    std::enable_if_t<std::is_enum<decltype(Enum::kMaxValue)>::value>> {
-  static constexpr Enum Count() {
-    // If you're getting
-    //   note: integer value X is outside the valid range of values [0, X] for
-    //         this enumeration type
-    // Then you need to give your enum a fixed underlying type.
-    return static_cast<Enum>(
-        static_cast<std::underlying_type_t<Enum>>(Enum::kMaxValue) + 1);
+struct EnumSizeTraits {
+  static constexpr uintmax_t Count() {
+    if constexpr (base::metrics_internal::HasKMaxValue<Enum>) {
+      // Since the UMA histogram macros expect a value one larger than the max
+      // defined enumerator value, add one.
+      return static_cast<uintmax_t>(std::to_underlying(Enum::kMaxValue)) + 1;
+    } else if constexpr (std::is_enum_v<Enum>) {
+      static_assert(
+          sizeof(Enum) == 0,
+          "`Enum` must define a `kMaxValue` enumerator to use this macro");
+    }
+    // Return a placeholder size here to avoid cascading errors in the caller.
+    return 1;
   }
 };
 
-}  // namespace internal
-}  // namespace base
+}  // namespace base::internal
 
 // TODO(rkaplow): Improve commenting of these methods.
 //------------------------------------------------------------------------------
@@ -66,9 +58,9 @@ struct EnumSizeTraits<
 // process.
 
 // In some cases (integration into 3rd party code), it's useful to separate the
-// definition of |atomic_histogram_pointer| from its use. To achieve this we
-// define HISTOGRAM_POINTER_USE, which uses an |atomic_histogram_pointer|, and
-// STATIC_HISTOGRAM_POINTER_BLOCK, which defines an |atomic_histogram_pointer|
+// definition of `atomic_histogram_pointer` from its use. To achieve this we
+// define HISTOGRAM_POINTER_USE, which uses an `atomic_histogram_pointer`, and
+// STATIC_HISTOGRAM_POINTER_BLOCK, which defines an `atomic_histogram_pointer`
 // and forwards to HISTOGRAM_POINTER_USE.
 #define HISTOGRAM_POINTER_USE(                                           \
     atomic_histogram_pointer, constant_histogram_name,                   \
@@ -80,7 +72,7 @@ struct EnumSizeTraits<
     if (!histogram_pointer) {                                            \
       /*                                                                 \
        * This is the slow path, which will construct OR find the         \
-       * matching histogram. |histogram_factory_get_invocation| includes \
+       * matching histogram. `histogram_factory_get_invocation` includes \
        * locks on a global histogram name map and is completely thread   \
        * safe.                                                           \
        */                                                                \
@@ -101,7 +93,7 @@ struct EnumSizeTraits<
   } while (0)
 
 // This is a helper macro used by other macros and shouldn't be used directly.
-// Defines the static |atomic_histogram_pointer| and forwards to
+// Defines the static `atomic_histogram_pointer` and forwards to
 // HISTOGRAM_POINTER_USE.
 #define STATIC_HISTOGRAM_POINTER_BLOCK(constant_histogram_name,               \
                                        histogram_add_method_invocation,       \
@@ -118,11 +110,11 @@ struct EnumSizeTraits<
   } while (0)
 
 // This is a helper macro used by other macros and shouldn't be used directly.
-#define INTERNAL_HISTOGRAM_CUSTOM_COUNTS_WITH_FLAG(name, sample, min, max,     \
-                                                   bucket_count, flag)         \
-    STATIC_HISTOGRAM_POINTER_BLOCK(                                            \
-        name, Add(sample),                                                     \
-        base::Histogram::FactoryGet(name, min, max, bucket_count, flag))
+#define INTERNAL_HISTOGRAM_CUSTOM_COUNTS_WITH_FLAG(name, sample, min, max, \
+                                                   bucket_count, flag)     \
+  STATIC_HISTOGRAM_POINTER_BLOCK(                                          \
+      name, Add(sample),                                                   \
+      base::Histogram::FactoryGet(name, min, max, bucket_count, flag))
 
 // This is a helper macro used by other macros and shouldn't be used directly.
 // The bucketing scheme is linear with a bucket size of 1. For N items,
@@ -141,9 +133,9 @@ struct EnumSizeTraits<
 #define INTERNAL_HISTOGRAM_EXACT_LINEAR_WITH_FLAG(name, sample, boundary,  \
                                                   flag)                    \
   do {                                                                     \
-    static_assert(!std::is_enum<std::decay_t<decltype(sample)>>::value,    \
+    static_assert(!std::is_enum_v<std::decay_t<decltype(sample)>>,         \
                   "|sample| should not be an enum type!");                 \
-    static_assert(!std::is_enum<std::decay_t<decltype(boundary)>>::value,  \
+    static_assert(!std::is_enum_v<std::decay_t<decltype(boundary)>>,       \
                   "|boundary| should not be an enum type!");               \
     STATIC_HISTOGRAM_POINTER_BLOCK(                                        \
         name, Add(sample),                                                 \
@@ -157,9 +149,9 @@ struct EnumSizeTraits<
 #define INTERNAL_HISTOGRAM_SCALED_EXACT_LINEAR_WITH_FLAG(                      \
     name, sample, count, boundary, scale, flag)                                \
   do {                                                                         \
-    static_assert(!std::is_enum<std::decay_t<decltype(sample)>>::value,        \
+    static_assert(!std::is_enum_v<std::decay_t<decltype(sample)>>,             \
                   "|sample| should not be an enum type!");                     \
-    static_assert(!std::is_enum<std::decay_t<decltype(boundary)>>::value,      \
+    static_assert(!std::is_enum_v<std::decay_t<decltype(boundary)>>,           \
                   "|boundary| should not be an enum type!");                   \
     class ScaledLinearHistogramInstance : public base::ScaledLinearHistogram { \
      public:                                                                   \
@@ -171,74 +163,106 @@ struct EnumSizeTraits<
                                   scale,                                       \
                                   flag) {}                                     \
     };                                                                         \
-    static base::LazyInstance<ScaledLinearHistogramInstance>::Leaky            \
-        scaled_leaky;                                                          \
-    scaled_leaky.Get().AddScaledCount(sample, count);                          \
+    static base::NoDestructor<ScaledLinearHistogramInstance> scaled_leaky;     \
+    scaled_leaky->AddScaledCount(sample, count);                               \
   } while (0)
 
 // Helper for 'overloading' UMA_HISTOGRAM_ENUMERATION with a variable number of
 // arguments.
 #define INTERNAL_UMA_HISTOGRAM_ENUMERATION_GET_MACRO(_1, _2, NAME, ...) NAME
 
-#define INTERNAL_UMA_HISTOGRAM_ENUMERATION_DEDUCE_BOUNDARY(name, sample,       \
-                                                           flags)              \
-  INTERNAL_HISTOGRAM_ENUMERATION_WITH_FLAG(                                    \
-      name, sample,                                                            \
-      base::internal::EnumSizeTraits<std::decay_t<decltype(sample)>>::Count(), \
-      flags)
+#define INTERNAL_UMA_HISTOGRAM_ENUMERATION_DEDUCE_BOUNDARY(name, sample,   \
+                                                           flags)          \
+  do {                                                                     \
+    using InternalHistogramDecayedSample = std::decay_t<decltype(sample)>; \
+    static_assert(std::is_enum_v<InternalHistogramDecayedSample>,          \
+                  "`sample` is not an enum.");                             \
+    INTERNAL_HISTOGRAM_ENUMERATION_WITH_FLAG(                              \
+        name, sample,                                                      \
+        base::internal::EnumSizeTraits<                                    \
+            InternalHistogramDecayedSample>::Count(),                      \
+        flags);                                                            \
+  } while (0)
 
-// Note: The value in |sample| must be strictly less than |enum_size|.
+// Note: The value in `sample` must be strictly less than `enum_size`.
+//
+// TODO(dcheng): The assertions below only require that `sample` and `enum_size`
+// are consistent; integral arguments are still accepted for legacy callers.
+// Both should eventually be required to be enums.
 #define INTERNAL_UMA_HISTOGRAM_ENUMERATION_SPECIFY_BOUNDARY(name, sample,     \
                                                             enum_size, flags) \
-  INTERNAL_HISTOGRAM_ENUMERATION_WITH_FLAG(name, sample, enum_size, flags)
+  do {                                                                        \
+    using InternalHistogramDecayedSample = std::decay_t<decltype(sample)>;    \
+    using InternalHistogramDecayedBoundary =                                  \
+        std::decay_t<decltype(enum_size)>;                                    \
+    static_assert(                                                            \
+        !base::metrics_internal::HasKMaxValue<                                \
+            InternalHistogramDecayedSample> &&                                \
+            !base::metrics_internal::HasKMaxValue<                            \
+                InternalHistogramDecayedBoundary>,                            \
+        "Do not explicitly specify the boundary value for an enum that "      \
+        "defines `kMaxValue`; omit the boundary argument so it is deduced "   \
+        "from `kMaxValue`.");                                                 \
+    static_assert(!std::is_enum_v<InternalHistogramDecayedBoundary> ||        \
+                      std::is_enum_v<InternalHistogramDecayedSample>,         \
+                  "`boundary` is enum, but `sample` is not.");                \
+    static_assert(!std::is_enum_v<InternalHistogramDecayedSample> ||          \
+                      !std::is_enum_v<InternalHistogramDecayedBoundary> ||    \
+                      std::is_same_v<InternalHistogramDecayedSample,          \
+                                     InternalHistogramDecayedBoundary>,       \
+                  "`sample` and `boundary` shouldn't be of different enums"); \
+    INTERNAL_HISTOGRAM_ENUMERATION_WITH_FLAG(name, sample, enum_size, flags); \
+  } while (0)
 
-// Similar to the previous macro but intended for enumerations. This delegates
-// the work to the previous macro, but supports scoped enumerations as well by
-// forcing an explicit cast to the HistogramBase::Sample integral type.
+// Similar to `INTERNAL_HISTOGRAM_EXACT_LINEAR_WITH_FLAG`, but intended for
+// enumerations. This delegates to `INTERNAL_HISTOGRAM_EXACT_LINEAR_WITH_FLAG`,
+// but supports scoped enumerations as well by forcing an explicit cast to the
+// `HistogramBase::Sample32` integral type.
 //
-// Note the range checks verify two separate issues:
-// - that the declared enum size isn't out of range of HistogramBase::Sample
-// - that the declared enum size is > 0
-//
-// TODO(dcheng): This should assert that the passed in types are actually enum
-// types.
+// Note that the declared enum size is checked for two separate issues:
+// - that it is > 0, i.e. the histogram has at least one valid bucket
+// - that it isn't out of range of `HistogramBase::Sample32`
 #define INTERNAL_HISTOGRAM_ENUMERATION_WITH_FLAG(name, sample, boundary, flag) \
   do {                                                                         \
-    using decayed_sample = std::decay<decltype(sample)>::type;                 \
-    using decayed_boundary = std::decay<decltype(boundary)>::type;             \
-    static_assert(!std::is_enum<decayed_boundary>::value ||                    \
-                      std::is_enum<decayed_sample>::value,                     \
-                  "Unexpected: |boundary| is enum, but |sample| is not.");     \
-    static_assert(!std::is_enum<decayed_sample>::value ||                      \
-                      !std::is_enum<decayed_boundary>::value ||                \
-                      std::is_same<decayed_sample, decayed_boundary>::value,   \
-                  "|sample| and |boundary| shouldn't be of different enums");  \
+    constexpr uintmax_t kInternalHistogramBoundary =                           \
+        static_cast<uintmax_t>(boundary);                                      \
     static_assert(                                                             \
-        static_cast<uintmax_t>(boundary) <                                     \
-            static_cast<uintmax_t>(                                            \
-                std::numeric_limits<base::HistogramBase::Sample>::max()),      \
-        "|boundary| is out of range of HistogramBase::Sample");                \
+        kInternalHistogramBoundary > 0,                                        \
+        "`boundary` must be greater than 0: an enumerated histogram "          \
+        "needs at least one valid bucket");                                    \
+    static_assert(                                                             \
+        kInternalHistogramBoundary <                                           \
+            std::numeric_limits<base::HistogramBase::Sample32>::max(),         \
+        "`boundary` is out of range of HistogramBase::Sample32");              \
     INTERNAL_HISTOGRAM_EXACT_LINEAR_WITH_FLAG(                                 \
-        name, static_cast<base::HistogramBase::Sample>(sample),                \
-        static_cast<base::HistogramBase::Sample>(boundary), flag);             \
+        name, static_cast<base::HistogramBase::Sample32>(sample),              \
+        static_cast<base::HistogramBase::Sample32>(                            \
+            kInternalHistogramBoundary),                                       \
+        flag);                                                                 \
   } while (0)
 
 #define INTERNAL_HISTOGRAM_SCALED_ENUMERATION_WITH_FLAG(name, sample, count, \
                                                         scale, flag)         \
   do {                                                                       \
-    using decayed_sample = std::decay<decltype(sample)>::type;               \
-    static_assert(std::is_enum<decayed_sample>::value,                       \
-                  "Unexpected: |sample| is not at enum.");                   \
-    constexpr auto boundary = base::internal::EnumSizeTraits<                \
-        std::decay_t<decltype(sample)>>::Count();                            \
+    using InternalHistogramDecayedSample = std::decay_t<decltype(sample)>;   \
+    static_assert(std::is_enum_v<InternalHistogramDecayedSample>,            \
+                  "`sample` is not an enum.");                               \
+    constexpr auto kInternalHistogramBoundary =                              \
+        base::internal::EnumSizeTraits<                                      \
+            InternalHistogramDecayedSample>::Count();                        \
     static_assert(                                                           \
-        static_cast<uintmax_t>(boundary) <                                   \
-            static_cast<uintmax_t>(                                          \
-                std::numeric_limits<base::HistogramBase::Sample>::max()),    \
-        "|boundary| is out of range of HistogramBase::Sample");              \
+        kInternalHistogramBoundary > 0,                                      \
+        "`boundary` must be greater than 0: an enumerated histogram "        \
+        "needs at least one valid bucket");                                  \
+    static_assert(                                                           \
+        kInternalHistogramBoundary <                                         \
+            std::numeric_limits<base::HistogramBase::Sample32>::max(),       \
+        "`boundary` is out of range of HistogramBase::Sample32");            \
     INTERNAL_HISTOGRAM_SCALED_EXACT_LINEAR_WITH_FLAG(                        \
-        name, static_cast<base::HistogramBase::Sample>(sample), count,       \
-        static_cast<base::HistogramBase::Sample>(boundary), scale, flag);    \
+        name, static_cast<base::HistogramBase::Sample32>(sample), count,     \
+        static_cast<base::HistogramBase::Sample32>(                          \
+            kInternalHistogramBoundary),                                     \
+        scale, flag);                                                        \
   } while (0)
 
 // This is a helper macro used by other macros and shouldn't be used directly.
@@ -247,28 +271,49 @@ struct EnumSizeTraits<
   INTERNAL_SCOPED_UMA_HISTOGRAM_TIMER_UNIQUE(name, timing, key)
 
 // This is a helper macro used by other macros and shouldn't be used directly.
-#define INTERNAL_SCOPED_UMA_HISTOGRAM_TIMER_UNIQUE(name, timing, key)      \
-  class ScopedHistogramTimer##key {                                        \
-   public:                                                                 \
-    ScopedHistogramTimer##key() : constructed_(base::TimeTicks::Now()) {}  \
-    ~ScopedHistogramTimer##key() {                                         \
-      base::TimeDelta elapsed = base::TimeTicks::Now() - constructed_;     \
-      switch (timing) {                                                    \
-        case ScopedHistogramTiming::kMicrosecondTimes:                     \
-          UMA_HISTOGRAM_CUSTOM_MICROSECONDS_TIMES(                         \
-              name, elapsed, base::Microseconds(1), base::Seconds(1), 50); \
-          break;                                                           \
-        case ScopedHistogramTiming::kMediumTimes:                          \
-          UMA_HISTOGRAM_TIMES(name, elapsed);                              \
-          break;                                                           \
-        case ScopedHistogramTiming::kLongTimes:                            \
-          UMA_HISTOGRAM_LONG_TIMES_100(name, elapsed);                     \
-          break;                                                           \
-      }                                                                    \
-    }                                                                      \
-                                                                           \
-   private:                                                                \
-    base::TimeTicks constructed_;                                          \
-  } scoped_histogram_timer_##key
+#define INTERNAL_SCOPED_UMA_HISTOGRAM_TIMER_UNIQUE(name, timing, key)  \
+  INTERNAL_SCOPED_UMA_HISTOGRAM_TIMER_UNIQUE_DEFINE(name, timing, key) \
+  scoped_histogram_timer_##key
+
+// This is a helper macro used by other macros and shouldn't be used directly.
+#define INTERNAL_SCOPED_UMA_HISTOGRAM_TIMER_UNIQUE_DEFINE(name, timing, key) \
+  class ScopedHistogramTimer##key {                                          \
+   public:                                                                   \
+    ScopedHistogramTimer##key() : constructed_(base::TimeTicks::Now()) {}    \
+    ~ScopedHistogramTimer##key() {                                           \
+      base::TimeDelta elapsed = base::TimeTicks::Now() - constructed_;       \
+      switch (timing) {                                                      \
+        case ScopedHistogramTiming::kMicrosecondTimes:                       \
+          UMA_HISTOGRAM_CUSTOM_MICROSECONDS_TIMES(                           \
+              name, elapsed, base::Microseconds(1), base::Seconds(1), 50);   \
+          break;                                                             \
+        case ScopedHistogramTiming::kMediumTimes:                            \
+          UMA_HISTOGRAM_TIMES(name, elapsed);                                \
+          break;                                                             \
+        case ScopedHistogramTiming::kLongTimes:                              \
+          UMA_HISTOGRAM_LONG_TIMES_100(name, elapsed);                       \
+          break;                                                             \
+      }                                                                      \
+    }                                                                        \
+                                                                             \
+   private:                                                                  \
+    base::TimeTicks constructed_;                                            \
+  }
+
+// This is a helper macro used by other macros and shouldn't be used directly.
+// This is necessary to expand __COUNTER__ to an actual value.
+#define INTERNAL_SCOPED_UMA_HISTOGRAM_TIMER_SUBSAMPLED_EXPANDER(             \
+    name, should_sample, timing, key)                                        \
+  INTERNAL_SCOPED_UMA_HISTOGRAM_TIMER_SUBSAMPLED_UNIQUE(name, should_sample, \
+                                                        timing, key)
+
+// This is a helper macro used by other macros and shouldn't be used directly.
+#define INTERNAL_SCOPED_UMA_HISTOGRAM_TIMER_SUBSAMPLED_UNIQUE(           \
+    name, should_sample, timing, key)                                    \
+  INTERNAL_SCOPED_UMA_HISTOGRAM_TIMER_UNIQUE_DEFINE(name, timing, key);  \
+  std::optional<ScopedHistogramTimer##key> scoped_histogram_timer_##key; \
+  if (should_sample) {                                                   \
+    scoped_histogram_timer_##key.emplace();                              \
+  }
 
 #endif  // BASE_METRICS_HISTOGRAM_MACROS_INTERNAL_H_

@@ -16,7 +16,8 @@
 // for the instructions on writing suppressions.
 char kTSanDefaultSuppressions[] =
     // False positives in libdbus.so, libdconfsettings.so, libflashplayer.so,
-    // libgio.so, libglib.so, libgobject.so, and libfontconfig.so.1.
+    // libgio.so, libglib.so, libgobject.so, libfontconfig.so.1 and
+    // swrast_dri.so.
     // Since we don't instrument them, we cannot reason about the
     // synchronization in them.
     "race:libdbus*.so\n"
@@ -26,6 +27,7 @@ char kTSanDefaultSuppressions[] =
     "race:libglib*.so\n"
     "race:libgobject*.so\n"
     "race:libfontconfig.so.1\n"
+    "race:swrast_dri.so\n"
 
     // Intentional race in ToolsSanityTest.DataRace in base_unittests.
     "race:base/tools_sanity_unittest.cc\n"
@@ -39,9 +41,6 @@ char kTSanDefaultSuppressions[] =
 
     // http://crbug.com/476529
     "deadlock:cc::VideoLayerImpl::WillDraw\n"
-
-    // http://crbug.com/328826
-    "race:skia::(anonymous namespace)::g_pixel_geometry\n"
 
     // http://crbug.com/328868
     "race:PR_Lock\n"
@@ -85,10 +84,37 @@ char kTSanDefaultSuppressions[] =
     "race:perfetto::DataSource*::static_state_\n"
     "race:perfetto::*::ResetForTesting\n"
 
+    // https://crbug.com/327473683
+    "race:SetCoveredByBucketing\n"
+
     // In V8 each global safepoint might lock isolate mutexes in a different
     // order. This is allowed in this context as it is always guarded by a
     // single global mutex.
     "deadlock:GlobalSafepoint::EnterGlobalSafepointScope\n"
+
+    // Logging crash keys is inherently unsafe. We suppress this rather than fix
+    // it because OutputCrashKeysToStream is only enabled in non-official builds
+    // and the race is therefore not present in released builds.
+    "race:crash_reporter::*::OutputCrashKeysToStream\n"
+
+    // Tracing within fuzztest instrumentation, likely intentionally not
+    // synchronized for performance.
+    "race:SetIsTracing\n"
+
+    // crbug.com/462477486
+    // False positive in SwiftShader/Vulkan due to different virtual memory
+    // addresses for the same physical memory address used for cross-process
+    // mutexes.
+    "mutex:vk::OpaqueFdExternalSemaphore::\n"
+
+    // https://anglebug.com/552070343
+    // ANGLE points the Vulkan loader at the SwiftShader (or mock) ICD with
+    // setenv() on the GPU thread during eglInitialize(). With the GPU
+    // in-process, as on the TSan bots, that races with environ readers on
+    // other browser threads, e.g. base::LaunchProcess() on the process
+    // launcher thread. Test-only configuration on desktop; the fix is for
+    // ANGLE to select the ICD without modifying the environment.
+    "race:angle::vk::ScopedVkLoaderEnvironment::ScopedVkLoaderEnvironment\n"
 
     // End of suppressions.
     ;  // Please keep this semicolon.

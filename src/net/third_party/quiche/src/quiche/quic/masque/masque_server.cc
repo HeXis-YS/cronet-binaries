@@ -4,18 +4,23 @@
 
 #include "quiche/quic/masque/masque_server.h"
 
+#include <memory>
+
 #include "quiche/quic/core/quic_default_connection_helper.h"
+#include "quiche/quic/core/quic_dispatcher.h"
 #include "quiche/quic/masque/masque_dispatcher.h"
+#include "quiche/quic/masque/masque_server_backend.h"
 #include "quiche/quic/masque/masque_utils.h"
 #include "quiche/quic/platform/api/quic_default_proof_providers.h"
+#include "quiche/quic/tools/quic_server.h"
 #include "quiche/quic/tools/quic_simple_crypto_server_stream_helper.h"
 
 namespace quic {
 
 MasqueServer::MasqueServer(MasqueMode masque_mode,
                            MasqueServerBackend* masque_server_backend)
-    : QuicServer(CreateDefaultProofSource(), masque_server_backend,
-                 MasqueSupportedVersions()),
+    : QuicServer(CreateDefaultProofSource(), /*proof_verifier=*/nullptr,
+                 masque_server_backend, MasqueSupportedVersions()),
       masque_mode_(masque_mode),
       masque_server_backend_(masque_server_backend) {}
 

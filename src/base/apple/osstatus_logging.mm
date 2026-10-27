@@ -8,6 +8,9 @@
 
 #include <iomanip>
 
+#include "base/immediate_crash.h"
+#include "base/scoped_clear_last_error.h"
+
 namespace logging {
 
 std::string DescriptionFromOSStatus(OSStatus err) {
@@ -24,8 +27,21 @@ OSStatusLogMessage::OSStatusLogMessage(const char* file_path,
     : LogMessage(file_path, line, severity), status_(status) {}
 
 OSStatusLogMessage::~OSStatusLogMessage() {
+  AppendError();
+}
+
+void OSStatusLogMessage::AppendError() {
+  // Don't let actions from this method affect the system error after returning.
+  base::ScopedClearLastError scoped_clear_last_error;
+
   stream() << ": " << DescriptionFromOSStatus(status_) << " (" << status_
            << ")";
+}
+
+OSStatusLogMessageFatal::~OSStatusLogMessageFatal() {
+  AppendError();
+  Flush();
+  base::ImmediateCrash();
 }
 
 }  // namespace logging

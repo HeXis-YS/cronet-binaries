@@ -23,17 +23,26 @@ source_set("dns") {
     "address_info.cc",
     "address_info.h",
     "address_sorter.h",
+    "connect_predictor.cc",
+    "connect_predictor.h",
+    "connect_predictor_lru_cache.cc",
+    "connect_predictor_lru_cache.h",
     "context_host_resolver.cc",
     "context_host_resolver.h",
     "dns_alias_utility.cc",
     "dns_alias_utility.h",
+    "dns_attempt.cc",
+    "dns_attempt.h",
     "dns_config.cc",
     "dns_config_service.cc",
     "dns_config_service.h",
     "dns_hosts.cc",
     "dns_hosts.h",
+    "dns_http_attempt.cc",
+    "dns_http_attempt.h",
     "dns_names_util.cc",
     "dns_names_util.h",
+    "dns_platform_attempt_factory.h",
     "dns_query.cc",
     "dns_query.h",
     "dns_reloader.cc",
@@ -45,18 +54,34 @@ source_set("dns") {
     "dns_server_iterator.h",
     "dns_session.cc",
     "dns_session.h",
+    "dns_task_results_manager.cc",
+    "dns_task_results_manager.h",
+    "dns_tcp_attempt.cc",
+    "dns_tcp_attempt.h",
     "dns_transaction.cc",
+    "dns_udp_attempt.cc",
+    "dns_udp_attempt.h",
     "dns_udp_tracker.cc",
     "dns_udp_tracker.h",
     "dns_util.cc",
     "dns_util.h",
+    "filtering_details_url_generator.cc",
+    "filtering_details_url_generator.h",
     "host_cache.cc",
     "host_resolver.cc",
     "host_resolver_cache.cc",
     "host_resolver_cache.h",
+    "host_resolver_dns_task.cc",
+    "host_resolver_dns_task.h",
     "host_resolver_internal_result.cc",
     "host_resolver_internal_result.h",
     "host_resolver_manager.cc",
+    "host_resolver_manager_job.cc",
+    "host_resolver_manager_job.h",
+    "host_resolver_manager_request_impl.cc",
+    "host_resolver_manager_request_impl.h",
+    "host_resolver_manager_service_endpoint_request_impl.cc",
+    "host_resolver_manager_service_endpoint_request_impl.h",
     "host_resolver_mdns_listener_impl.cc",
     "host_resolver_mdns_listener_impl.h",
     "host_resolver_mdns_task.cc",
@@ -82,6 +107,8 @@ source_set("dns") {
     "resolve_context.h",
     "serial_worker.cc",
     "serial_worker.h",
+    "stale_host_resolver.cc",
+    "stale_host_resolver.h",
     "system_dns_config_change_notifier.cc",
     "system_dns_config_change_notifier.h",
     "test_dns_config_service.cc",
@@ -109,6 +136,23 @@ source_set("dns") {
     sources += [
       "dns_config_service_fuchsia.cc",
       "dns_config_service_fuchsia.h",
+    ]
+  }
+
+  if (is_android) {
+    sources += [
+      "dns_platform_android_attempt.cc",
+      "dns_platform_android_attempt.h",
+      "dns_platform_attempt_factory_android.cc",
+      "dns_platform_attempt_factory_android.h",
+    ]
+  } else {
+    sources += [
+      # These are specific here, instead of the main sources, to make sure they
+      # cannot be references while compiling for Android. Doing so is always a
+      # mistake.
+      "dns_platform_attempt_factory_not_implemented.cc",
+      "dns_platform_attempt_factory_not_implemented.h",
     ]
   }
 
@@ -159,6 +203,10 @@ source_set("dns") {
     ":mdns_client",
     "//net:net_public_deps",
   ]
+
+  if (enable_mdns) {
+    public_deps += [ "//third_party/re2" ]
+  }
 
   allow_circular_includes_from = [
     ":dns_client",

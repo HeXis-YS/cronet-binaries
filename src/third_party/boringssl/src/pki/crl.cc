@@ -1,24 +1,35 @@
 // Copyright 2019 The Chromium Authors
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include <algorithm>
 #include <iterator>
 
 #include <openssl/base.h>
+#include <openssl/bytestring.h>
+#include <openssl/span.h>
 
 #include "cert_errors.h"
 #include "crl.h"
+#include "input.h"
+#include "parse_values.h"
+#include "parser.h"
 #include "revocation_util.h"
 #include "signature_algorithm.h"
 #include "verify_name_match.h"
 #include "verify_signed_data.h"
-#include "input.h"
-#include "parse_values.h"
-#include "parser.h"
-#include "tag.h"
 
-namespace bssl {
+BSSL_NAMESPACE_BEGIN
 
 namespace {
 
@@ -26,12 +37,12 @@ namespace {
 // In dotted notation: 2.5.29.28
 inline constexpr uint8_t kIssuingDistributionPointOid[] = {0x55, 0x1d, 0x1c};
 
-[[nodiscard]] bool NormalizeNameTLV(const der::Input& name_tlv,
-                                    std::string* out_normalized_name) {
+[[nodiscard]] bool NormalizeNameTLV(der::Input name_tlv,
+                                    std::string *out_normalized_name) {
   der::Parser parser(name_tlv);
   der::Input name_rdn;
   bssl::CertErrors unused_errors;
-  return parser.ReadTag(der::kSequence, &name_rdn) &&
+  return parser.ReadTag(CBS_ASN1_SEQUENCE, &name_rdn) &&
          NormalizeName(name_rdn, out_normalized_name, &unused_errors) &&
          !parser.HasMore();
 }
@@ -48,64 +59,74 @@ bool ContainsExactMatchingName(std::vector<std::string_view> a,
 
 }  // namespace
 
-bool ParseCrlCertificateList(const der::Input& crl_tlv,
-                             der::Input* out_tbs_cert_list_tlv,
-                             der::Input* out_signature_algorithm_tlv,
-                             der::BitString* out_signature_value) {
+bool ParseCrlCertificateList(der::Input crl_tlv,
+                             der::Input *out_tbs_cert_list_tlv,
+                             der::Input *out_signature_algorithm_tlv,
+                             der::BitString *out_signature_value) {
   der::Parser parser(crl_tlv);
 
   //   CertificateList  ::=  SEQUENCE  {
   der::Parser certificate_list_parser;
-  if (!parser.ReadSequence(&certificate_list_parser))
+  if (!parser.ReadSequence(&certificate_list_parser)) {
     return false;
+  }
 
   //        tbsCertList          TBSCertList
-  if (!certificate_list_parser.ReadRawTLV(out_tbs_cert_list_tlv))
+  if (!certificate_list_parser.ReadRawTLV(out_tbs_cert_list_tlv)) {
     return false;
+  }
 
   //        signatureAlgorithm   AlgorithmIdentifier,
-  if (!certificate_list_parser.ReadRawTLV(out_signature_algorithm_tlv))
+  if (!certificate_list_parser.ReadRawTLV(out_signature_algorithm_tlv)) {
     return false;
+  }
 
   //        signatureValue       BIT STRING  }
   std::optional<der::BitString> signature_value =
       certificate_list_parser.ReadBitString();
-  if (!signature_value)
+  if (!signature_value) {
     return false;
+  }
   *out_signature_value = signature_value.value();
 
   // There isn't an extension point at the end of CertificateList.
-  if (certificate_list_parser.HasMore())
+  if (certificate_list_parser.HasMore()) {
     return false;
+  }
 
   // By definition the input was a single CertificateList, so there shouldn't be
   // unconsumed data.
-  if (parser.HasMore())
+  if (parser.HasMore()) {
     return false;
+  }
 
   return true;
 }
 
-bool ParseCrlTbsCertList(const der::Input& tbs_tlv, ParsedCrlTbsCertList* out) {
+bool ParseCrlTbsCertList(der::Input tbs_tlv, ParsedCrlTbsCertList *out) {
   der::Parser parser(tbs_tlv);
 
   //   TBSCertList  ::=  SEQUENCE  {
   der::Parser tbs_parser;
-  if (!parser.ReadSequence(&tbs_parser))
+  if (!parser.ReadSequence(&tbs_parser)) {
     return false;
+  }
 
   //         version                 Version OPTIONAL,
   //                                      -- if present, MUST be v2
   std::optional<der::Input> version_der;
-  if (!tbs_parser.ReadOptionalTag(der::kInteger, &version_der))
+  if (!tbs_parser.ReadOptionalTag(CBS_ASN1_INTEGER, &version_der)) {
     return false;
+  }
   if (version_der.has_value()) {
     uint64_t version64;
-    if (!der::ParseUint64(*version_der, &version64))
+    if (!der::ParseUint64(*version_der, &version64)) {
       return false;
+    }
     // If version is present, it MUST be v2(1).
-    if (version64 != 1)
+    if (version64 != 1) {
       return false;
+    }
     out->version = CrlVersion::V2;
   } else {
     // Uh, RFC 5280 doesn't actually say it anywhere, but presumably if version
@@ -114,27 +135,31 @@ bool ParseCrlTbsCertList(const der::Input& tbs_tlv, ParsedCrlTbsCertList* out) {
   }
 
   //         signature               AlgorithmIdentifier,
-  if (!tbs_parser.ReadRawTLV(&out->signature_algorithm_tlv))
+  if (!tbs_parser.ReadRawTLV(&out->signature_algorithm_tlv)) {
     return false;
+  }
 
   //         issuer                  Name,
-  if (!tbs_parser.ReadRawTLV(&out->issuer_tlv))
+  if (!tbs_parser.ReadRawTLV(&out->issuer_tlv)) {
     return false;
+  }
 
   //         thisUpdate              Time,
-  if (!ReadUTCOrGeneralizedTime(&tbs_parser, &out->this_update))
+  if (!ReadUTCOrGeneralizedTime(&tbs_parser, &out->this_update)) {
     return false;
+  }
 
   //         nextUpdate              Time OPTIONAL,
-  der::Tag maybe_next_update_tag;
+  CBS_ASN1_TAG maybe_next_update_tag;
   der::Input unused_next_update_input;
   if (tbs_parser.PeekTagAndValue(&maybe_next_update_tag,
                                  &unused_next_update_input) &&
-      (maybe_next_update_tag == der::kUtcTime ||
-       maybe_next_update_tag == der::kGeneralizedTime)) {
+      (maybe_next_update_tag == CBS_ASN1_UTCTIME ||
+       maybe_next_update_tag == CBS_ASN1_GENERALIZEDTIME)) {
     der::GeneralizedTime next_update_time;
-    if (!ReadUTCOrGeneralizedTime(&tbs_parser, &next_update_time))
+    if (!ReadUTCOrGeneralizedTime(&tbs_parser, &next_update_time)) {
       return false;
+    }
     out->next_update = next_update_time;
   } else {
     out->next_update = std::nullopt;
@@ -142,13 +167,14 @@ bool ParseCrlTbsCertList(const der::Input& tbs_tlv, ParsedCrlTbsCertList* out) {
 
   //         revokedCertificates     SEQUENCE OF SEQUENCE  { ... } OPTIONAL,
   der::Input unused_revoked_certificates;
-  der::Tag maybe_revoked_certifigates_tag;
-  if (tbs_parser.PeekTagAndValue(&maybe_revoked_certifigates_tag,
+  CBS_ASN1_TAG maybe_revoked_certificates_tag;
+  if (tbs_parser.PeekTagAndValue(&maybe_revoked_certificates_tag,
                                  &unused_revoked_certificates) &&
-      maybe_revoked_certifigates_tag == der::kSequence) {
+      maybe_revoked_certificates_tag == CBS_ASN1_SEQUENCE) {
     der::Input revoked_certificates_tlv;
-    if (!tbs_parser.ReadRawTLV(&revoked_certificates_tlv))
+    if (!tbs_parser.ReadRawTLV(&revoked_certificates_tlv)) {
       return false;
+    }
     out->revoked_certificates_tlv = revoked_certificates_tlv;
   } else {
     out->revoked_certificates_tlv = std::nullopt;
@@ -156,13 +182,15 @@ bool ParseCrlTbsCertList(const der::Input& tbs_tlv, ParsedCrlTbsCertList* out) {
 
   //         crlExtensions           [0]  EXPLICIT Extensions OPTIONAL
   //                                       -- if present, version MUST be v2
-  if (!tbs_parser.ReadOptionalTag(der::ContextSpecificConstructed(0),
-                                  &out->crl_extensions_tlv)) {
+  if (!tbs_parser.ReadOptionalTag(
+          CBS_ASN1_CONTEXT_SPECIFIC | CBS_ASN1_CONSTRUCTED | 0,
+          &out->crl_extensions_tlv)) {
     return false;
   }
   if (out->crl_extensions_tlv.has_value()) {
-    if (out->version != CrlVersion::V2)
+    if (out->version != CrlVersion::V2) {
       return false;
+    }
   }
 
   if (tbs_parser.HasMore()) {
@@ -172,32 +200,35 @@ bool ParseCrlTbsCertList(const der::Input& tbs_tlv, ParsedCrlTbsCertList* out) {
 
   // By definition the input was a single sequence, so there shouldn't be
   // unconsumed data.
-  if (parser.HasMore())
+  if (parser.HasMore()) {
     return false;
+  }
 
   return true;
 }
 
 bool ParseIssuingDistributionPoint(
-    const der::Input& extension_value,
-    std::unique_ptr<GeneralNames>* out_distribution_point_names,
-    ContainedCertsType* out_only_contains_cert_type) {
+    der::Input extension_value,
+    std::unique_ptr<GeneralNames> *out_distribution_point_names,
+    ContainedCertsType *out_only_contains_cert_type) {
   der::Parser idp_extension_value_parser(extension_value);
   // IssuingDistributionPoint ::= SEQUENCE {
   der::Parser idp_parser;
-  if (!idp_extension_value_parser.ReadSequence(&idp_parser))
+  if (!idp_extension_value_parser.ReadSequence(&idp_parser)) {
     return false;
+  }
 
   // 5.2.5.  Conforming CRLs issuers MUST NOT issue CRLs where the DER
   //    encoding of the issuing distribution point extension is an empty
   //    sequence.
-  if (!idp_parser.HasMore())
+  if (!idp_parser.HasMore()) {
     return false;
+  }
 
   //  distributionPoint          [0] DistributionPointName OPTIONAL,
   std::optional<der::Input> distribution_point;
   if (!idp_parser.ReadOptionalTag(
-          der::kTagContextSpecific | der::kTagConstructed | 0,
+          CBS_ASN1_CONTEXT_SPECIFIC | CBS_ASN1_CONSTRUCTED | 0,
           &distribution_point)) {
     return false;
   }
@@ -209,7 +240,7 @@ bool ParseIssuingDistributionPoint(
     //        nameRelativeToCRLIssuer [1]     RelativeDistinguishedName }
     std::optional<der::Input> der_full_name;
     if (!dp_name_parser.ReadOptionalTag(
-            der::kTagContextSpecific | der::kTagConstructed | 0,
+            CBS_ASN1_CONTEXT_SPECIFIC | CBS_ASN1_CONSTRUCTED | 0,
             &der_full_name)) {
       return false;
     }
@@ -220,8 +251,9 @@ bool ParseIssuingDistributionPoint(
     CertErrors errors;
     *out_distribution_point_names =
         GeneralNames::CreateFromValue(*der_full_name, &errors);
-    if (!*out_distribution_point_names)
+    if (!*out_distribution_point_names) {
       return false;
+    }
 
     if (dp_name_parser.HasMore()) {
       // CHOICE represents a single value.
@@ -233,31 +265,35 @@ bool ParseIssuingDistributionPoint(
 
   //  onlyContainsUserCerts      [1] BOOLEAN DEFAULT FALSE,
   std::optional<der::Input> only_contains_user_certs;
-  if (!idp_parser.ReadOptionalTag(der::kTagContextSpecific | 1,
+  if (!idp_parser.ReadOptionalTag(CBS_ASN1_CONTEXT_SPECIFIC | 1,
                                   &only_contains_user_certs)) {
     return false;
   }
   if (only_contains_user_certs.has_value()) {
     bool bool_value;
-    if (!der::ParseBool(*only_contains_user_certs, &bool_value))
+    if (!der::ParseBool(*only_contains_user_certs, &bool_value)) {
       return false;
-    if (!bool_value)
+    }
+    if (!bool_value) {
       return false;  // DER-encoding requires DEFAULT values be omitted.
+    }
     *out_only_contains_cert_type = ContainedCertsType::USER_CERTS;
   }
 
   //  onlyContainsCACerts        [2] BOOLEAN DEFAULT FALSE,
   std::optional<der::Input> only_contains_ca_certs;
-  if (!idp_parser.ReadOptionalTag(der::kTagContextSpecific | 2,
+  if (!idp_parser.ReadOptionalTag(CBS_ASN1_CONTEXT_SPECIFIC | 2,
                                   &only_contains_ca_certs)) {
     return false;
   }
   if (only_contains_ca_certs.has_value()) {
     bool bool_value;
-    if (!der::ParseBool(*only_contains_ca_certs, &bool_value))
+    if (!der::ParseBool(*only_contains_ca_certs, &bool_value)) {
       return false;
-    if (!bool_value)
+    }
+    if (!bool_value) {
       return false;  // DER-encoding requires DEFAULT values be omitted.
+    }
     if (*out_only_contains_cert_type != ContainedCertsType::ANY_CERTS) {
       // 5.2.5.  at most one of onlyContainsUserCerts, onlyContainsCACerts,
       //         and onlyContainsAttributeCerts may be set to TRUE.
@@ -271,16 +307,16 @@ bool ParseIssuingDistributionPoint(
   //  onlyContainsAttributeCerts [5] BOOLEAN DEFAULT FALSE }
   // onlySomeReasons, indirectCRL, and onlyContainsAttributeCerts are not
   // supported, fail parsing if they are present.
-  if (idp_parser.HasMore())
+  if (idp_parser.HasMore()) {
     return false;
+  }
 
   return true;
 }
 
 CRLRevocationStatus GetCRLStatusForCert(
-    const der::Input& cert_serial,
-    CrlVersion crl_version,
-    const std::optional<der::Input>& revoked_certificates_tlv) {
+    der::Input cert_serial, CrlVersion crl_version,
+    const std::optional<der::Input> &revoked_certificates_tlv) {
   if (!revoked_certificates_tlv.has_value()) {
     // RFC 5280 Section 5.1.2.6: "When there are no revoked certificates, the
     // revoked certificates list MUST be absent."
@@ -292,62 +328,79 @@ CRLRevocationStatus GetCRLStatusForCert(
 
   //         revokedCertificates     SEQUENCE OF SEQUENCE  {
   der::Parser revoked_certificates_parser;
-  if (!parser.ReadSequence(&revoked_certificates_parser))
+  if (!parser.ReadSequence(&revoked_certificates_parser)) {
     return CRLRevocationStatus::UNKNOWN;
+  }
 
   // RFC 5280 Section 5.1.2.6: "When there are no revoked certificates, the
   // revoked certificates list MUST be absent."
-  if (!revoked_certificates_parser.HasMore())
+  if (!revoked_certificates_parser.HasMore()) {
     return CRLRevocationStatus::UNKNOWN;
+  }
 
   // By definition the input was a single Extensions sequence, so there
   // shouldn't be unconsumed data.
-  if (parser.HasMore())
+  if (parser.HasMore()) {
     return CRLRevocationStatus::UNKNOWN;
+  }
 
   bool found_matching_serial = false;
 
   while (revoked_certificates_parser.HasMore()) {
     //         revokedCertificates     SEQUENCE OF SEQUENCE  {
     der::Parser crl_entry_parser;
-    if (!revoked_certificates_parser.ReadSequence(&crl_entry_parser))
+    if (!revoked_certificates_parser.ReadSequence(&crl_entry_parser)) {
       return CRLRevocationStatus::UNKNOWN;
+    }
 
     der::Input revoked_cert_serial_number;
     //              userCertificate         CertificateSerialNumber,
-    if (!crl_entry_parser.ReadTag(der::kInteger, &revoked_cert_serial_number))
+    if (!crl_entry_parser.ReadTag(CBS_ASN1_INTEGER,
+                                  &revoked_cert_serial_number)) {
       return CRLRevocationStatus::UNKNOWN;
+    }
+
+    // TODO(crbug.com/533048005): We do not check `revoked_cert_serial_number`
+    // is a valid INTEGER because our certificate parser does not yet check for
+    // valid INTEGERs. This ensures those non-integers can be represented in
+    // CRLs.
 
     //              revocationDate          Time,
     der::GeneralizedTime unused_revocation_date;
-    if (!ReadUTCOrGeneralizedTime(&crl_entry_parser, &unused_revocation_date))
+    if (!ReadUTCOrGeneralizedTime(&crl_entry_parser, &unused_revocation_date)) {
       return CRLRevocationStatus::UNKNOWN;
+    }
 
     //              crlEntryExtensions      Extensions OPTIONAL
     if (crl_entry_parser.HasMore()) {
       //                                       -- if present, version MUST be v2
-      if (crl_version != CrlVersion::V2)
+      if (crl_version != CrlVersion::V2) {
         return CRLRevocationStatus::UNKNOWN;
+      }
 
       der::Input crl_entry_extensions_tlv;
-      if (!crl_entry_parser.ReadRawTLV(&crl_entry_extensions_tlv))
+      if (!crl_entry_parser.ReadRawTLV(&crl_entry_extensions_tlv)) {
         return CRLRevocationStatus::UNKNOWN;
+      }
 
       std::map<der::Input, ParsedExtension> extensions;
-      if (!ParseExtensions(crl_entry_extensions_tlv, &extensions))
+      if (!ParseExtensions(crl_entry_extensions_tlv, &extensions)) {
         return CRLRevocationStatus::UNKNOWN;
+      }
 
       // RFC 5280 Section 5.3: "If a CRL contains a critical CRL entry
       // extension that the application cannot process, then the application
       // MUST NOT use that CRL to determine the status of any certificates."
-      for (const auto& ext : extensions) {
-        if (ext.second.critical)
+      for (const auto &ext : extensions) {
+        if (ext.second.critical) {
           return CRLRevocationStatus::UNKNOWN;
+        }
       }
     }
 
-    if (crl_entry_parser.HasMore())
+    if (crl_entry_parser.HasMore()) {
       return CRLRevocationStatus::UNKNOWN;
+    }
 
     if (revoked_cert_serial_number == cert_serial) {
       // Cert is revoked, but can't return yet since there might be critical
@@ -356,10 +409,11 @@ CRLRevocationStatus GetCRLStatusForCert(
     }
   }
 
-  if (found_matching_serial)
+  if (found_matching_serial) {
     return CRLRevocationStatus::REVOKED;
+  }
 
-  // |cert| is not present in the revokedCertificates list.
+  // `cert` is not present in the revokedCertificates list.
   return CRLRevocationStatus::GOOD;
 }
 
@@ -367,9 +421,9 @@ ParsedCrlTbsCertList::ParsedCrlTbsCertList() = default;
 ParsedCrlTbsCertList::~ParsedCrlTbsCertList() = default;
 
 CRLRevocationStatus CheckCRL(std::string_view raw_crl,
-                             const ParsedCertificateList& valid_chain,
+                             const ParsedCertificateList &valid_chain,
                              size_t target_cert_index,
-                             const ParsedDistributionPoint& cert_dp,
+                             const ParsedDistributionPoint &cert_dp,
                              int64_t verify_time_epoch_seconds,
                              std::optional<int64_t> max_age_seconds) {
   BSSL_CHECK(target_cert_index < valid_chain.size());
@@ -385,7 +439,7 @@ CRLRevocationStatus CheckCRL(std::string_view raw_crl,
     return CRLRevocationStatus::UNKNOWN;
   }
 
-  const ParsedCertificate* target_cert = valid_chain[target_cert_index].get();
+  const ParsedCertificate *target_cert = valid_chain[target_cert_index].get();
 
   // 6.3.3 (a) Update the local CRL cache by obtaining a complete CRL, a
   //           delta CRL, or both, as required.
@@ -396,14 +450,15 @@ CRLRevocationStatus CheckCRL(std::string_view raw_crl,
   der::Input tbs_cert_list_tlv;
   der::Input signature_algorithm_tlv;
   der::BitString signature_value;
-  if (!ParseCrlCertificateList(der::Input(raw_crl), &tbs_cert_list_tlv,
+  if (!ParseCrlCertificateList(StringAsBytes(raw_crl), &tbs_cert_list_tlv,
                                &signature_algorithm_tlv, &signature_value)) {
     return CRLRevocationStatus::UNKNOWN;
   }
 
   ParsedCrlTbsCertList tbs_cert_list;
-  if (!ParseCrlTbsCertList(tbs_cert_list_tlv, &tbs_cert_list))
+  if (!ParseCrlTbsCertList(tbs_cert_list_tlv, &tbs_cert_list)) {
     return CRLRevocationStatus::UNKNOWN;
+  }
 
   // 5.1.1.2  signatureAlgorithm
   //
@@ -467,16 +522,19 @@ CRLRevocationStatus CheckCRL(std::string_view raw_crl,
   // TODO(https://crbug.com/749276): could do exact comparison first and only
   // fall back to normalizing if that fails.
   std::string normalized_crl_issuer;
-  if (!NormalizeNameTLV(tbs_cert_list.issuer_tlv, &normalized_crl_issuer))
+  if (!NormalizeNameTLV(tbs_cert_list.issuer_tlv, &normalized_crl_issuer)) {
     return CRLRevocationStatus::UNKNOWN;
-  if (der::Input(normalized_crl_issuer) != target_cert->normalized_issuer()) {
+  }
+  if (der::Input(StringAsBytes(normalized_crl_issuer)) !=
+      target_cert->normalized_issuer()) {
     return CRLRevocationStatus::UNKNOWN;
   }
 
   if (tbs_cert_list.crl_extensions_tlv.has_value()) {
     std::map<der::Input, ParsedExtension> extensions;
-    if (!ParseExtensions(*tbs_cert_list.crl_extensions_tlv, &extensions))
+    if (!ParseExtensions(*tbs_cert_list.crl_extensions_tlv, &extensions)) {
       return CRLRevocationStatus::UNKNOWN;
+    }
 
     // 6.3.3 (b) (2) If the complete CRL includes an issuing distribution point
     //               (IDP) CRL extension, check the following:
@@ -558,10 +616,11 @@ CRLRevocationStatus CheckCRL(std::string_view raw_crl,
       }
     }
 
-    for (const auto& ext : extensions) {
+    for (const auto &ext : extensions) {
       // Fail if any unhandled critical CRL extensions are present.
-      if (ext.second.critical)
+      if (ext.second.critical) {
         return CRLRevocationStatus::UNKNOWN;
+      }
     }
   }
 
@@ -572,22 +631,22 @@ CRLRevocationStatus CheckCRL(std::string_view raw_crl,
   // cases of key rollover without requiring additional CRL issuer cert
   // discovery & path building.
   // TODO(https://crbug.com/749276): should this loop start at
-  // |target_cert_index|? There doesn't seem to be anything in the specs that
+  // `target_cert_index`? There doesn't seem to be anything in the specs that
   // precludes a CRL signed by a self-issued cert from covering itself. On the
   // other hand it seems like a pretty weird thing to allow and causes NIST
   // PKITS 4.5.3 to pass when it seems like it would not be intended to (since
   // issuingDistributionPoint CRL extension is not handled).
   for (size_t i = target_cert_index + 1; i < valid_chain.size(); ++i) {
-    const ParsedCertificate* issuer_cert = valid_chain[i].get();
+    const ParsedCertificate *issuer_cert = valid_chain[i].get();
 
     // 6.3.3 (f) Obtain and validate the certification path for the issuer of
     //           the complete CRL.  The trust anchor for the certification
     //           path MUST be the same as the trust anchor used to validate
     //           the target certificate.
     //
-    // As the |issuer_cert| is from the already validated chain, it is already
+    // As the `issuer_cert` is from the already validated chain, it is already
     // known to chain to the same trust anchor as the target certificate.
-    if (der::Input(normalized_crl_issuer) !=
+    if (der::Input(StringAsBytes(normalized_crl_issuer)) !=
         issuer_cert->normalized_subject()) {
       continue;
     }
@@ -615,7 +674,7 @@ CRLRevocationStatus CheckCRL(std::string_view raw_crl,
     //           in Section 5.3.3, then set the cert_status variable to the
     //           indicated reason as described in step (i).
     //
-    // CRL is valid and covers |target_cert|, check if |target_cert| is present
+    // CRL is valid and covers `target_cert`, check if `target_cert` is present
     // in the revokedCertificates sequence.
     return GetCRLStatusForCert(target_cert->tbs().serial_number,
                                tbs_cert_list.version,
@@ -624,8 +683,8 @@ CRLRevocationStatus CheckCRL(std::string_view raw_crl,
     // 6.3.3 (k,l) skipped. This implementation does not support reason codes.
   }
 
-  // Did not find the issuer & signer of |raw_crl| in |valid_chain|.
+  // Did not find the issuer & signer of `raw_crl` in `valid_chain`.
   return CRLRevocationStatus::UNKNOWN;
 }
 
-}  // namespace net
+BSSL_NAMESPACE_END

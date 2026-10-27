@@ -22,7 +22,7 @@ namespace base {
 namespace android {
 
 struct BuildInfoSingletonTraits {
-  static BuildInfo* New() { return new BuildInfo({}); }
+  static BuildInfo* New() { return new BuildInfo(); }
 
   static void Delete(BuildInfo* x) {
     // We're leaking this type, see kRegisterAtExit.
@@ -32,7 +32,7 @@ struct BuildInfoSingletonTraits {
   static const bool kRegisterAtExit = false;
 };
 
-BuildInfo::BuildInfo(const std::vector<std::string>& params)
+BuildInfo::BuildInfo()
     : brand_(""),
       device_(""),
       android_build_id_(""),
@@ -48,22 +48,21 @@ BuildInfo::BuildInfo(const std::vector<std::string>& params)
       package_version_code_(""),
       package_version_name_(""),
       android_build_fp_(""),
-      gms_version_code_(""),
       installer_package_name_(""),
       abi_name_(""),
-      custom_themes_(""),
       resources_version_(""),
       target_sdk_version_(0),
       is_debug_android_(false),
       is_tv_(false),
       version_incremental_(""),
       hardware_(""),
-      is_at_least_t_(false),
       is_automotive_(false),
-      is_at_least_u_(false),
-      targets_at_least_u_(false),
       codename_(""),
-      vulkan_deqp_level_(0) {}
+      vulkan_deqp_level_(0),
+      is_foldable_(false),
+      soc_manufacturer_(""),
+      is_debug_app_(false),
+      is_desktop_(false) {}
 
 // static
 BuildInfo* BuildInfo::GetInstance() {

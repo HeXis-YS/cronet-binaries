@@ -7,15 +7,16 @@
 
 #include <memory>
 
+#include "absl/base/nullability.h"
 #include "absl/container/flat_hash_map.h"
 #include "quiche/quic/core/crypto/null_decrypter.h"
 #include "quiche/quic/core/crypto/null_encrypter.h"
+#include "quiche/quic/core/deterministic_connection_id_generator.h"
 #include "quiche/quic/core/quic_connection.h"
 #include "quiche/quic/core/quic_packet_writer.h"
 #include "quiche/quic/core/quic_packets.h"
 #include "quiche/quic/core/quic_stream_frame_data_producer.h"
 #include "quiche/quic/core/quic_trace_visitor.h"
-#include "quiche/quic/test_tools/mock_connection_id_generator.h"
 #include "quiche/quic/test_tools/simple_session_notifier.h"
 #include "quiche/quic/test_tools/simulator/link.h"
 #include "quiche/quic/test_tools/simulator/queue.h"
@@ -69,6 +70,11 @@ class QuicEndpointBase : public Endpoint,
   // Queue::ListenerInterface method.
   void OnPacketDequeued() override;
 
+  // Returns the trace visitor associated with the connection.
+  QuicTraceVisitor* absl_nullable trace_visitor() {
+    return trace_visitor_.get();
+  }
+
  protected:
   // A Writer object that writes into the |nic_tx_queue_|.
   class Writer : public QuicPacketWriter {
@@ -83,7 +89,7 @@ class QuicEndpointBase : public Endpoint,
                             const QuicPacketWriterParams& params) override;
     bool IsWriteBlocked() const override;
     void SetWritable() override;
-    absl::optional<int> MessageTooBigErrorCode() const override;
+    std::optional<int> MessageTooBigErrorCode() const override;
     QuicByteCount GetMaxPacketSize(
         const QuicSocketAddress& peer_address) const override;
     bool SupportsReleaseTime() const override;
@@ -131,7 +137,7 @@ class QuicEndpointBase : public Endpoint,
 
   std::unique_ptr<QuicTraceVisitor> trace_visitor_;
 
-  test::MockConnectionIdGenerator connection_id_generator_;
+  DeterministicConnectionIdGenerator connection_id_generator_;
 };
 
 // Multiplexes multiple connections at the same host on the network.

@@ -1,19 +1,20 @@
-/* Copyright (c) 2023, Google Inc.
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
- * SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
- * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright 2023 The BoringSSL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use crate::cipher::{Cipher, CipherError, EvpAes128Ctr, EvpAes256Ctr, StreamCipher};
+use crate::cipher::{
+    Cipher, CipherError, CipherInitPurpose, EvpAes128Ctr, EvpAes256Ctr, StreamCipher,
+};
 
 /// AES-CTR-128 Cipher implementation.
 pub struct Aes128Ctr(Cipher<EvpAes128Ctr>);
@@ -24,7 +25,7 @@ impl StreamCipher for Aes128Ctr {
 
     /// Creates a new AES-128-CTR cipher instance from key material.
     fn new(key: &Self::Key, nonce: &Self::Nonce) -> Self {
-        Self(Cipher::new(key, nonce))
+        Self(Cipher::new(key, nonce, CipherInitPurpose::Encrypt))
     }
 
     /// Applies the keystream in-place, advancing the counter state appropriately.
@@ -42,7 +43,7 @@ impl StreamCipher for Aes256Ctr {
 
     /// Creates a new AES-256-CTR cipher instance from key material.
     fn new(key: &Self::Key, nonce: &Self::Nonce) -> Self {
-        Self(Cipher::new(key, nonce))
+        Self(Cipher::new(key, nonce, CipherInitPurpose::Encrypt))
     }
 
     /// Applies the keystream in-place, advancing the counter state appropriately.

@@ -1,0 +1,172 @@
+From 3741d04fde4b0cea7d8db679d1871a208f034f3b Mon Sep 17 00:00:00 2001
+From: klzgrad <kizdiv@gmail.com>
+Date: Thu, 25 Jan 2018 05:02:13 -0500
+Subject: [PATCH] net, url: Remove icu
+
+---
+ src/net/BUILD.gn                              | 11 ++++--
+ src/net/base/filename_util_icu_dummy.cc       | 39 +++++++++++++++++++
+ .../net_string_util_icu_alternatives_dummy.cc | 37 ++++++++++++++++++
+ src/url/BUILD.gn                              |  6 +--
+ src/url/url_canon_icu_alternatives_dummy.cc   | 13 +++++++
+ 5 files changed, 99 insertions(+), 7 deletions(-)
+ create mode 100644 src/net/base/filename_util_icu_dummy.cc
+ create mode 100644 src/net/base/net_string_util_icu_alternatives_dummy.cc
+ create mode 100644 src/url/url_canon_icu_alternatives_dummy.cc
+
+diff --git a/src/net/BUILD.gn b/src/net/BUILD.gn
+index 7f171d800..6bb9bd2e2 100644
+--- a/src/net/BUILD.gn
++++ b/src/net/BUILD.gn
+@@ -1803,13 +1803,18 @@ component("net") {
+   if (use_platform_icu_alternatives) {
+     if (is_android) {
+       # Use ICU alternative on Android.
+-      sources += [ "base/net_string_util_icu_alternatives_android.cc" ]
++      sources += [
++        "base/filename_util_icu_dummy.cc",
++        "base/net_string_util_icu_alternatives_dummy.cc",
++      ]
+     } else if (is_ios) {
+       # Use ICU alternative on iOS.
+       sources += [ "base/net_string_util_icu_alternatives_ios.mm" ]
+     } else {
+-      assert(false,
+-             "ICU alternative is not implemented for platform: " + target_os)
++      sources += [
++        "base/filename_util_icu_dummy.cc",
++        "base/net_string_util_icu_alternatives_dummy.cc",
++      ]
+     }
+   } else {
+     # Use ICU.
+diff --git a/src/net/base/filename_util_icu_dummy.cc b/src/net/base/filename_util_icu_dummy.cc
+new file mode 100644
+index 000000000..bd6047ee8
+--- /dev/null
++++ b/src/net/base/filename_util_icu_dummy.cc
+@@ -0,0 +1,39 @@
++// Copyright 2014 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "net/base/filename_util.h"
++
++#include "base/files/file_path.h"
++
++class GURL;
++
++namespace net {
++
++bool IsSafePortablePathComponent(const base::FilePath& component) {
++  return false;
++}
++
++bool IsSafePortableRelativePath(const base::FilePath& path) {
++  return false;
++}
++
++std::u16string GetSuggestedFilename(const GURL& url,
++                                    const std::string& content_disposition,
++                                    const std::string& referrer_charset,
++                                    const std::string& suggested_name,
++                                    const std::string& mime_type,
++                                    const std::string& default_name) {
++  return {};
++}
++
++base::FilePath GenerateFileName(const GURL& url,
++                                const std::string& content_disposition,
++                                const std::string& referrer_charset,
++                                const std::string& suggested_name,
++                                const std::string& mime_type,
++                                const std::string& default_file_name) {
++  return {};
++}
++
++}  // namespace net
+diff --git a/src/net/base/net_string_util_icu_alternatives_dummy.cc b/src/net/base/net_string_util_icu_alternatives_dummy.cc
+new file mode 100644
+index 000000000..4f412a215
+--- /dev/null
++++ b/src/net/base/net_string_util_icu_alternatives_dummy.cc
+@@ -0,0 +1,37 @@
++// Copyright 2014 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include <string_view>
++
++#include "net/base/net_string_util.h"
++
++namespace net {
++
++const char* const kCharsetLatin1 = "";
++
++bool ConvertToUtf8(std::string_view text, const char* charset,
++                   std::string* output) {
++  return false;
++}
++
++bool ConvertToUtf8AndNormalize(std::string_view text, const char* charset,
++                               std::string* output) {
++  return false;
++}
++
++bool ConvertToUTF16(std::string_view text, const char* charset,
++                    std::u16string* output) {
++  return false;
++}
++
++bool ConvertToUTF16WithSubstitutions(std::string_view text,
++                                     const char* charset,
++                                     std::u16string* output) {
++  return false;
++}
++
++bool ToUpperUsingLocale(std::u16string_view str, std::u16string* output) {
++  return false;
++}
++}  // namespace net
+diff --git a/src/url/BUILD.gn b/src/url/BUILD.gn
+index 5c69d7666..8ab188db6 100644
+--- a/src/url/BUILD.gn
++++ b/src/url/BUILD.gn
+@@ -103,13 +103,11 @@ component("url") {
+   # ICU support.
+   if (use_platform_icu_alternatives) {
+     if (is_android) {
+-      sources += [ "url_idna_icu_alternatives_android.cc" ]
+-      deps += [ ":buildflags" ]
++      sources += [ "url_canon_icu_alternatives_dummy.cc" ]
+     } else if (is_ios) {
+       sources += [ "url_idna_icu_alternatives_ios.mm" ]
+     } else {
+-      assert(false,
+-             "ICU alternative is not implemented for platform: " + target_os)
++      sources += [ "url_canon_icu_alternatives_dummy.cc" ]
+     }
+   } else {
+     # Use ICU.
+diff --git a/src/url/url_canon_icu_alternatives_dummy.cc b/src/url/url_canon_icu_alternatives_dummy.cc
+new file mode 100644
+index 000000000..4384d5bae
+--- /dev/null
++++ b/src/url/url_canon_icu_alternatives_dummy.cc
+@@ -0,0 +1,13 @@
++// Copyright 2013 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "url/url_canon.h"
++
++namespace url {
++
++bool IDNToASCII(std::u16string_view src, CanonOutputW* output) {
++  return false;
++}
++
++}  // namespace url
+-- 
+2.53.0
+

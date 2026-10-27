@@ -8,17 +8,23 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
+#include "absl/base/nullability.h"
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/connection_id_generator.h"
 #include "quiche/quic/core/crypto/quic_decrypter.h"
 #include "quiche/quic/core/crypto/quic_encrypter.h"
 #include "quiche/quic/core/crypto/quic_random.h"
+#include "quiche/quic/core/frames/quic_datagram_frame.h"
+#include "quiche/quic/core/frames/quic_immediate_ack_frame.h"
+#include "quiche/quic/core/frames/quic_reset_stream_at_frame.h"
 #include "quiche/quic/core/quic_connection_id.h"
+#include "quiche/quic/core/quic_error_codes.h"
 #include "quiche/quic/core/quic_packets.h"
 #include "quiche/quic/core/quic_types.h"
-#include "quiche/quic/platform/api/quic_export.h"
+#include "quiche/quic/core/quic_versions.h"
 
 namespace quic {
 
@@ -32,37 +38,38 @@ class QuicFramer;
 class QuicStreamFrameDataProducer;
 
 // Number of bytes reserved for the frame type preceding each frame.
-const size_t kQuicFrameTypeSize = 1;
+inline constexpr size_t kQuicFrameTypeSize = 1;
 // Number of bytes reserved for error code.
-const size_t kQuicErrorCodeSize = 4;
+inline constexpr size_t kQuicErrorCodeSize = 4;
 // Number of bytes reserved to denote the length of error details field.
-const size_t kQuicErrorDetailsLengthSize = 2;
+inline constexpr size_t kQuicErrorDetailsLengthSize = 2;
 
 // Maximum number of bytes reserved for stream id.
-const size_t kQuicMaxStreamIdSize = 4;
+inline constexpr size_t kQuicMaxStreamIdSize = 4;
 // Maximum number of bytes reserved for byte offset in stream frame.
-const size_t kQuicMaxStreamOffsetSize = 8;
+inline constexpr size_t kQuicMaxStreamOffsetSize = 8;
 // Number of bytes reserved to store payload length in stream frame.
-const size_t kQuicStreamPayloadLengthSize = 2;
+inline constexpr size_t kQuicStreamPayloadLengthSize = 2;
 // Number of bytes to reserve for IQ Error codes (for the Connection Close,
 // Application Close, and Reset Stream frames).
-const size_t kQuicIetfQuicErrorCodeSize = 2;
+inline constexpr size_t kQuicIetfQuicErrorCodeSize = 2;
 // Minimum size of the IETF QUIC Error Phrase's length field
-const size_t kIetfQuicMinErrorPhraseLengthSize = 1;
+inline constexpr size_t kIetfQuicMinErrorPhraseLengthSize = 1;
 
 // Size in bytes reserved for the delta time of the largest observed
 // packet number in ack frames.
-const size_t kQuicDeltaTimeLargestObservedSize = 2;
+inline constexpr size_t kQuicDeltaTimeLargestObservedSize = 2;
 // Size in bytes reserved for the number of received packets with timestamps.
-const size_t kQuicNumTimestampsSize = 1;
+inline constexpr size_t kQuicNumTimestampsSize = 1;
 // Size in bytes reserved for the number of missing packets in ack frames.
-const size_t kNumberOfNackRangesSize = 1;
+inline constexpr size_t kNumberOfNackRangesSize = 1;
 // Size in bytes reserved for the number of ack blocks in ack frames.
-const size_t kNumberOfAckBlocksSize = 1;
+inline constexpr size_t kNumberOfAckBlocksSize = 1;
 // Maximum number of missing packet ranges that can fit within an ack frame.
-const size_t kMaxNackRanges = (1 << (kNumberOfNackRangesSize * 8)) - 1;
+inline constexpr size_t kMaxNackRanges =
+    (1 << (kNumberOfNackRangesSize * 8)) - 1;
 // Maximum number of ack blocks that can fit within an ack frame.
-const size_t kMaxAckBlocks = (1 << (kNumberOfAckBlocksSize * 8)) - 1;
+inline constexpr size_t kMaxAckBlocks = (1 << (kNumberOfAckBlocksSize * 8)) - 1;
 
 // This class receives callbacks from the framer when packets
 // are processed.
@@ -93,11 +100,11 @@ class QUICHE_EXPORT QuicFramerVisitorInterface {
   // Called only when |perspective_| is IS_CLIENT and a retry packet has been
   // parsed. |new_connection_id| contains the value of the Source Connection
   // ID field, and |retry_token| contains the value of the Retry Token field.
-  // On versions where UsesTls() is false,
+  // On versions where IsIetfQuic() is false,
   // |original_connection_id| contains the value of the Original Destination
   // Connection ID field, and both |retry_integrity_tag| and
   // |retry_without_tag| are empty.
-  // On versions where UsesTls() is true,
+  // On versions where IsIetfQuic() is true,
   // |original_connection_id| is empty, |retry_integrity_tag| contains the
   // value of the Retry Integrity Tag field, and |retry_without_tag| contains
   // the entire RETRY packet except the Retry Integrity Tag field.
@@ -165,7 +172,7 @@ class QUICHE_EXPORT QuicFramerVisitorInterface {
   // the reported ECN counts in the ack frame, if present.
   virtual bool OnAckFrameEnd(
       QuicPacketNumber start,
-      const absl::optional<QuicEcnCounts>& ecn_counts) = 0;
+      const std::optional<QuicEcnCounts>& ecn_counts) = 0;
 
   // Called when a StopWaitingFrame has been parsed.
   virtual bool OnStopWaitingFrame(const QuicStopWaitingFrame& frame) = 0;
@@ -212,14 +219,20 @@ class QUICHE_EXPORT QuicFramerVisitorInterface {
   // Called when a NewTokenFrame has been parsed.
   virtual bool OnNewTokenFrame(const QuicNewTokenFrame& frame) = 0;
 
-  // Called when a message frame has been parsed.
-  virtual bool OnMessageFrame(const QuicMessageFrame& frame) = 0;
+  // Called when a Datagrame frame has been parsed.
+  virtual bool OnDatagramFrame(const QuicDatagramFrame& frame) = 0;
 
   // Called when a handshake done frame has been parsed.
   virtual bool OnHandshakeDoneFrame(const QuicHandshakeDoneFrame& frame) = 0;
 
   // Called when an AckFrequencyFrame has been parsed.
   virtual bool OnAckFrequencyFrame(const QuicAckFrequencyFrame& frame) = 0;
+
+  // Called when an ImmediateAckFrame has been parsed.
+  virtual bool OnImmediateAckFrame(const QuicImmediateAckFrame& frame) = 0;
+
+  // Called when an ResetStreamAtFrame has been parsed.
+  virtual bool OnResetStreamAtFrame(const QuicResetStreamAtFrame& frame) = 0;
 
   // Called when a packet has been completely processed.
   virtual void OnPacketComplete() = 0;
@@ -230,8 +243,7 @@ class QUICHE_EXPORT QuicFramerVisitorInterface {
 
   // Called when an IETF stateless reset packet has been parsed and validated
   // with the stateless reset token.
-  virtual void OnAuthenticatedIetfStatelessResetPacket(
-      const QuicIetfStatelessResetPacket& packet) = 0;
+  virtual void OnAuthenticatedIetfStatelessResetPacket() = 0;
 
   // Called when an IETF MaxStreams frame has been parsed.
   virtual bool OnMaxStreamsFrame(const QuicMaxStreamsFrame& frame) = 0;
@@ -247,6 +259,13 @@ class QUICHE_EXPORT QuicFramerVisitorInterface {
   // Called on the first decrypted packet in each key phase (including the
   // first key phase.)
   virtual void OnDecryptedFirstPacketInKeyPhase() = 0;
+
+  // Called when a Scone packet arrives. When called, the framer has not
+  // verified that a packet in the UDP datagram is decryptable. |signal| is the
+  // 7-bit signal carried in the first byte of the packet. 127 means there is no
+  // feedback. The value will never be more than 127; overrides are free to
+  // QUIC_BUG if this happens.
+  virtual void OnSconePacket(uint8_t signal) = 0;
 
   // Called when the framer needs to generate a decrypter for the next key
   // phase. Each call should generate the key for phase n+1.
@@ -304,23 +323,32 @@ class QUICHE_EXPORT QuicFramer {
 
   QuicErrorCode error() const { return error_; }
 
-  // Allows enabling or disabling of timestamp processing and serialization.
-  // TODO(ianswett): Remove the const once timestamps are negotiated via
-  // transport params.
-  void set_process_timestamps(bool process_timestamps) const {
-    process_timestamps_ = process_timestamps;
-  }
+  // TODO(b/132632465): Remove the const in timestamp-related setters once
+  // timestamps are negotiated via transport params.
 
+  // Sets the max number of receive timestamps to parse per ACK frame.
+  void set_local_max_receive_timestamps_per_ack(uint32_t max_timestamps) const {
+    local_max_receive_timestamps_per_ack_ = max_timestamps;
+  }
   // Sets the max number of receive timestamps to send per ACK frame.
-  // TODO(wub): Remove the const once timestamps are negotiated via
-  // transport params.
-  void set_max_receive_timestamps_per_ack(uint32_t max_timestamps) const {
-    max_receive_timestamps_per_ack_ = max_timestamps;
+  void set_peer_max_receive_timestamps_per_ack(uint32_t max_timestamps) const {
+    peer_max_receive_timestamps_per_ack_ = max_timestamps;
   }
 
-  // Sets the exponent to use when writing/reading ACK receive timestamps.
-  void set_receive_timestamps_exponent(uint32_t exponent) const {
-    receive_timestamps_exponent_ = exponent;
+  // Sets the exponent to use when reading ACK receive timestamps.
+  void set_local_receive_timestamps_exponent(uint32_t exponent) const {
+    local_receive_timestamps_exponent_ = exponent;
+  }
+  // Sets the exponent to use when writing ACK receive timestamps.
+  void set_peer_receive_timestamps_exponent(uint32_t exponent) const {
+    peer_receive_timestamps_exponent_ = exponent;
+  }
+
+  bool process_reset_stream_at() const { return process_reset_stream_at_; }
+
+  // Allows enabling RESET_STREAM_AT frame processing.
+  void set_process_reset_stream_at(bool process_reset_stream_at) {
+    process_reset_stream_at_ = process_reset_stream_at;
   }
 
   // Pass a UDP packet into the framer for parsing.
@@ -343,8 +371,8 @@ class QUICHE_EXPORT QuicFramer {
   // data length provided, but not counting the size of the data payload.
   static size_t GetMinCryptoFrameSize(QuicStreamOffset offset,
                                       QuicPacketLength data_length);
-  static size_t GetMessageFrameSize(bool last_frame_in_packet,
-                                    QuicByteCount length);
+  static size_t GetDatagramFrameSize(bool last_frame_in_packet,
+                                     QuicByteCount length);
   // Size in bytes of all ack frame fields without the missing packets or ack
   // blocks.
   static size_t GetMinAckFrameSize(QuicTransportVersion version,
@@ -359,6 +387,8 @@ class QUICHE_EXPORT QuicFramer {
                                       const QuicRstStreamFrame& frame);
   // Size in bytes of all ack frenquency frame fields.
   static size_t GetAckFrequencyFrameSize(const QuicAckFrequencyFrame& frame);
+  // Size in bytes of all RESET_STREAM_AT frame fields.
+  static size_t GetResetStreamAtFrameSize(const QuicResetStreamAtFrame& frame);
   // Size in bytes of all connection close frame fields, including the error
   // details.
   static size_t GetConnectionCloseFrameSize(
@@ -432,13 +462,14 @@ class QUICHE_EXPORT QuicFramer {
   // ConnectionIdGeneartor interface, and callers need an accurate
   // Destination Connection ID for short header packets, call
   // ParsePublicHeaderDispatcherShortHeaderLengthUnknown() instead.
+  // |detailed_error| can be nullptr.
   static QuicErrorCode ParsePublicHeader(
       QuicDataReader* reader, uint8_t expected_destination_connection_id_length,
       bool ietf_format, uint8_t* first_byte, PacketHeaderFormat* format,
       bool* version_present, bool* has_length_prefix,
       QuicVersionLabel* version_label, ParsedQuicVersion* parsed_version,
-      QuicConnectionId* destination_connection_id,
-      QuicConnectionId* source_connection_id,
+      absl::string_view* destination_connection_id,
+      absl::string_view* source_connection_id,
       QuicLongHeaderType* long_packet_type,
       quiche::QuicheVariableLengthIntegerLength* retry_token_length_length,
       absl::string_view* retry_token, std::string* detailed_error);
@@ -449,15 +480,16 @@ class QUICHE_EXPORT QuicFramer {
   // for short headers. When callers need an accurate Destination Connection ID
   // specifically for short header packets, call
   // ParsePublicHeaderDispatcherShortHeaderLengthUnknown() instead.
+  // |detailed_error| can be nullptr.
   static QuicErrorCode ParsePublicHeaderDispatcher(
       const QuicEncryptedPacket& packet,
       uint8_t expected_destination_connection_id_length,
       PacketHeaderFormat* format, QuicLongHeaderType* long_packet_type,
       bool* version_present, bool* has_length_prefix,
       QuicVersionLabel* version_label, ParsedQuicVersion* parsed_version,
-      QuicConnectionId* destination_connection_id,
-      QuicConnectionId* source_connection_id,
-      absl::optional<absl::string_view>* retry_token,
+      absl::string_view* destination_connection_id,
+      absl::string_view* source_connection_id,
+      std::optional<absl::string_view>* retry_token,
       std::string* detailed_error);
 
   // Parses the unencrypted fields in |packet| and stores them in the other
@@ -473,10 +505,28 @@ class QUICHE_EXPORT QuicFramer {
       QuicLongHeaderType* long_packet_type, bool* version_present,
       bool* has_length_prefix, QuicVersionLabel* version_label,
       ParsedQuicVersion* parsed_version,
-      QuicConnectionId* destination_connection_id,
-      QuicConnectionId* source_connection_id,
-      absl::optional<absl::string_view>* retry_token,
+      absl::string_view* destination_connection_id,
+      absl::string_view* source_connection_id,
+      std::optional<absl::string_view>* retry_token,
       std::string* detailed_error, ConnectionIdGeneratorInterface& generator);
+
+  // Attempts to parse the packet number and decrypt the packet payload at
+  // server for IETF Initial packets. Returns an error code if parsing or
+  // decrypting fails. Returns QUIC_NO_ERROR if
+  // - Parsing did not happen due to failed preconditions. In this case,
+  //   *packet_number will be set to std::nullopt. This happens if
+  //   - |version| is neither draft29 nor RFCv1.
+  //   - |packet| is not a IETF Inital packet.
+  // - Parsing and decrypting succeeded. In this case, *packet_number will be
+  //   the parsed packet number.
+  static QuicErrorCode TryDecryptInitialPacketDispatcher(
+      const QuicEncryptedPacket& packet, const ParsedQuicVersion& version,
+      PacketHeaderFormat format, QuicLongHeaderType long_packet_type,
+      const QuicConnectionId& destination_connection_id,
+      const QuicConnectionId& source_connection_id,
+      const std::optional<absl::string_view>& retry_token,
+      QuicPacketNumber largest_decrypted_inital_packet_number,
+      QuicDecrypter& decrypter, std::optional<uint64_t>* packet_number);
 
   // Serializes a packet containing |frames| into |buffer|.
   // Returns the length of the packet, which must not be longer than
@@ -516,6 +566,10 @@ class QUICHE_EXPORT QuicFramer {
       QuicConnectionId client_connection_id,
       const ParsedQuicVersionVector& versions);
 
+  // Writes a SCONE header to the packet, using the connection IDs in |header|.
+  static bool AppendSconeHeader(const QuicPacketHeader& header,
+                                QuicDataWriter* writer);
+
   // If header.version_flag is set, the version in the
   // packet will be set -- but it will be set from version_ not
   // header.versions.
@@ -538,6 +592,8 @@ class QUICHE_EXPORT QuicFramer {
   bool AppendCryptoFrame(const QuicCryptoFrame& frame, QuicDataWriter* writer);
   bool AppendAckFrequencyFrame(const QuicAckFrequencyFrame& frame,
                                QuicDataWriter* writer);
+  bool AppendResetFrameAtFrame(const QuicResetStreamAtFrame& frame,
+                               QuicDataWriter& writer);
 
   // SetDecrypter sets the primary decrypter, replacing any that already exists.
   // If an alternative decrypter is in place then the function QUICHE_DCHECKs.
@@ -724,27 +780,15 @@ class QUICHE_EXPORT QuicFramer {
     drop_incoming_retry_packets_ = drop_incoming_retry_packets;
   }
 
+  void set_parse_scone_packets(bool parse_scone_packets) {
+    parse_scone_packets_ = parse_scone_packets;
+  }
+
  private:
   friend class test::QuicFramerPeer;
 
   using NackRangeMap = std::map<QuicPacketNumber, uint8_t>;
-
-  // AckTimestampRange is a data structure derived from a QuicAckFrame. It is
-  // used to serialize timestamps in a IETF_ACK_RECEIVE_TIMESTAMPS frame.
-  struct QUICHE_EXPORT AckTimestampRange {
-    QuicPacketCount gap;
-    // |range_begin| and |range_end| are index(es) in
-    // QuicAckFrame.received_packet_times, representing a continuous range of
-    // packet numbers in descending order. |range_begin| >= |range_end|.
-    int64_t range_begin;  // Inclusive
-    int64_t range_end;    // Inclusive
-  };
-  absl::InlinedVector<AckTimestampRange, 2> GetAckTimestampRanges(
-      const QuicAckFrame& frame, std::string& detailed_error) const;
-  int64_t FrameAckTimestampRanges(
-      const QuicAckFrame& frame,
-      const absl::InlinedVector<AckTimestampRange, 2>& timestamp_ranges,
-      QuicDataWriter* writer) const;
+  using AssociatedDataStorage = absl::InlinedVector<char, 20>;
 
   struct QUICHE_EXPORT AckFrameInfo {
     AckFrameInfo();
@@ -779,11 +823,12 @@ class QUICHE_EXPORT QuicFramer {
   // written to |full_packet_number|. Finally, the header, with header
   // protection removed, is written to |associated_data| to be used in packet
   // decryption. |packet| is used in computing the asociated data.
-  bool RemoveHeaderProtection(QuicDataReader* reader,
-                              const QuicEncryptedPacket& packet,
-                              QuicPacketHeader* header,
-                              uint64_t* full_packet_number,
-                              std::vector<char>* associated_data);
+  static bool RemoveHeaderProtection(
+      QuicDataReader* reader, const QuicEncryptedPacket& packet,
+      QuicDecrypter& decrypter, Perspective perspective,
+      const ParsedQuicVersion& version, QuicPacketNumber base_packet_number,
+      QuicPacketHeader* header, uint64_t* full_packet_number,
+      AssociatedDataStorage& associated_data);
 
   bool ProcessIetfDataPacket(QuicDataReader* encrypted_reader,
                              QuicPacketHeader* header,
@@ -823,13 +868,16 @@ class QUICHE_EXPORT QuicFramer {
 
   bool ProcessIetfHeaderTypeByte(QuicDataReader* reader,
                                  QuicPacketHeader* header);
-  bool ProcessIetfPacketHeader(QuicDataReader* reader,
-                               QuicPacketHeader* header);
+  // If the packet header is a SCONE packet, and parse_scone_packets_ is true,
+  // |scone_value| will be set to the value encoded in the first two bytes.
+  // Otherwise it will be nullopt.
+  bool ProcessIetfPacketHeader(QuicDataReader* reader, QuicPacketHeader* header,
+                               std::optional<uint8_t>& scone_value);
 
   // First processes possibly truncated packet number. Calculates the full
   // packet number from the truncated one and the last seen packet number, and
   // stores it to |packet_number|.
-  bool ProcessAndCalculatePacketNumber(
+  static bool ProcessAndCalculatePacketNumber(
       QuicDataReader* reader, QuicPacketNumberLength packet_number_length,
       QuicPacketNumber base_packet_number, uint64_t* packet_number);
   bool ProcessFrameData(QuicDataReader* reader, const QuicPacketHeader& header);
@@ -861,8 +909,8 @@ class QUICHE_EXPORT QuicFramer {
                                 QuicWindowUpdateFrame* frame);
   bool ProcessBlockedFrame(QuicDataReader* reader, QuicBlockedFrame* frame);
   void ProcessPaddingFrame(QuicDataReader* reader, QuicPaddingFrame* frame);
-  bool ProcessMessageFrame(QuicDataReader* reader, bool no_message_length,
-                           QuicMessageFrame* frame);
+  bool ProcessDatagramFrame(QuicDataReader* reader, bool no_datagram_length,
+                            QuicDatagramFrame* frame);
 
   bool DecryptPayload(size_t udp_packet_length, absl::string_view encrypted,
                       absl::string_view associated_data,
@@ -872,16 +920,11 @@ class QUICHE_EXPORT QuicFramer {
 
   // Returns the full packet number from the truncated
   // wire format version and the last seen packet number.
-  uint64_t CalculatePacketNumberFromWire(
+  static uint64_t CalculatePacketNumberFromWire(
       QuicPacketNumberLength packet_number_length,
-      QuicPacketNumber base_packet_number, uint64_t packet_number) const;
-
-  // Returns the QuicTime::Delta corresponding to the time from when the framer
-  // was created.
-  const QuicTime::Delta CalculateTimestampFromWire(uint32_t time_delta_us);
+      QuicPacketNumber base_packet_number, uint64_t packet_number);
 
   // Computes the wire size in bytes of time stamps in |ack|.
-  size_t GetAckFrameTimeStampSize(const QuicAckFrame& ack);
   size_t GetIetfAckFrameTimestampSize(const QuicAckFrame& ack);
 
   // Computes the wire size in bytes of the |ack| frame.
@@ -915,11 +958,13 @@ class QUICHE_EXPORT QuicFramer {
 
   static AckFrameInfo GetAckFrameInfo(const QuicAckFrame& frame);
 
+  // |detailed_error| can be nullptr.
   static QuicErrorCode ParsePublicHeaderGoogleQuic(
       QuicDataReader* reader, uint8_t* first_byte, PacketHeaderFormat* format,
       bool* version_present, QuicVersionLabel* version_label,
       ParsedQuicVersion* parsed_version,
-      QuicConnectionId* destination_connection_id, std::string* detailed_error);
+      absl::string_view* destination_connection_id,
+      std::string* detailed_error);
 
   bool ValidateReceivedConnectionIds(const QuicPacketHeader& header);
 
@@ -928,8 +973,6 @@ class QUICHE_EXPORT QuicFramer {
 
   bool AppendAckFrameAndTypeByte(const QuicAckFrame& frame,
                                  QuicDataWriter* writer);
-  bool AppendTimestampsToAckFrame(const QuicAckFrame& frame,
-                                  QuicDataWriter* writer);
 
   // Append IETF format ACK frame.
   //
@@ -954,9 +997,9 @@ class QUICHE_EXPORT QuicFramer {
                           QuicDataWriter* writer);
   bool AppendPaddingFrame(const QuicPaddingFrame& frame,
                           QuicDataWriter* writer);
-  bool AppendMessageFrameAndTypeByte(const QuicMessageFrame& frame,
-                                     bool last_frame_in_packet,
-                                     QuicDataWriter* writer);
+  bool AppendDatagramFrameAndTypeByte(const QuicDatagramFrame& frame,
+                                      bool last_frame_in_packet,
+                                      QuicDataWriter* writer);
 
   // IETF frame processing methods.
   bool ProcessIetfStreamFrame(QuicDataReader* reader, uint8_t frame_type,
@@ -977,6 +1020,8 @@ class QUICHE_EXPORT QuicFramer {
                           QuicCryptoFrame* frame);
   bool ProcessAckFrequencyFrame(QuicDataReader* reader,
                                 QuicAckFrequencyFrame* frame);
+  bool ProcessResetStreamAtFrame(QuicDataReader& reader,
+                                 QuicResetStreamAtFrame& frame);
   // IETF frame appending methods.  All methods append the type byte as well.
   bool AppendIetfStreamFrame(const QuicStreamFrame& frame,
                              bool last_frame_in_packet, QuicDataWriter* writer);
@@ -1059,9 +1104,8 @@ class QUICHE_EXPORT QuicFramer {
   // Determine whether the given QuicAckFrame should be serialized with a
   // IETF_ACK_RECEIVE_TIMESTAMPS frame type.
   bool UseIetfAckWithReceiveTimestamp(const QuicAckFrame& frame) const {
-    return VersionHasIetfQuicFrames(version_.transport_version) &&
-           process_timestamps_ &&
-           std::min<uint64_t>(max_receive_timestamps_per_ack_,
+    return VersionIsIetfQuic(version_.transport_version) &&
+           std::min<uint64_t>(peer_max_receive_timestamps_per_ack_,
                               frame.received_packet_times.size()) > 0;
   }
 
@@ -1073,8 +1117,6 @@ class QUICHE_EXPORT QuicFramer {
   // Largest successfully decrypted packet number per packet number space. Only
   // used when supports_multiple_packet_number_spaces_ is true.
   QuicPacketNumber largest_decrypted_packet_numbers_[NUM_PACKET_NUMBER_SPACES];
-  // Last server connection ID seen on the wire.
-  QuicConnectionId last_serialized_server_connection_id_;
   // Version of the protocol being used.
   ParsedQuicVersion version_;
   // This vector contains QUIC versions which we currently support.
@@ -1103,17 +1145,19 @@ class QUICHE_EXPORT QuicFramer {
   bool validate_flags_;
   // The diversification nonce from the last received packet.
   DiversificationNonce last_nonce_;
-  // If true, send and process timestamps in the ACK frame.
-  // TODO(ianswett): Remove the mutables once set_process_timestamps and
-  // set_receive_timestamp_exponent_ aren't const.
-  mutable bool process_timestamps_;
   // The max number of receive timestamps to send per ACK frame.
-  mutable uint32_t max_receive_timestamps_per_ack_;
-  // The exponent to use when writing/reading ACK receive timestamps.
-  mutable uint32_t receive_timestamps_exponent_;
+  mutable uint32_t peer_max_receive_timestamps_per_ack_;
+  // The max number of receive timestamps to allow in an incoming ACK frame.
+  mutable uint32_t local_max_receive_timestamps_per_ack_;
+  // The exponent to use when writing ACK receive timestamps.
+  mutable uint32_t peer_receive_timestamps_exponent_;
+  // The exponent to use when reading ACK receive timestamps.
+  mutable uint32_t local_receive_timestamps_exponent_;
+  // If true, process RESET_STREAM_AT frames.
+  bool process_reset_stream_at_;
   // The creation time of the connection, used to calculate timestamps.
   QuicTime creation_time_;
-  // The last timestamp received if process_timestamps_ is true.
+  // The last timestamp received if local_max_receive_timestamps_per_ack_ > 0.
   QuicTime::Delta last_timestamp_;
 
   // Whether IETF QUIC Key Update is supported on this connection.
@@ -1187,6 +1231,9 @@ class QUICHE_EXPORT QuicFramer {
   // The type of the IETF frame preceding the frame currently being processed. 0
   // when not processing a frame or only 1 frame has been processed.
   uint64_t previously_received_frame_type_;
+
+  // The QUIC connection is configured to process SCONE packets.
+  bool parse_scone_packets_ = false;
 };
 
 // Look for and parse the error code from the "<quic_error_code>:" text that

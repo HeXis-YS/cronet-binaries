@@ -38,14 +38,18 @@ struct BASE_EXPORT ShortcutProperties {
   static constexpr IndividualProperties PROPERTIES_DESCRIPTION = 1U << 3;
   static constexpr IndividualProperties PROPERTIES_ICON = 1U << 4;
   static constexpr IndividualProperties PROPERTIES_APP_ID = 1U << 5;
-  static constexpr IndividualProperties PROPERTIES_DUAL_MODE = 1U << 6;
   static constexpr IndividualProperties PROPERTIES_TOAST_ACTIVATOR_CLSID = 1U
-                                                                           << 7;
+                                                                           << 6;
+  // Write-only option for CreateOrUpdateShortcutLink: merges |arguments| with
+  // existing arguments on the shortcut (replacing any matching switches). Not
+  // included in PROPERTIES_ALL since it is not a distinct property for
+  // ResolveShortcutProperties.
+  static constexpr IndividualProperties PROPERTIES_ARGUMENTS_TO_MERGE = 1U << 7;
   // Be sure to update the values below when adding a new property.
   static constexpr IndividualProperties PROPERTIES_ALL =
       PROPERTIES_TARGET | PROPERTIES_WORKING_DIR | PROPERTIES_ARGUMENTS |
       PROPERTIES_DESCRIPTION | PROPERTIES_ICON | PROPERTIES_APP_ID |
-      PROPERTIES_DUAL_MODE | PROPERTIES_TOAST_ACTIVATOR_CLSID;
+      PROPERTIES_TOAST_ACTIVATOR_CLSID;
 
   ShortcutProperties();
   ShortcutProperties(const ShortcutProperties& other);
@@ -63,7 +67,14 @@ struct BASE_EXPORT ShortcutProperties {
 
   void set_arguments(const std::wstring& arguments_in) {
     arguments = arguments_in;
+    options &= ~PROPERTIES_ARGUMENTS_TO_MERGE;
     options |= PROPERTIES_ARGUMENTS;
+  }
+
+  void set_arguments_to_merge(const std::wstring& arguments_in) {
+    arguments = arguments_in;
+    options &= ~PROPERTIES_ARGUMENTS;
+    options |= PROPERTIES_ARGUMENTS_TO_MERGE;
   }
 
   void set_description(const std::wstring& description_in);
@@ -77,11 +88,6 @@ struct BASE_EXPORT ShortcutProperties {
   void set_app_id(const std::wstring& app_id_in) {
     app_id = app_id_in;
     options |= PROPERTIES_APP_ID;
-  }
-
-  void set_dual_mode(bool dual_mode_in) {
-    dual_mode = dual_mode_in;
-    options |= PROPERTIES_DUAL_MODE;
   }
 
   void set_toast_activator_clsid(const CLSID& toast_activator_clsid_in) {
@@ -105,8 +111,6 @@ struct BASE_EXPORT ShortcutProperties {
   int icon_index = -1;
   // The app model id for the shortcut.
   std::wstring app_id;
-  // Whether this is a dual mode shortcut (Windows).
-  bool dual_mode = false;
   // The CLSID of the COM object registered with the OS via the shortcut. This
   // is for app activation via user interaction with a toast notification in the
   // Action Center. (Win10 version 1607, build 14393, and beyond).

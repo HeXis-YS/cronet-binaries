@@ -7,18 +7,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <iomanip>
+#include <ostream>
 #include <string>
 
 #include "absl/strings/escaping.h"
+#include "absl/strings/string_view.h"
 #include "openssl/siphash.h"
 #include "quiche/quic/core/crypto/quic_random.h"
-#include "quiche/quic/core/quic_types.h"
-#include "quiche/quic/platform/api/quic_bug_tracker.h"
-#include "quiche/quic/platform/api/quic_flag_utils.h"
-#include "quiche/quic/platform/api/quic_flags.h"
-#include "quiche/quic/platform/api/quic_logging.h"
-#include "quiche/common/quiche_endian.h"
+#include "quiche/common/platform/api/quiche_logging.h"
 
 namespace quic {
 
@@ -32,14 +28,14 @@ namespace {
 // that they always land in the same hash bucket.
 class QuicConnectionIdHasher {
  public:
-  inline QuicConnectionIdHasher()
+  QuicConnectionIdHasher()
       : QuicConnectionIdHasher(QuicRandom::GetInstance()) {}
 
-  explicit inline QuicConnectionIdHasher(QuicRandom* random) {
+  explicit QuicConnectionIdHasher(QuicRandom* random) {
     random->RandBytes(&sip_hash_key_, sizeof(sip_hash_key_));
   }
 
-  inline size_t Hash(const char* input, size_t input_len) const {
+  size_t Hash(const char* input, size_t input_len) const {
     return static_cast<size_t>(SIPHASH_24(
         sip_hash_key_, reinterpret_cast<const uint8_t*>(input), input_len));
   }
@@ -54,7 +50,7 @@ QuicConnectionId::QuicConnectionId() : QuicConnectionId(nullptr, 0) {
   static_assert(offsetof(QuicConnectionId, padding_) ==
                     offsetof(QuicConnectionId, length_),
                 "bad offset");
-  static_assert(sizeof(QuicConnectionId) <= 16, "bad size");
+  static_assert(sizeof(QuicConnectionId) <= 24, "bad size");
 }
 
 QuicConnectionId::QuicConnectionId(const char* data, uint8_t length) {
@@ -74,6 +70,9 @@ QuicConnectionId::QuicConnectionId(const char* data, uint8_t length) {
 QuicConnectionId::QuicConnectionId(const absl::Span<const uint8_t> data)
     : QuicConnectionId(reinterpret_cast<const char*>(data.data()),
                        data.length()) {}
+
+QuicConnectionId::QuicConnectionId(absl::string_view data)
+    : QuicConnectionId(data.data(), data.length()) {}
 
 QuicConnectionId::~QuicConnectionId() {
   if (length_ > sizeof(data_short_)) {

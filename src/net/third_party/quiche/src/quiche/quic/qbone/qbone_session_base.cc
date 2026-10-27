@@ -7,6 +7,8 @@
 #include <netinet/icmp6.h>
 #include <netinet/ip6.h>
 
+#include <limits>
+#include <memory>
 #include <utility>
 
 #include "absl/strings/string_view.h"
@@ -19,8 +21,8 @@
 #include "quiche/quic/qbone/qbone_constants.h"
 #include "quiche/common/platform/api/quiche_command_line_flags.h"
 #include "quiche/common/platform/api/quiche_logging.h"
-#include "quiche/common/platform/api/quiche_mem_slice.h"
 #include "quiche/common/quiche_buffer_allocator.h"
+#include "quiche/common/quiche_mem_slice.h"
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     bool, qbone_close_ephemeral_frames, true,
@@ -33,16 +35,14 @@ namespace quic {
 
 QboneSessionBase::QboneSessionBase(
     QuicConnection* connection, Visitor* owner, const QuicConfig& config,
-    const ParsedQuicVersionVector& supported_versions,
-    QbonePacketWriter* writer)
+    const ParsedQuicVersionVector& supported_versions)
     : QuicSession(connection, owner, config, supported_versions,
                   /*num_expected_unidirectional_static_streams = */ 0) {
-  set_writer(writer);
   const uint32_t max_streams =
       (std::numeric_limits<uint32_t>::max() / kMaxAvailableStreamsMultiplier) -
       1;
   this->config()->SetMaxBidirectionalStreamsToSend(max_streams);
-  if (VersionHasIetfQuicFrames(transport_version())) {
+  if (VersionIsIetfQuic(transport_version())) {
     this->config()->SetMaxUnidirectionalStreamsToSend(max_streams);
   }
 }
@@ -83,18 +83,13 @@ void QboneSessionBase::OnStreamFrame(const QuicStreamFrame& frame) {
   QuicSession::OnStreamFrame(frame);
 }
 
-void QboneSessionBase::OnMessageReceived(absl::string_view message) {
-  ++num_message_packets_;
-  ProcessPacketFromPeer(message);
+void QboneSessionBase::OnDatagramReceived(absl::string_view datagram) {
+  ++num_datagram_packets_;
+  ProcessPacketFromPeer(datagram);
 }
 
 QuicStream* QboneSessionBase::CreateIncomingStream(QuicStreamId id) {
   return ActivateDataStream(CreateDataStream(id));
-}
-
-QuicStream* QboneSessionBase::CreateIncomingStream(PendingStream* /*pending*/) {
-  QUICHE_NOTREACHED();
-  return nullptr;
 }
 
 bool QboneSessionBase::ShouldKeepConnectionAlive() const {
@@ -135,13 +130,13 @@ void QboneSessionBase::SendPacketToPeer(absl::string_view packet) {
     return;
   }
 
-  if (send_packets_as_messages_) {
+  if (send_packets_as_datagrams_) {
     quiche::QuicheMemSlice slice(quiche::QuicheBuffer::Copy(
         connection()->helper()->GetStreamSendBufferAllocator(), packet));
-    switch (SendMessage(absl::MakeSpan(&slice, 1), /*flush=*/true).status) {
-      case MESSAGE_STATUS_SUCCESS:
+    switch (SendDatagram(absl::MakeSpan(&slice, 1), /*flush=*/true).status) {
+      case DATAGRAM_STATUS_SUCCESS:
         break;
-      case MESSAGE_STATUS_TOO_LARGE: {
+      case DATAGRAM_STATUS_TOO_LARGE: {
         if (packet.size() < sizeof(ip6_hdr)) {
           QUIC_BUG(quic_bug_10987_2)
               << "Dropped malformed packet: IPv6 header too short";
@@ -151,27 +146,29 @@ void QboneSessionBase::SendPacketToPeer(absl::string_view packet) {
         icmp6_hdr icmp_header{};
         icmp_header.icmp6_type = ICMP6_PACKET_TOO_BIG;
         icmp_header.icmp6_mtu =
-            connection()->GetGuaranteedLargestMessagePayload();
+            connection()->GetGuaranteedLargestDatagramPayload();
 
         CreateIcmpPacket(header->ip6_dst, header->ip6_src, icmp_header, packet,
                          [this](absl::string_view icmp_packet) {
-                           writer_->WritePacketToNetwork(icmp_packet.data(),
-                                                         icmp_packet.size());
+                           SendErrorPacketToNetwork(icmp_packet);
                          });
         break;
       }
-      case MESSAGE_STATUS_ENCRYPTION_NOT_ESTABLISHED:
+      case DATAGRAM_STATUS_ENCRYPTION_NOT_ESTABLISHED:
         QUIC_BUG(quic_bug_10987_3)
-            << "MESSAGE_STATUS_ENCRYPTION_NOT_ESTABLISHED";
+            << "DATAGRAM_STATUS_ENCRYPTION_NOT_ESTABLISHED";
         break;
-      case MESSAGE_STATUS_UNSUPPORTED:
-        QUIC_BUG(quic_bug_10987_4) << "MESSAGE_STATUS_UNSUPPORTED";
+      case DATAGRAM_STATUS_UNSUPPORTED:
+        QUIC_BUG(quic_bug_10987_4) << "DATAGRAM_STATUS_UNSUPPORTED";
         break;
-      case MESSAGE_STATUS_BLOCKED:
-        QUIC_BUG(quic_bug_10987_5) << "MESSAGE_STATUS_BLOCKED";
+      case DATAGRAM_STATUS_BLOCKED:
+        QUIC_BUG(quic_bug_10987_5) << "DATAGRAM_STATUS_BLOCKED";
         break;
-      case MESSAGE_STATUS_INTERNAL_ERROR:
-        QUIC_BUG(quic_bug_10987_6) << "MESSAGE_STATUS_INTERNAL_ERROR";
+      case DATAGRAM_STATUS_SETTINGS_NOT_RECEIVED:
+        QUIC_BUG(quic_bug_10987_8) << "DATAGRAM_STATUS_SETTINGS_NOT_RECEIVED";
+        break;
+      case DATAGRAM_STATUS_INTERNAL_ERROR:
+        QUIC_BUG(quic_bug_10987_6) << "DATAGRAM_STATUS_INTERNAL_ERROR";
         break;
     }
     return;
@@ -197,17 +194,12 @@ uint64_t QboneSessionBase::GetNumStreamedPackets() const {
   return num_streamed_packets_;
 }
 
-uint64_t QboneSessionBase::GetNumMessagePackets() const {
-  return num_message_packets_;
+uint64_t QboneSessionBase::GetNumDatagramPackets() const {
+  return num_datagram_packets_;
 }
 
 uint64_t QboneSessionBase::GetNumFallbackToStream() const {
   return num_fallback_to_stream_;
-}
-
-void QboneSessionBase::set_writer(QbonePacketWriter* writer) {
-  writer_ = writer;
-  quic::AdjustTestValue("quic_QbonePacketWriter", &writer_);
 }
 
 }  // namespace quic

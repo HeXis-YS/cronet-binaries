@@ -5,7 +5,10 @@
 #ifndef QUICHE_QUIC_CORE_QUIC_PATH_VALIDATOR_H_
 #define QUICHE_QUIC_CORE_QUIC_PATH_VALIDATOR_H_
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <ostream>
 
 #include "absl/container/inlined_vector.h"
@@ -19,8 +22,8 @@
 #include "quiche/quic/core/quic_packet_writer.h"
 #include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_types.h"
-#include "quiche/quic/platform/api/quic_export.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/common/platform/api/quiche_export.h"
 
 namespace quic {
 
@@ -37,33 +40,77 @@ enum class PathValidationReason {
   kServerPreferredAddressMigration,
   kPortMigration,
   kConnectionMigration,
-  kMaxValue,
+  kNumReasons,
 };
+
+struct QUICHE_EXPORT PathValidationFailure {
+  enum class Reason : uint8_t {
+    kUnknown = 0,
+    kStatelessReset = 1,   // The peer sent a stateless reset on the path.
+    kNewerValidation = 2,  // Starting validation on a new path.
+    kRetryTimeout = 3,     // The validation process hit the retry limit.
+    kNotConnected = 4,     // PATH_CHALLENGE can't be sent because the
+                           // connection is no longer active.
+  };
+  Reason reason;
+};
+
+// Opaque handle for device-wide connection to a particular network.
+// For example an association with a particular WiFi network with a particular
+// SSID or a connection to particular cellular network. The meaning of this
+// handle is target-dependent. On Android QuicNetworkHandles are equivalent to:
+//   On Lollipop, the framework's concept of NetIDs (e.g. Network.netId), and
+//   On Marshmallow and newer releases, network handle (e.g.
+//   Network.getNetworkHandle()).
+using QuicNetworkHandle = int64_t;
+
+// An invalid NetworkHandle.
+// Used on platforms which do not support network handles or to represent an
+// unusable network.
+inline constexpr QuicNetworkHandle kInvalidNetworkHandle = -1;
 
 // Interface to provide the information of the path to be validated.
 class QUICHE_EXPORT QuicPathValidationContext {
  public:
   QuicPathValidationContext(const QuicSocketAddress& self_address,
                             const QuicSocketAddress& peer_address)
-      : self_address_(self_address),
-        peer_address_(peer_address),
-        effective_peer_address_(peer_address) {}
+      : QuicPathValidationContext(self_address, peer_address,
+                                  kInvalidNetworkHandle) {}
 
   QuicPathValidationContext(const QuicSocketAddress& self_address,
                             const QuicSocketAddress& peer_address,
-                            const QuicSocketAddress& effective_peer_address)
+                            QuicNetworkHandle network)
+      : QuicPathValidationContext(self_address, peer_address, peer_address,
+                                  network) {}
+
+  QuicPathValidationContext(const QuicSocketAddress& self_address,
+                            const QuicSocketAddress& peer_address,
+                            const QuicSocketAddress& effective_peer_address,
+                            QuicNetworkHandle network)
       : self_address_(self_address),
         peer_address_(peer_address),
-        effective_peer_address_(effective_peer_address) {}
+        effective_peer_address_(effective_peer_address),
+        network_handle_(network) {}
 
   virtual ~QuicPathValidationContext() = default;
 
   virtual QuicPacketWriter* WriterToUse() = 0;
+  // Returns true if the writer should be owned by the QUIC connection.
+  // TODO(danzh): make it a pure virtual interface once
+  // EnvoyQuicPathValidationContext implements it.
+  virtual bool ShouldConnectionOwnWriter() const { return true; }
 
+  QuicNetworkHandle network() const { return network_handle_; }
   const QuicSocketAddress& self_address() const { return self_address_; }
   const QuicSocketAddress& peer_address() const { return peer_address_; }
   const QuicSocketAddress& effective_peer_address() const {
     return effective_peer_address_;
+  }
+  void set_failure_reason(PathValidationFailure::Reason failure_reason) {
+    failure_reason_ = failure_reason;
+  }
+  std::optional<PathValidationFailure::Reason> failure_reason() const {
+    return failure_reason_;
   }
 
  private:
@@ -73,9 +120,15 @@ class QUICHE_EXPORT QuicPathValidationContext {
   QuicSocketAddress self_address_;
   // The address to send PATH_CHALLENGE.
   QuicSocketAddress peer_address_;
-  // The actual peer address which is different from |peer_address_| if the peer
+  // The actual peer address which is different from `peer_address_` if the peer
   // is behind a proxy.
   QuicSocketAddress effective_peer_address_;
+  // See comments above for QuicNetworkHandle.
+  // `kInvalidNetworkHandle`, if the platform doesn't expose handles for
+  // networks, e.g. iOS and Linux. It shouldn't referred to in such case.
+  QuicNetworkHandle network_handle_;
+  // nullopt if pending or successful.
+  std::optional<PathValidationFailure::Reason> failure_reason_;
 };
 
 // Used to validate a path by sending up to 3 PATH_CHALLENGE frames before
@@ -138,7 +191,7 @@ class QUICHE_EXPORT QuicPathValidator {
                       QuicSocketAddress self_address);
 
   // Cancel the retry timer and reset the path and result delegate.
-  void CancelPathValidation();
+  void CancelPathValidation(PathValidationFailure::Reason failure_reason);
 
   bool HasPendingPathValidation() const;
 

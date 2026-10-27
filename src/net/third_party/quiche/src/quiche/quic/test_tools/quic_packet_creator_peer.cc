@@ -4,6 +4,10 @@
 
 #include "quiche/quic/test_tools/quic_packet_creator_peer.h"
 
+#include <memory>
+#include <string>
+#include <utility>
+
 #include "quiche/quic/core/frames/quic_frame.h"
 #include "quiche/quic/core/quic_packet_creator.h"
 #include "quiche/quic/core/quic_types.h"
@@ -112,13 +116,6 @@ SerializedPacket QuicPacketCreatorPeer::SerializeAllFrames(
 
 // static
 std::unique_ptr<SerializedPacket>
-QuicPacketCreatorPeer::SerializeConnectivityProbingPacket(
-    QuicPacketCreator* creator) {
-  return creator->SerializeConnectivityProbingPacket();
-}
-
-// static
-std::unique_ptr<SerializedPacket>
 QuicPacketCreatorPeer::SerializePathChallengeConnectivityProbingPacket(
     QuicPacketCreator* creator, const QuicPathFrameBuffer& payload) {
   return creator->SerializePathChallengeConnectivityProbingPacket(payload);
@@ -149,6 +146,23 @@ QuicFrames& QuicPacketCreatorPeer::QueuedFrames(QuicPacketCreator* creator) {
 void QuicPacketCreatorPeer::SetRandom(QuicPacketCreator* creator,
                                       QuicRandom* random) {
   creator->random_ = random;
+}
+
+// static
+bool QuicPacketCreatorPeer::WillAttachSconeIndicator(
+    const QuicPacketCreator& creator) {
+  return creator.append_scone_indicator_;
+}
+
+// static
+bool QuicPacketCreatorPeer::RemoveSoftMaxPacketLength(
+    QuicPacketCreator* creator) {
+  return creator->RemoveSoftMaxPacketLength();
+}
+
+// static
+bool QuicPacketCreatorPeer::HasSconePacket(QuicPacketCreator* creator) {
+  return creator->packet_.has_scone_packet;
 }
 
 }  // namespace test

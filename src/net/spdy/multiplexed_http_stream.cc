@@ -8,7 +8,6 @@
 
 #include "base/notreached.h"
 #include "net/http/http_raw_request_headers.h"
-#include "net/third_party/quiche/src/quiche/spdy/core/http2_header_block.h"
 
 namespace net {
 
@@ -23,6 +22,11 @@ int MultiplexedHttpStream::GetRemoteEndpoint(IPEndPoint* endpoint) {
 }
 
 void MultiplexedHttpStream::GetSSLInfo(SSLInfo* ssl_info) {
+  // Refresh from the live session to pick up state that may have changed
+  // after the initial cache (e.g., early_data_accepted is only known after
+  // the TLS/QUIC handshake completes, but the cache is populated at stream
+  // creation time before the handshake finishes).
+  session_->SaveSSLInfo();
   session_->GetSSLInfo(ssl_info);
 }
 
@@ -30,17 +34,8 @@ void MultiplexedHttpStream::SaveSSLInfo() {
   session_->SaveSSLInfo();
 }
 
-void MultiplexedHttpStream::GetSSLCertRequestInfo(
-    SSLCertRequestInfo* cert_request_info) {
-  // A multiplexed stream cannot request client certificates. Client
-  // authentication may only occur during the initial SSL handshake.
-  NOTREACHED();
-}
-
 void MultiplexedHttpStream::Drain(HttpNetworkSession* session) {
   NOTREACHED();
-  Close(false);
-  delete this;
 }
 
 std::unique_ptr<HttpStream> MultiplexedHttpStream::RenewStreamForAuth() {
@@ -60,7 +55,7 @@ void MultiplexedHttpStream::SetRequestHeadersCallback(
 }
 
 void MultiplexedHttpStream::DispatchRequestHeadersCallback(
-    const spdy::Http2HeaderBlock& spdy_headers) {
+    const quiche::HttpHeaderBlock& spdy_headers) {
   if (!request_headers_callback_)
     return;
   HttpRawRequestHeaders raw_headers;

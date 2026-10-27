@@ -3,28 +3,32 @@
 # found in the LICENSE file.
 """Common methods and variables used by Cr-Fuchsia testing infrastructure."""
 
+import ipaddress
 import json
 import logging
 import os
-import re
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 import time
 
 from argparse import ArgumentParser
 from typing import Iterable, List, Optional, Tuple
+from dataclasses import dataclass
 
 from compatible_utils import get_ssh_prefix, get_host_arch
+from repeating_log import RepeatingLog
 
 
 def _find_src_root() -> str:
     """Find the root of the src folder."""
     if os.environ.get('SRC_ROOT'):
         return os.environ['SRC_ROOT']
-    return os.path.join(os.path.dirname(__file__), os.pardir, os.pardir,
-                        os.pardir)
+    return os.path.join(
+        os.path.dirname(__file__), os.pardir, os.pardir, os.pardir
+    )
 
 
 # The absolute path of the root folder to work on. It may not always be the
@@ -42,6 +46,16 @@ def _find_fuchsia_images_root() -> str:
 
 IMAGES_ROOT = os.path.abspath(_find_fuchsia_images_root())
 
+
+def _find_fuchsia_internal_images_root() -> str:
+    """Define the root of the fuchsia images."""
+    if os.environ.get('FUCHSIA_INTERNAL_IMAGES_ROOT'):
+        return os.environ['FUCHSIA_INTERNAL_IMAGES_ROOT']
+    return IMAGES_ROOT + '-internal'
+
+
+INTERNAL_IMAGES_ROOT = os.path.abspath(_find_fuchsia_internal_images_root())
+
 REPO_ALIAS = 'fuchsia.com'
 
 
@@ -54,23 +68,46 @@ def _find_fuchsia_sdk_root() -> str:
 
 SDK_ROOT = os.path.abspath(_find_fuchsia_sdk_root())
 
+
+def _find_fuchsia_gn_sdk_root() -> str:
+    """Define the root of the fuchsia sdk."""
+    if os.environ.get('FUCHSIA_GN_SDK_ROOT'):
+        return os.environ['FUCHSIA_GN_SDK_ROOT']
+    return os.path.join(DIR_SRC_ROOT, 'third_party', 'fuchsia-gn-sdk', 'src')
+
+
+GN_SDK_ROOT = os.path.abspath(_find_fuchsia_gn_sdk_root())
+
 SDK_TOOLS_DIR = os.path.join(SDK_ROOT, 'tools', get_host_arch())
 _FFX_TOOL = os.path.join(SDK_TOOLS_DIR, 'ffx')
+_FFX_ISOLATE_DIR = 'FFX_ISOLATE_DIR'
 
 
 def set_ffx_isolate_dir(isolate_dir: str) -> None:
-    """Overwrites the global environment so the following ffx calls will have
-    the isolate dir being carried."""
+    """Sets the global environment so the following ffx calls will have the
+    isolate dir being carried."""
+    assert not has_ffx_isolate_dir(), 'The isolate dir is already set.'
+    os.environ[_FFX_ISOLATE_DIR] = isolate_dir
 
-    os.environ['FFX_ISOLATE_DIR'] = isolate_dir
+
+def get_ffx_isolate_dir() -> str:
+    """Returns the global environment of the isolate dir of ffx. This function
+    should only be called after set_ffx_isolate_dir."""
+    return os.environ[_FFX_ISOLATE_DIR]
+
+
+def has_ffx_isolate_dir() -> bool:
+    """Returns whether the isolate dir of ffx is set."""
+    return _FFX_ISOLATE_DIR in os.environ
 
 
 def get_hash_from_sdk():
     """Retrieve version info from the SDK."""
 
     version_file = os.path.join(SDK_ROOT, 'meta', 'manifest.json')
-    assert os.path.exists(version_file), \
-           'Could not detect version file. Make sure the SDK is downloaded.'
+    assert os.path.exists(version_file), (
+        'Could not detect version file. Make sure the SDK is downloaded.'
+    )
     with open(version_file, 'r') as f:
         return json.load(f)['id']
 
@@ -100,120 +137,20 @@ def make_clean_directory(directory_name):
     os.makedirs(directory_name)
 
 
-def _get_daemon_status():
-    """Determines daemon status via `ffx daemon socket`.
-
-    Returns:
-      dict of status of the socket. Status will have a key Running or
-      NotRunning to indicate if the daemon is running.
-    """
-    status = json.loads(
-        run_ffx_command(cmd=('daemon', 'socket'),
-                        check=True,
-                        capture_output=True,
-                        json_out=True,
-                        suppress_repair=True).stdout.strip())
-    return status.get('pid', {}).get('status', {'NotRunning': True})
-
-
-def _is_daemon_running():
-    return 'Running' in _get_daemon_status()
-
-
-def _wait_for_daemon(start=True, timeout_seconds=100):
-    """Waits for daemon to reach desired state in a polling loop.
-
-    Sleeps for 5s between polls.
-
-    Args:
-      start: bool. Indicates to wait for daemon to start up. If False,
-        indicates waiting for daemon to die.
-      timeout_seconds: int. Number of seconds to wait for the daemon to reach
-        the desired status.
-    Raises:
-      TimeoutError: if the daemon does not reach the desired state in time.
-    """
-    wanted_status = 'start' if start else 'stop'
-    sleep_period_seconds = 5
-    attempts = int(timeout_seconds / sleep_period_seconds)
-    for i in range(attempts):
-        if _is_daemon_running() == start:
-            return
-        if i != attempts:
-            logging.info('Waiting for daemon to %s...', wanted_status)
-            time.sleep(sleep_period_seconds)
-
-    raise TimeoutError(f'Daemon did not {wanted_status} in time.')
-
-
-def _run_repair_command(output):
-    """Scans |output| for a self-repair command to run and, if found, runs it.
-
-    Returns:
-      True if a repair command was found and ran successfully. False otherwise.
-    """
-    # Check for a string along the lines of:
-    # "Run `ffx doctor --restart-daemon` for further diagnostics."
-    match = re.search('`ffx ([^`]+)`', output)
-    if not match or len(match.groups()) != 1:
-        return False  # No repair command found.
-    args = match.groups()[0].split()
-
-    try:
-        run_ffx_command(cmd=args, suppress_repair=True)
-        # Need the daemon to be up at the end of this.
-        _wait_for_daemon(start=True)
-    except subprocess.CalledProcessError:
-        return False  # Repair failed.
-    return True  # Repair succeeded.
-
-
-# The following two functions are the temporary work around before
-# https://fxbug.dev/92296 and https://fxbug.dev/125873 are being fixed.
-def start_ffx_daemon():
-    """Starts the ffx daemon by using doctor --restart-daemon since daemon start
-    blocks the current shell.
-
-    Note, doctor --restart-daemon usually fails since the timeout in ffx is
-    short and won't be sufficient to wait for the daemon to really start.
-
-    Also, doctor --restart-daemon always restarts the daemon, so this function
-    should be used with caution unless it's really needed to "restart" the
-    daemon by explicitly calling stop daemon first.
-    """
-    assert not _is_daemon_running(), "Call stop_ffx_daemon first."
-    run_ffx_command(cmd=('doctor', '--restart-daemon'), check=False)
-    _wait_for_daemon(start=True)
-
-
-def stop_ffx_daemon():
-    """Stops the ffx daemon"""
-    run_ffx_command(cmd=('daemon', 'stop', '-t', '10000'))
-    _wait_for_daemon(start=False)
-
-
-def run_ffx_command(suppress_repair: bool = False,
-                    check: bool = True,
-                    capture_output: Optional[bool] = None,
-                    timeout: Optional[int] = None,
-                    **kwargs) -> subprocess.CompletedProcess:
+def run_ffx_command(
+    check: bool = True,
+    capture_output: Optional[bool] = None,
+    timeout: Optional[int] = None,
+    **kwargs,
+) -> subprocess.CompletedProcess:
     """Runs `ffx` with the given arguments, waiting for it to exit.
 
-    If `ffx` exits with a non-zero exit code, the output is scanned for a
-    recommended repair command (e.g., "Run `ffx doctor --restart-daemon` for
-    further diagnostics."). If such a command is found, it is run and then the
-    original command is retried. This behavior can be suppressed via the
-    `suppress_repair` argument.
-
     **
-    Except for `suppress_repair`, the arguments below are named after
-    |subprocess.run| arguments. They are overloaded to avoid them from being
-    forwarded to |subprocess.Popen|.
+    The arguments below are named after |subprocess.run| arguments. They are
+    overloaded to avoid them from being forwarded to |subprocess.Popen|.
     **
     See run_continuous_ffx_command for additional arguments.
     Args:
-        suppress_repair: If True, do not attempt to find and run a repair
-            command.
         check: If True, CalledProcessError is raised if ffx returns a non-zero
             exit code.
         capture_output: Whether to capture both stdout/stderr.
@@ -224,52 +161,46 @@ def run_ffx_command(suppress_repair: bool = False,
     Raises:
         CalledProcessError if |check| is true.
     """
-    # Always capture output when:
-    # - Repair does not need to be suppressed
-    # - capture_output is Truthy
-    if capture_output or not suppress_repair:
+    if capture_output:
         kwargs['stdout'] = subprocess.PIPE
-        kwargs['stderr'] = subprocess.STDOUT
+        kwargs['stderr'] = subprocess.PIPE
     proc = None
     try:
         proc = run_continuous_ffx_command(**kwargs)
-        stdout, stderr = proc.communicate(input=kwargs.get('stdin'),
-                                          timeout=timeout)
+        stdout, stderr = proc.communicate(
+            input=kwargs.get('stdin'), timeout=timeout
+        )
         completed_proc = subprocess.CompletedProcess(
             args=proc.args,
             returncode=proc.returncode,
             stdout=stdout,
-            stderr=stderr)
+            stderr=stderr,
+        )
         if check:
             completed_proc.check_returncode()
         return completed_proc
     except subprocess.CalledProcessError as cpe:
-        if proc is None:
-            raise
-        logging.error('%s %s failed with returncode %s.',
-                      os.path.relpath(_FFX_TOOL),
-                      subprocess.list2cmdline(proc.args[1:]), cpe.returncode)
-        if cpe.output:
-            logging.error('stdout of the command: %s', cpe.output)
-        if suppress_repair or (cpe.output
-                               and not _run_repair_command(cpe.output)):
-            raise
-
-    # If the original command failed but a repair command was found and
-    # succeeded, try one more time with the original command.
-    return run_ffx_command(suppress_repair=True,
-                           check=check,
-                           capture_output=capture_output,
-                           timeout=timeout,
-                           **kwargs)
+        logging.error(
+            '%s %s failed with returncode %s.',
+            os.path.relpath(_FFX_TOOL),
+            subprocess.list2cmdline(proc.args[1:]),
+            cpe.returncode,
+        )
+        if cpe.stdout:
+            logging.error('stdout of the command: %s', cpe.stdout)
+        if cpe.stderr:
+            logging.error('stderr or the command: %s', cpe.stderr)
+        raise
 
 
-def run_continuous_ffx_command(cmd: Iterable[str],
-                               target_id: Optional[str] = None,
-                               configs: Optional[List[str]] = None,
-                               json_out: bool = False,
-                               encoding: Optional[str] = 'utf-8',
-                               **kwargs) -> subprocess.Popen:
+def run_continuous_ffx_command(
+    cmd: Iterable[str],
+    target_id: Optional[str] = None,
+    configs: Optional[List[str]] = None,
+    json_out: bool = False,
+    encoding: Optional[str] = 'utf-8',
+    **kwargs,
+) -> subprocess.Popen:
     """Runs `ffx` with the given arguments, returning immediately.
 
     Args:
@@ -303,8 +234,10 @@ def read_package_paths(out_dir: str, pkg_name: str) -> List[str]:
         A list of the absolute path to all FAR files the package depends on.
     """
     with open(
-            os.path.join(DIR_SRC_ROOT, out_dir, 'gen', 'package_metadata',
-                         f'{pkg_name}.meta')) as meta_file:
+        os.path.join(
+            DIR_SRC_ROOT, out_dir, 'gen', 'package_metadata', f'{pkg_name}.meta'
+        )
+    ) as meta_file:
         data = json.load(meta_file)
     packages = []
     for package in data['packages']:
@@ -319,70 +252,144 @@ def register_common_args(parser: ArgumentParser) -> None:
         '--out-dir',
         '-C',
         type=os.path.realpath,
-        help='Path to the directory in which build files are located. ')
+        help='Path to the directory in which build files are located. ',
+    )
 
 
 def register_device_args(parser: ArgumentParser) -> None:
     """Register device arguments."""
     device_args = parser.add_argument_group('device', 'device arguments')
-    device_args.add_argument('--target-id',
-                             default=os.environ.get('FUCHSIA_NODENAME'),
-                             help=('Specify the target device. This could be '
-                                   'a node-name (e.g. fuchsia-emulator) or an '
-                                   'an ip address along with an optional port '
-                                   '(e.g. [fe80::e1c4:fd22:5ee5:878e]:22222, '
-                                   '1.2.3.4, 1.2.3.4:33333). If unspecified, '
-                                   'the default target in ffx will be used.'))
+    device_args.add_argument(
+        '--target-id',
+        default=os.environ.get('FUCHSIA_NODENAME'),
+        help=(
+            'Specify the target device. This could be '
+            'a node-name (e.g. fuchsia-emulator) or an '
+            'an ip address along with an optional port '
+            '(e.g. [fe80::e1c4:fd22:5ee5:878e]:22222, '
+            '1.2.3.4, 1.2.3.4:33333). If unspecified, '
+            'the default target in ffx will be used.'
+        ),
+    )
 
 
 def register_log_args(parser: ArgumentParser) -> None:
     """Register commonly used arguments."""
 
     log_args = parser.add_argument_group('logging', 'logging arguments')
-    log_args.add_argument('--logs-dir',
-                          type=os.path.realpath,
-                          help=('Directory to write logs to.'))
+    log_args.add_argument(
+        '--logs-dir',
+        type=os.path.realpath,
+        help=('Directory to write logs to.'),
+    )
+    log_args.add_argument(
+        '--wait-for-log-pattern',
+        help=('Pattern to wait for in system log before exiting.'),
+    )
 
 
 def get_component_uri(package: str) -> str:
     """Retrieve the uri for a package."""
+    # If the input is a full package already, do nothing
+    if package.startswith('fuchsia-pkg://'):
+        return package
     return f'fuchsia-pkg://{REPO_ALIAS}/{package}#meta/{package}.cm'
+
+
+def ssh_run(
+    cmd: List[str], target_id: Optional[str], check=True, **kwargs
+) -> subprocess.CompletedProcess:
+    """Runs a command on the |target_id| via ssh."""
+    ssh_prefix = get_ssh_prefix(get_ssh_address(target_id))
+    return subprocess.run(ssh_prefix + ['--'] + cmd, check=check, **kwargs)
 
 
 def resolve_packages(packages: List[str], target_id: Optional[str]) -> None:
     """Ensure that all |packages| are installed on a device."""
 
-    ssh_prefix = get_ssh_prefix(get_ssh_address(target_id))
-    subprocess.run(ssh_prefix + ['--', 'pkgctl', 'gc'], check=False)
+    # A temporary solution to avoid cycle dependency. The DIR_SRC_ROOT should be
+    # moved away from common.py.
+    # pylint: disable=cyclic-import, import-outside-toplevel
+    import monitors
 
-    def _retry_command(cmd: List[str],
-                       retries: int = 2,
-                       **kwargs) -> Optional[subprocess.CompletedProcess]:
+    with monitors.time_consumption('pkgctl', 'gc'):
+        ssh_run(['pkgctl', 'gc'], target_id, check=False)
+
+    def _retry_resolve(package) -> None:
         """Helper function for retrying a subprocess.run command."""
 
-        for i in range(retries):
-            if i == retries - 1:
-                proc = subprocess.run(cmd, **kwargs, check=True)
-                return proc
-            proc = subprocess.run(cmd, **kwargs, check=False)
+        cmd = [
+            'pkgctl',
+            'resolve',
+            'fuchsia-pkg://%s/%s' % (REPO_ALIAS, package),
+        ]
+        retry_counter = monitors.count('pkgctl', 'resolve', package, 'retry')
+        for _ in range(4):
+            proc = ssh_run(cmd, target_id=target_id, check=False)
             if proc.returncode == 0:
-                return proc
+                return
             time.sleep(3)
-        return None
+            retry_counter.record()
+        ssh_run(cmd, target_id=target_id, check=True)
 
     for package in packages:
-        resolve_cmd = [
-            '--', 'pkgctl', 'resolve',
-            'fuchsia-pkg://%s/%s' % (REPO_ALIAS, package)
-        ]
-        _retry_command(ssh_prefix + resolve_cmd)
+        with monitors.time_consumption('pkgctl', 'resolve', package):
+            _retry_resolve(package)
 
 
-def get_ssh_address(target_id: Optional[str]) -> str:
-    """Determines SSH address for given target."""
-    return run_ffx_command(cmd=('target', 'get-ssh-address'),
-                           target_id=target_id,
-                           capture_output=True).stdout.strip()
+def get_ip_address(target_id: Optional[str], ipv4_only: bool = False):
+    """Determines address of the given target; returns the value from
+    ipaddress.ip_address."""
+    return ipaddress.ip_address(get_ssh_address(target_id, ipv4_only)[0])
+
+
+def get_ssh_address(
+    target_id: Optional[str], ipv4_only: bool = False
+) -> Tuple[str, int]:
+    """Determines SSH address for given target, this function waits for the
+    device to be reachable up to 5 minutes, or throws an error if it fails."""
+    cmd = ['target', 'list']
+    if ipv4_only:
+        cmd.append('--no-ipv6')
+    if target_id:
+        # target list does not respect -t / --target flag.
+        cmd.append(target_id)
+
+    # A temporary solution to avoid cycle dependency. The DIR_SRC_ROOT should be
+    # moved away from common.py.
+    # pylint: disable=cyclic-import, import-outside-toplevel
+    import monitors
+
+    # The initial ffx target list command may return an empty list or without
+    # the ipv4 address, wait for a while to allow it detecting the devices and
+    # their addresses.
+    with monitors.time_consumption(
+        'ffx', 'get_ssh_address', ipv4_only and 'ipv4' or ''
+    ), RepeatingLog("Waiting for the ssh address"):
+        for _ in range(60):
+            target = json.loads(
+                run_ffx_command(
+                    cmd=cmd, json_out=True, capture_output=True
+                ).stdout.strip()
+            )
+            if target:
+                addrs = target[0]['addresses']
+                if addrs:
+                    addr = addrs[0]
+                    if 'Ip' in addr:
+                        addr = addr['Ip']
+                    break
+            time.sleep(5)
+        else:
+            monitors.count(
+                'ffx', 'get_ssh_address', ipv4_only and 'ipv4' or '', 'failed'
+            ).record()
+            raise RuntimeError('No addresses found for target.')
+    ssh_port = int(addr['ssh_port'])
+    if ssh_port == 0:
+        # Returning an unset ssh_port means the default port 22.
+        ssh_port = 22
+    return (addr['ip'], ssh_port)
 
 
 def find_in_dir(target_name: str, parent_dir: str) -> Optional[str]:
@@ -422,6 +429,7 @@ def find_image_in_sdk(product_name: str) -> Optional[str]:
 
 def catch_sigterm() -> None:
     """Catches the kill signal and allows the process to exit cleanly."""
+
     def _sigterm_handler(*_):
         sys.exit(0)
 
@@ -447,23 +455,79 @@ def wait_for_sigterm(extra_msg: str = '') -> None:
         logging.info('SIGTERM received; %s', extra_msg)
 
 
+@dataclass
+class BuildInfo:
+    """A structure replica of the output of build section in
+    `ffx target show`.
+    """
+
+    version: Optional[str] = None
+    product: Optional[str] = None
+    board: Optional[str] = None
+    commit: Optional[str] = None
+
+
+def get_build_info(target: Optional[str] = None) -> Optional[BuildInfo]:
+    """Retrieves build info from the device.
+
+    Returns:
+        A BuildInfo struct, or None if anything goes wrong.
+        Any field in BuildInfo can be None to indicate the missing of the field.
+    """
+    info_cmd = run_ffx_command(
+        cmd=('--machine', 'json', 'target', 'show'),
+        target_id=target,
+        capture_output=True,
+        check=False,
+    )
+    # If the information was not retrieved, return empty strings to indicate
+    # unknown system info.
+    if info_cmd.returncode != 0:
+        logging.error('ffx target show returns %d', info_cmd.returncode)
+        return None
+    try:
+        info_json = json.loads(info_cmd.stdout.strip())
+    except json.decoder.JSONDecodeError as error:
+        logging.error(
+            'Unexpected json string: %s, exception: %s', info_cmd.stdout, error
+        )
+        return None
+    if (
+        isinstance(info_json, dict)
+        and 'build' in info_json
+        and isinstance(info_json['build'], dict)
+    ):
+        return BuildInfo(**info_json['build'])
+    return None
+
+
 def get_system_info(target: Optional[str] = None) -> Tuple[str, str]:
-    """Retrieves installed OS version frm device.
+    """Retrieves installed OS version from the device.
 
     Returns:
         Tuple of strings, containing {product, version number), or a pair of
         empty strings to indicate an error.
     """
-    info_cmd = run_ffx_command(cmd=('target', 'show', '--json'),
-                               target_id=target,
-                               capture_output=True,
-                               check=False)
-    if info_cmd.returncode == 0:
-        info_json = json.loads(info_cmd.stdout.strip())
-        for info in info_json:
-            if info['title'] == 'Build':
-                return (info['child'][1]['value'], info['child'][0]['value'])
+    build_info = get_build_info(target)
+    if not build_info:
+        return ('', '')
 
-    # If the information was not retrieved, return empty strings to indicate
-    # unknown system info.
-    return ('', '')
+    return (build_info.product or '', build_info.version or '')
+
+
+def get_free_local_port() -> int:
+    """Returns an ipv4 port available locally. It does not reserve the port and
+    may cause race condition. Copied from catapult
+    https://crsrc.org/c/third_party/catapult/telemetry/telemetry/core/util.py;drc=e3f9ae73db5135ad998108113af7ef82a47efc51;l=61"""
+    # AF_INET restricts port to IPv4 addresses.
+    # SOCK_STREAM means that it is a TCP socket.
+    tmp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Setting SOL_SOCKET + SO_REUSEADDR to 1 allows the reuse of local
+    # addresses, this is so sockets do not fail to bind for being in the
+    # CLOSE_WAIT state.
+    tmp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    tmp.bind(('', 0))
+    port = tmp.getsockname()[1]
+    tmp.close()
+
+    return port

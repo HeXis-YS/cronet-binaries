@@ -6,11 +6,15 @@
 #define QUICHE_QUIC_CORE_HTTP_WEB_TRANSPORT_HTTP3_H_
 
 #include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "absl/base/attributes.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/strings/string_view.h"
 #include "absl/time/time.h"
-#include "absl/types/optional.h"
 #include "quiche/quic/core/http/quic_spdy_session.h"
 #include "quiche/quic/core/http/web_transport_stream_adapter.h"
 #include "quiche/quic/core/quic_error_codes.h"
@@ -18,10 +22,10 @@
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/web_transport_interface.h"
 #include "quiche/quic/core/web_transport_stats.h"
-#include "quiche/common/platform/api/quiche_mem_slice.h"
+#include "quiche/common/http/http_header_block.h"
 #include "quiche/common/quiche_callbacks.h"
+#include "quiche/common/quiche_mem_slice.h"
 #include "quiche/web_transport/web_transport.h"
-#include "quiche/spdy/core/http2_header_block.h"
 
 namespace quic {
 
@@ -48,7 +52,7 @@ class QUICHE_EXPORT WebTransportHttp3
   WebTransportHttp3(QuicSpdySession* session, QuicSpdyStream* connect_stream,
                     WebTransportSessionId id);
 
-  void HeadersReceived(const spdy::Http2HeaderBlock& headers);
+  void HeadersReceived(const quiche::HttpHeaderBlock& headers);
   void SetVisitor(std::unique_ptr<WebTransportVisitor> visitor) {
     visitor_ = std::move(visitor);
   }
@@ -97,6 +101,14 @@ class QUICHE_EXPORT WebTransportHttp3
   webtransport::SessionStats GetSessionStats() override {
     return WebTransportStatsForQuicSession(*session_);
   }
+  webtransport::Perspective GetPerspective() const override {
+    return session_->perspective() == quic::Perspective::IS_CLIENT
+               ? webtransport::Perspective::kClient
+               : webtransport::Perspective::kServer;
+  }
+  webtransport::UnderlyingProtocol GetUnderlyingProtocol() const override {
+    return webtransport::UnderlyingProtocol::kHttp3;
+  }
 
   void NotifySessionDraining() override;
   void SetOnDraining(quiche::SingleUseCallback<void()> callback) override {
@@ -117,6 +129,18 @@ class QUICHE_EXPORT WebTransportHttp3
   void OnGoAwayReceived();
   void OnDrainSessionReceived();
 
+  const std::vector<std::string>& subprotocols_offered() const {
+    return subprotocols_offered_;
+  }
+  void set_subprotocols_offered(std::vector<std::string> subprotocols_offered) {
+    subprotocols_offered_ = std::move(subprotocols_offered);
+  }
+  std::optional<std::string> GetNegotiatedSubprotocol() const override {
+    return subprotocol_selected_;
+  }
+  void MaybeSetSubprotocolFromResponseHeaders(
+      const quiche::HttpHeaderBlock& headers);
+
  private:
   // Notifies the visitor that the connection has been closed.  Ensures that the
   // visitor is only ever called once.
@@ -136,6 +160,12 @@ class QUICHE_EXPORT WebTransportHttp3
   bool close_received_ = false;
   bool close_notified_ = false;
 
+  // On client side, stores the offered subprotocols.
+  std::vector<std::string> subprotocols_offered_;
+  // Stores the actually selected subprotocol, both on the client and on the
+  // server.
+  std::optional<std::string> subprotocol_selected_;
+
   quiche::SingleUseCallback<void()> drain_callback_ = nullptr;
 
   WebTransportHttp3RejectionReason rejection_reason_ =
@@ -150,7 +180,7 @@ class QUICHE_EXPORT WebTransportHttp3
 class QUICHE_EXPORT WebTransportHttp3UnidirectionalStream : public QuicStream {
  public:
   // Incoming stream.
-  WebTransportHttp3UnidirectionalStream(PendingStream* pending,
+  WebTransportHttp3UnidirectionalStream(PendingStream& pending,
                                         QuicSpdySession* session);
   // Outgoing stream.
   WebTransportHttp3UnidirectionalStream(QuicStreamId id,
@@ -174,7 +204,7 @@ class QUICHE_EXPORT WebTransportHttp3UnidirectionalStream : public QuicStream {
  private:
   QuicSpdySession* session_;
   WebTransportStreamAdapter adapter_;
-  absl::optional<WebTransportSessionId> session_id_;
+  std::optional<WebTransportSessionId> session_id_;
   bool needs_to_send_preamble_;
 
   bool ReadSessionId();
@@ -184,7 +214,7 @@ class QUICHE_EXPORT WebTransportHttp3UnidirectionalStream : public QuicStream {
 
 // Remaps HTTP/3 error code into a WebTransport error code.  Returns nullopt if
 // the provided code is outside of valid range.
-QUICHE_EXPORT absl::optional<WebTransportStreamError> Http3ErrorToWebTransport(
+QUICHE_EXPORT std::optional<WebTransportStreamError> Http3ErrorToWebTransport(
     uint64_t http3_error_code);
 
 // Same as above, but returns default error value (zero) when none could be

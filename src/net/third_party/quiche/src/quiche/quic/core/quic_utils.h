@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <optional>
 #include <string>
 #include <type_traits>
 
@@ -15,7 +16,6 @@
 #include "absl/numeric/int128.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "absl/types/optional.h"
 #include "absl/types/span.h"
 #include "quiche/quic/core/crypto/quic_random.h"
 #include "quiche/quic/core/frames/quic_frame.h"
@@ -25,7 +25,7 @@
 #include "quiche/quic/core/quic_versions.h"
 #include "quiche/quic/platform/api/quic_export.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
-#include "quiche/common/platform/api/quiche_mem_slice.h"
+#include "quiche/common/quiche_mem_slice.h"
 
 namespace quic {
 
@@ -183,7 +183,8 @@ class QUICHE_EXPORT QuicUtils {
 
   // Returns true if the connection ID is valid for this QUIC version.
   static bool IsConnectionIdValidForVersion(
-      QuicConnectionId connection_id, QuicTransportVersion transport_version);
+      const QuicConnectionId& connection_id,
+      QuicTransportVersion transport_version);
 
   // Returns a connection ID suitable for QUIC use-cases that do not need the
   // connection ID for multiplexing. If the version allows variable lengths,
@@ -192,7 +193,7 @@ class QUICHE_EXPORT QuicUtils {
 
   // Generates a 128bit stateless reset token based on a connection ID.
   static StatelessResetToken GenerateStatelessResetToken(
-      QuicConnectionId connection_id);
+      const QuicConnectionId& connection_id);
 
   // Determines packet number space from |encryption_level|.
   static PacketNumberSpace GetPacketNumberSpace(
@@ -225,6 +226,15 @@ bool IsValidWebTransportSessionId(WebTransportSessionId id,
                                   ParsedQuicVersion transport_version);
 
 QuicByteCount MemSliceSpanTotalSize(absl::Span<quiche::QuicheMemSlice> span);
+
+// Returns the part of the path after the final "/".  If there is no "/" in the
+// path, the result is the same as the input.
+// Note that this function's behavior differs from the POSIX standard basename
+// function if path ends with "/". For such paths, this function returns the
+// empty string.
+// This function returns path as-is, if it's windows path with backslash
+// separators.
+QUICHE_EXPORT absl::string_view PosixBasename(absl::string_view path);
 
 // Computes a SHA-256 hash and returns the raw bytes of the hash.
 QUICHE_EXPORT std::string RawSha256(absl::string_view input);
@@ -259,9 +269,9 @@ class QUICHE_EXPORT BitMask {
   bool Any() const { return mask_ != 0; }
 
   // Returns the highest bit set, or nullopt if the mask is all zeroes.
-  absl::optional<Index> Max() const {
+  std::optional<Index> Max() const {
     if (!Any()) {
-      return absl::nullopt;
+      return std::nullopt;
     }
     return static_cast<Index>(NumBits() - absl::countl_zero(mask_) - 1);
   }

@@ -6,9 +6,9 @@
 #define QUICHE_QUIC_CORE_QUIC_PACKET_WRITER_H_
 
 #include <cstddef>
+#include <optional>
 #include <utility>
 
-#include "absl/types/optional.h"
 #include "quiche/quic/core/quic_packets.h"
 #include "quiche/quic/platform/api/quic_export.h"
 #include "quiche/quic/platform/api/quic_ip_address.h"
@@ -43,6 +43,8 @@ struct QUICHE_EXPORT QuicPacketWriterParams {
   bool allow_burst = false;
   // ECN codepoint to use when sending this packet.
   QuicEcnCodepoint ecn_codepoint = ECN_NOT_ECT;
+  // IPv6 flow label in host byte order. Only the low 20 bits will be used.
+  uint32_t flow_label = 0;
 };
 
 // An interface between writers and the entity managing the
@@ -127,7 +129,7 @@ class QUICHE_EXPORT QuicPacketWriter {
   // The error code used by the writer to indicate that the write failed due to
   // supplied packet being too big.  This is equivalent to returning
   // WRITE_STATUS_MSG_TOO_BIG as a status.
-  virtual absl::optional<int> MessageTooBigErrorCode() const = 0;
+  virtual std::optional<int> MessageTooBigErrorCode() const = 0;
 
   // Returns the maximum size of the packet which can be written using this
   // writer for the supplied peer address.  This size may actually exceed the

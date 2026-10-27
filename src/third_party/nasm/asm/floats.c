@@ -1,35 +1,5 @@
-/* ----------------------------------------------------------------------- *
- *
- *   Copyright 1996-2018 The NASM Authors - All Rights Reserved
- *   See the file AUTHORS included with the NASM distribution for
- *   the specific copyright holders.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following
- *   conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright
- *     notice, this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above
- *     copyright notice, this list of conditions and the following
- *     disclaimer in the documentation and/or other materials provided
- *     with the distribution.
- *
- *     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
- *     CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
- *     INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- *     MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- *     DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- *     CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *     SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- *     NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- *     LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- *     HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- *     OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
- *     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * ----------------------------------------------------------------------- */
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright 1996-2020 The NASM Authors - All Rights Reserved */
 
 /*
  * float.c     floating-point constant support for the Netwide Assembler
@@ -229,10 +199,6 @@ static bool ieee_flconvert(const char *string, fp_limb *mant,
                     *p++ = *string - '0';
                 } else {
                     if (!warned) {
-                        /*!
-                         *!float-toolong [on] too many digits in floating-point number
-                         *!  warns about too many digits in floating-point numbers.
-                         */
                         nasm_warn(WARN_FLOAT_TOOLONG|ERR_PASS2,
                                    "floating-point constant significand contains "
                                    "more than %i digits", MANT_DIGITS);
@@ -400,13 +366,13 @@ static bool ieee_flconvert(const char *string, fp_limb *mant,
  */
 
 /* Set a bit, using *bigendian* bit numbering (0 = MSB) */
-static void set_bit(fp_limb *mant, int bit)
+static void set_bit(fp_limb *mant, size_t bit)
 {
-    mant[bit/LIMB_BITS] |= LIMB_TOP_BIT >> (bit & (LIMB_BITS-1));
+    mant[bit/LIMB_BITS] |= (fp_limb)1 << (~bit & (LIMB_BITS-1));
 }
 
 /* Test a single bit */
-static int test_bit(const fp_limb *mant, int bit)
+static int test_bit(const fp_limb *mant, size_t bit)
 {
     return (mant[bit/LIMB_BITS] >> (~bit & (LIMB_BITS-1))) & 1;
 }
@@ -495,17 +461,6 @@ static bool ieee_round(bool minus, fp_limb *mant, int bits)
     return false;
 }
 
-/* Returns a value >= 16 if not a valid hex digit */
-static unsigned int hexval(char c)
-{
-    unsigned int v = (unsigned char) c;
-
-    if (v >= '0' && v <= '9')
-        return v - '0';
-    else
-        return (v|0x20) - 'a' + 10;
-}
-
 /* Handle floating-point numbers with radix 2^bits and binary exponent */
 static bool ieee_flconvert_bin(const char *string, int bits,
                                fp_limb *mant, int32_t *exponent)
@@ -535,7 +490,7 @@ static bool ieee_flconvert_bin(const char *string, int bits,
                 nasm_nonfatal("too many periods in floating-point constant");
                 return false;
             }
-        } else if ((v = hexval(c)) < (unsigned int)radix) {
+        } else if ((v = nasm_hexval(c)) < (unsigned int)radix) {
             if (!seendigit && v) {
                 int l = log2tbl[v];
 
@@ -629,13 +584,6 @@ static void ieee_shr(fp_limb *mant, int i)
    - the sign bit plus exponent fit in 16 bits.
    - the exponent bias is 2^(n-1)-1 for an n-bit exponent */
 
-struct ieee_format {
-    int bytes;
-    int mantissa;               /* Fractional bits in the mantissa */
-    int explicit;               /* Explicit integer */
-    int exponent;               /* Bits in the exponent */
-};
-
 /*
  * The 16- and 128-bit formats are expected to be in IEEE 754r.
  * AMD SSE5 uses the 16-bit format.
@@ -646,13 +594,31 @@ struct ieee_format {
  *
  * The 8-bit format appears to be the consensus 8-bit floating-point
  * format.  It is apparently used in graphics applications.
+ *
+ * The b16 format is a 16-bit format with smaller mantissa and larger
+ * exponent field.  It is effectively a truncated version of the standard
+ * IEEE 32-bit (single) format, but is explicitly supported here in
+ * order to support proper rounding.
+ *
+ * This array must correspond to enum floatize in include/nasm.h.
+ * Note that there are some formats which have more than one enum;
+ * both need to be listed here with the appropriate offset into the
+ * floating-point byte array (use for the floatize operators.)
+ *
+ * FLOAT_ERR is a value that both represents "invalid format" and the
+ * size of this array.
  */
-static const struct ieee_format ieee_8   = {  1,   3, 0,  4 };
-static const struct ieee_format ieee_16  = {  2,  10, 0,  5 };
-static const struct ieee_format ieee_32  = {  4,  23, 0,  8 };
-static const struct ieee_format ieee_64  = {  8,  52, 0, 11 };
-static const struct ieee_format ieee_80  = { 10,  63, 1, 15 };
-static const struct ieee_format ieee_128 = { 16, 112, 0, 15 };
+const struct ieee_format fp_formats[FLOAT_ERR] = {
+    {  1,   3, 0,  4, 0 },         /* FLOAT_8 */
+    {  2,  10, 0,  5, 0 },         /* FLOAT_16 */
+    {  2,   7, 0,  8, 0 },         /* FLOAT_B16 */
+    {  4,  23, 0,  8, 0 },         /* FLOAT_32 */
+    {  8,  52, 0, 11, 0 },         /* FLOAT_64 */
+    { 10,  63, 1, 15, 0 },         /* FLOAT_80M */
+    { 10,  63, 1, 15, 8 },         /* FLOAT_80E */
+    { 16, 112, 0, 15, 0 },         /* FLOAT_128L */
+    { 16, 112, 0, 15, 8 }          /* FLOAT_128H */
+};
 
 /* Types of values we can generate */
 enum floats {
@@ -672,7 +638,7 @@ static int to_packed_bcd(const char *str, const char *p,
     char c;
     int tv = -1;
 
-    if (fmt != &ieee_80) {
+    if (fmt->bytes != 10) {
         nasm_nonfatal("packed BCD requires an 80-bit format");
         return 0;
     }
@@ -711,9 +677,9 @@ static int to_packed_bcd(const char *str, const char *p,
     return 1;                   /* success */
 }
 
-static int to_float(const char *str, int s, uint8_t *result,
-                    const struct ieee_format *fmt)
+int float_const(const char *str, int s, uint8_t *result, enum floatize ffmt)
 {
+    const struct ieee_format *fmt = &fp_formats[ffmt];
     fp_limb mant[MANT_LIMBS];
     int32_t exponent = 0;
     const int32_t expmax = 1 << (fmt->exponent - 1);
@@ -833,19 +799,10 @@ static int to_float(const char *str, int s, uint8_t *result,
             mant[0] |= exponent << (LIMB_BITS-1 - fmt->exponent);
         } else {
             if (daz || is_zero(mant)) {
-                /*!
-                 *!float-underflow [off] floating point underflow
-                 *!  warns about floating point underflow (a nonzero
-                 *!  constant rounded to zero.)
-                 */
                 nasm_warn(WARN_FLOAT_UNDERFLOW|ERR_PASS2,
                            "underflow in floating-point constant");
                 goto zero;
             } else {
-                /*!
-                 *!float-denorm [off] floating point denormal
-                 *!  warns about denormal floating point constants.
-                 */
                 nasm_warn(WARN_FLOAT_DENORM|ERR_PASS2,
                            "denormal floating-point constant");
             }
@@ -862,10 +819,6 @@ static int to_float(const char *str, int s, uint8_t *result,
             ieee_shr(mant, 1);
             exponent++;
             if (exponent >= (expmax << 1)-1) {
-                /*!
-                 *!float-overflow [on] floating point overflow
-                 *!  warns about floating point underflow.
-                 */
                 nasm_warn(WARN_FLOAT_OVERFLOW|ERR_PASS2,
                            "overflow in floating-point constant");
                 type = FL_INFINITY;
@@ -902,25 +855,20 @@ static int to_float(const char *str, int s, uint8_t *result,
     return 1;                   /* success */
 }
 
-int float_const(const char *number, int sign, uint8_t *result, int bytes)
+/*
+ * Get the default floating point format for this specific field size.
+ * Used for the Dx pseudoops.
+ */
+enum floatize float_deffmt(int bytes)
 {
-    switch (bytes) {
-    case 1:
-        return to_float(number, sign, result, &ieee_8);
-    case 2:
-        return to_float(number, sign, result, &ieee_16);
-    case 4:
-        return to_float(number, sign, result, &ieee_32);
-    case 8:
-        return to_float(number, sign, result, &ieee_64);
-    case 10:
-        return to_float(number, sign, result, &ieee_80);
-    case 16:
-        return to_float(number, sign, result, &ieee_128);
-    default:
-        nasm_panic("strange value %d passed to float_const", bytes);
-        return 0;
+    enum floatize type;
+
+    for (type = 0; type < FLOAT_ERR; type++) {
+        if (fp_formats[type].bytes == bytes)
+            break;
     }
+
+    return type;                /* FLOAT_ERR if invalid */
 }
 
 /* Set floating-point options */

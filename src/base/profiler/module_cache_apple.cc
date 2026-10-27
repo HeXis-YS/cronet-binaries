@@ -9,7 +9,11 @@
 #include <string.h>
 #include <uuid/uuid.h>
 
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "build/build_config.h"
 
 namespace base {
@@ -57,7 +61,7 @@ void GetUniqueIdAndTextSize(const void* module_addr,
     }
 
     const load_command* load_cmd = reinterpret_cast<const load_command*>(
-        reinterpret_cast<const uint8_t*>(mach_header) + offset);
+        UNSAFE_TODO(reinterpret_cast<const uint8_t*>(mach_header) + offset));
 
     if (offset + load_cmd->cmdsize > offset_limit) {
       // This command runs off the end of the command list. This is malformed.
@@ -77,8 +81,7 @@ void GetUniqueIdAndTextSize(const void* module_addr,
                       "UUID field of UUID command should be 16 bytes.");
         // The ID comprises the UUID concatenated with the Mac's "age" value
         // which is always 0.
-        unique_id->assign(HexEncode(&uuid_cmd->uuid, sizeof(uuid_cmd->uuid)) +
-                          "0");
+        unique_id->assign(HexEncode(uuid_cmd->uuid) + "0");
       }
       if (found_text_size) {
         return;
@@ -87,8 +90,7 @@ void GetUniqueIdAndTextSize(const void* module_addr,
     } else if (load_cmd->cmd == kSegmentCommand) {
       const SegmentCommandType* segment_cmd =
           reinterpret_cast<const SegmentCommandType*>(load_cmd);
-      if (strncmp(segment_cmd->segname, SEG_TEXT,
-                  sizeof(segment_cmd->segname)) == 0) {
+      if (base::StartsWith(segment_cmd->segname, SEG_TEXT)) {
         *text_size = segment_cmd->vmsize;
         // Compare result with library function call, which is slower than this
         // code.

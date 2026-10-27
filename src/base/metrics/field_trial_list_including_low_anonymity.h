@@ -20,6 +20,7 @@ class ChildProcessFieldTrialSyncer;
 class EntropyProviders;
 class ProcessedStudy;
 struct SeedSimulationResult;
+class StickyActivationManager;
 class VariationsCrashKeys;
 class VariationsLayers;
 SeedSimulationResult ComputeDifferences(
@@ -29,7 +30,7 @@ SeedSimulationResult ComputeDifferences(
 }  // namespace variations
 
 namespace version_ui {
-base::Value::List GetVariationsList();
+base::ListValue GetVariationsList();
 }
 
 namespace base {
@@ -60,6 +61,8 @@ class BASE_EXPORT FieldTrialListIncludingLowAnonymity {
   friend class content::FieldTrialSynchronizer;
   friend class variations::ChildProcessFieldTrialSyncer;
 
+  friend class variations::StickyActivationManager;
+
   // This is only used to simulate seed changes, not sent to Google servers.
   friend variations::SeedSimulationResult variations::ComputeDifferences(
       const std::vector<variations::ProcessedStudy>& processed_studies,
@@ -72,7 +75,7 @@ class BASE_EXPORT FieldTrialListIncludingLowAnonymity {
 
   // This usage is to display field trials in chrome://version and other local
   // internal UIs.
-  friend base::Value::List version_ui::GetVariationsList();
+  friend base::ListValue version_ui::GetVariationsList();
 
   // Required for tests.
   friend class TestFieldTrialObserverIncludingLowAnonymity;
@@ -81,8 +84,8 @@ class BASE_EXPORT FieldTrialListIncludingLowAnonymity {
  private:
   // The same as |FieldTrialList::GetActiveFieldTrialGroups| but gives access to
   // low anonymity field trials too.
-  static void GetActiveFieldTrialGroups(
-      FieldTrial::ActiveGroups* active_groups);
+  static void GetActiveFieldTrialGroups(FieldTrial::ActiveGroups* active_groups,
+                                        bool include_runtime_overrides = false);
 
   // Identical to |FieldTrialList::AddObserver| but also notifies of low
   // anonymity trials.

@@ -4,6 +4,7 @@
 
 #include "quiche/quic/tools/quic_server_factory.h"
 
+#include <memory>
 #include <utility>
 
 #include "quiche/quic/tools/quic_server.h"
@@ -14,7 +15,8 @@ std::unique_ptr<quic::QuicSpdyServerBase> QuicServerFactory::CreateServer(
     quic::QuicSimpleServerBackend* backend,
     std::unique_ptr<quic::ProofSource> proof_source,
     const quic::ParsedQuicVersionVector& supported_versions) {
-  return std::make_unique<quic::QuicServer>(std::move(proof_source), backend,
+  return std::make_unique<quic::QuicServer>(std::move(proof_source),
+                                            /*proof_verifier=*/nullptr, backend,
                                             supported_versions);
 }
 

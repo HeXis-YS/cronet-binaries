@@ -1,35 +1,5 @@
-/* ----------------------------------------------------------------------- *
- *
- *   Copyright 1996-2019 The NASM Authors - All Rights Reserved
- *   See the file AUTHORS included with the NASM distribution for
- *   the specific copyright holders.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following
- *   conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright
- *     notice, this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above
- *     copyright notice, this list of conditions and the following
- *     disclaimer in the documentation and/or other materials provided
- *     with the distribution.
- *
- *     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
- *     CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
- *     INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- *     MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- *     DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- *     CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *     SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- *     NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- *     LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- *     HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- *     OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
- *     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * ----------------------------------------------------------------------- */
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright 1996-2025 The NASM Authors - All Rights Reserved */
 
 /*
  * Common code for outelf32 and outelf64
@@ -84,6 +54,7 @@ static struct hash_table section_by_name;
 static struct elf_symbol *fwds;
 
 static char elf_module[FILENAME_MAX];
+static char elf_dir[FILENAME_MAX];
 
 extern const struct ofmt of_elf32;
 extern const struct ofmt of_elf64;
@@ -111,11 +82,6 @@ static int add_sectname(const char *, const char *);
 
 /* First debugging section index */
 static int sec_debug;
-
-struct erel {
-    int                 offset;
-    int                 info;
-};
 
 struct symlininfo {
     int                 offset;
@@ -214,8 +180,7 @@ struct elf_format_info {
     size_t ehdr_size;           /* Size of the ELF header */
     size_t shdr_size;           /* Size of a section header */
     size_t sym_size;            /* Size of a symbol */
-    size_t rel_size;            /* Size of a reltype relocation */
-    size_t rela_size;           /* Size of a RELA relocation */
+    size_t relsize;             /* Size of a reltype relocation */
     char relpfx[8];             /* Relocation section prefix */
     uint32_t reltype;           /* Relocation section type */
     uint16_t e_machine;         /* Header e_machine field */
@@ -443,7 +408,7 @@ elf_directive(enum directive directive, char *value)
 
     switch (directive) {
     case D_OSABI:
-        if (!pass_first())      /* XXX: Why? */
+        if (!value || !pass_first())
             return DIRR_OK;
 
         n = readnum(value, &err);
@@ -488,7 +453,6 @@ static void elf32_init(void)
         sizeof(Elf32_Shdr),
         sizeof(Elf32_Sym),
         sizeof(Elf32_Rel),
-        sizeof(Elf32_Rela),
         ".rel",
         SHT_REL,
         EM_386,
@@ -509,7 +473,6 @@ static void elfx32_init(void)
         sizeof(Elf32_Ehdr),
         sizeof(Elf32_Shdr),
         sizeof(Elf32_Sym),
-        sizeof(Elf32_Rela),
         sizeof(Elf32_Rela),
         ".rela",
         SHT_RELA,
@@ -532,7 +495,6 @@ static void elf64_init(void)
         sizeof(Elf64_Shdr),
         sizeof(Elf64_Sym),
         sizeof(Elf64_Rela),
-        sizeof(Elf64_Rela),
         ".rela",
         SHT_RELA,
         EM_X86_64,
@@ -552,8 +514,10 @@ static void elf_init(void)
         ".shstrtab", ".strtab", ".symtab", ".symtab_shndx", NULL
     };
     const char * const *p;
+    const char * cur_path = nasm_realpath(inname);
 
     strlcpy(elf_module, inname, sizeof(elf_module));
+    strlcpy(elf_dir, nasm_dirname(cur_path), sizeof(elf_dir));
     sects = NULL;
     nsects = sectlen = 0;
     syms = saa_init((int32_t)sizeof(struct elf_symbol));
@@ -564,7 +528,7 @@ static void elf_init(void)
     saa_wbytes(strs, elf_module, strlen(elf_module)+1);
     strslen = 2 + strlen(elf_module);
     shstrtab = NULL;
-    shstrtablen = shstrtabsize = 0;;
+    shstrtablen = shstrtabsize = 0;
     add_sectname("", "");       /* SHN_UNDEF */
 
     fwds = NULL;
@@ -766,10 +730,8 @@ static void elf_deflabel(char *name, int32_t segment, int64_t offset,
     int bind, type;             /* st_info components */
     const struct elf_section *sec = NULL;
 
-    if (debug_level(2)) {
-        nasm_debug(" elf_deflabel: %s, seg=%"PRIx32", off=%"PRIx64", is_global=%d, %s\n",
-                   name, segment, offset, is_global, special);
-    }
+    nasm_debug(2, " elf_deflabel: %s, seg=%"PRIx32", off=%"PRIx64", is_global=%d, %s\n",
+               name, segment, offset, is_global, special);
 
     if (name[0] == '.' && name[1] == '.' && name[2] != '@') {
         /*
@@ -799,8 +761,7 @@ static void elf_deflabel(char *name, int32_t segment, int64_t offset,
                 expr *e;
                 char *p = nasm_skip_spaces(nasm_skip_word(special));
 
-                stdscan_reset();
-                stdscan_set(p);
+                stdscan_reset(p);
                 tokval.t_type = TOKEN_INVALID;
                 e = evaluate(stdscan, NULL, &tokval, NULL, 1, NULL);
                 if (e) {
@@ -946,14 +907,13 @@ static void elf_deflabel(char *name, int32_t segment, int64_t offset,
             struct tokenval tokval;
             expr *e;
             int fwd = 0;
-            char *saveme = stdscan_get();
+            char *saveme = stdscan_tell();
 
             /*
              * We have a size expression; attempt to
              * evaluate it.
              */
-            stdscan_reset();
-            stdscan_set((char *)spcword);
+            stdscan_reset((char *)spcword);
             tokval.t_type = TOKEN_INVALID;
             e = evaluate(stdscan, NULL, &tokval, &fwd, 0, NULL);
             if (fwd) {
@@ -967,7 +927,7 @@ static void elf_deflabel(char *name, int32_t segment, int64_t offset,
                 else
                     sym->size = reloc_value(e);
             }
-            stdscan_set(saveme);
+            stdscan_reset(saveme);
         }
     }
 
@@ -1104,10 +1064,9 @@ static int64_t elf_add_gsym_reloc(struct elf_section *sect,
     return r->offset;
 }
 
-static void elf32_out(int32_t segto, const void *data,
-                      enum out_type type, uint64_t size,
-                      int32_t segment, int32_t wrt)
+static void elf32_out(const struct out_data *out)
 {
+    OUT_LEGACY(out,segto,data,type,size,segment,wrt);
     struct elf_section *s;
     int64_t addr;
     int reltype, bytes;
@@ -1309,10 +1268,10 @@ rel12adr:
         panic();
     }
 }
-static void elf64_out(int32_t segto, const void *data,
-                      enum out_type type, uint64_t size,
-                      int32_t segment, int32_t wrt)
+
+static void elf64_out(const struct out_data *out)
 {
+    OUT_LEGACY(out,segto,data,type,size,segment,wrt);
     struct elf_section *s;
     int64_t addr;
     int reltype, bytes;
@@ -1590,10 +1549,9 @@ rel12adr:
     }
 }
 
-static void elfx32_out(int32_t segto, const void *data,
-                       enum out_type type, uint64_t size,
-                       int32_t segment, int32_t wrt)
+static void elfx32_out(const struct out_data *out)
 {
+    OUT_LEGACY(out,segto,data,type,size,segment,wrt);
     struct elf_section *s;
     int64_t addr;
     int reltype, bytes;
@@ -1838,7 +1796,7 @@ rel12adr:
  */
 static inline uint16_t elf_shndx(int section, uint16_t overflow)
 {
-    return cpu_to_le16(section < (int)SHN_LORESERVE ? section : overflow);
+    return htole16(section < (int)SHN_LORESERVE ? section : overflow);
 }
 
 struct ehdr_common {
@@ -1880,13 +1838,13 @@ static void elf_write(void)
            not all of which are currently implemented,
            although all of them are defined. */
         add_sectname("", ".debug_aranges");
-        add_sectname(".rela", ".debug_aranges");
+        add_sectname(efmt->relpfx, ".debug_aranges");
         add_sectname("", ".debug_pubnames");
         add_sectname("", ".debug_info");
-        add_sectname(".rela", ".debug_info");
+        add_sectname(efmt->relpfx, ".debug_info");
         add_sectname("", ".debug_abbrev");
         add_sectname("", ".debug_line");
-        add_sectname(".rela", ".debug_line");
+        add_sectname(efmt->relpfx, ".debug_line");
         add_sectname("", ".debug_frame");
         add_sectname("", ".debug_loc");
     }
@@ -1923,20 +1881,20 @@ static void elf_write(void)
     ehdr.com.e_ident[EI_VERSION]    = EV_CURRENT;
     ehdr.com.e_ident[EI_OSABI]      = elf_osabi;
     ehdr.com.e_ident[EI_ABIVERSION] = elf_abiver;
-    ehdr.com.e_type                 = cpu_to_le16(ET_REL);
-    ehdr.com.e_machine              = cpu_to_le16(efmt->e_machine);
-    ehdr.com.e_version              = cpu_to_le16(EV_CURRENT);
+    ehdr.com.e_type                 = htole16(ET_REL);
+    ehdr.com.e_machine              = htole16(efmt->e_machine);
+    ehdr.com.e_version              = htole16(EV_CURRENT);
 
     if (!efmt->elf64) {
-        ehdr.ehdr32.e_shoff         = cpu_to_le32(sizeof ehdr);
-        ehdr.ehdr32.e_ehsize        = cpu_to_le16(sizeof(Elf32_Ehdr));
-        ehdr.ehdr32.e_shentsize     = cpu_to_le16(sizeof(Elf32_Shdr));
+        ehdr.ehdr32.e_shoff         = htole32(sizeof ehdr);
+        ehdr.ehdr32.e_ehsize        = htole16(sizeof(Elf32_Ehdr));
+        ehdr.ehdr32.e_shentsize     = htole16(sizeof(Elf32_Shdr));
         ehdr.ehdr32.e_shnum         = elf_shndx(nsections, 0);
         ehdr.ehdr32.e_shstrndx      = elf_shndx(sec_shstrtab, SHN_XINDEX);
     } else {
-        ehdr.ehdr64.e_shoff         = cpu_to_le64(sizeof ehdr);
-        ehdr.ehdr64.e_ehsize        = cpu_to_le16(sizeof(Elf64_Ehdr));
-        ehdr.ehdr64.e_shentsize     = cpu_to_le16(sizeof(Elf64_Shdr));
+        ehdr.ehdr64.e_shoff         = htole64(sizeof ehdr);
+        ehdr.ehdr64.e_ehsize        = htole16(sizeof(Elf64_Ehdr));
+        ehdr.ehdr64.e_shentsize     = htole16(sizeof(Elf64_Shdr));
         ehdr.ehdr64.e_shnum         = elf_shndx(nsections, 0);
         ehdr.ehdr64.e_shstrndx      = elf_shndx(sec_shstrtab, SHN_XINDEX);
     }
@@ -1989,24 +1947,24 @@ static void elf_write(void)
             elf_section_header(p - shstrtab, efmt->reltype, 0,
                                stabrelbuf, false, stabrellen,
                                sec_symtab, sec_stab,
-                               efmt->word, efmt->rel_size);
+                               efmt->word, efmt->relsize);
             p += strlen(p) + 1;
         }
     } else if (dfmt_is_dwarf()) {
         /* for dwarf debugging information, create the ten dwarf sections */
 
         /* this function call creates the dwarf sections in memory */
-        if (dwarf_fsect)
+	if (dwarf_fsect)
             dwarf_generate();
 
         elf_section_header(p - shstrtab, SHT_PROGBITS, 0, arangesbuf, false,
                            arangeslen, 0, 0, 1, 0);
         p += strlen(p) + 1;
 
-        elf_section_header(p - shstrtab, SHT_RELA, 0, arangesrelbuf, false,
-                           arangesrellen, sec_symtab,
+        elf_section_header(p - shstrtab, efmt->reltype, 0, arangesrelbuf, false,
+			   arangesrellen, sec_symtab,
                            sec_debug_aranges,
-                           efmt->word, efmt->rela_size);
+                           efmt->word, efmt->relsize);
         p += strlen(p) + 1;
 
         elf_section_header(p - shstrtab, SHT_PROGBITS, 0, pubnamesbuf,
@@ -2017,10 +1975,10 @@ static void elf_write(void)
                            infolen, 0, 0, 1, 0);
         p += strlen(p) + 1;
 
-        elf_section_header(p - shstrtab, SHT_RELA, 0, inforelbuf, false,
+        elf_section_header(p - shstrtab, efmt->reltype, 0, inforelbuf, false,
                            inforellen, sec_symtab,
                            sec_debug_info,
-                           efmt->word, efmt->rela_size);
+                           efmt->word, efmt->relsize);
         p += strlen(p) + 1;
 
         elf_section_header(p - shstrtab, SHT_PROGBITS, 0, abbrevbuf, false,
@@ -2031,10 +1989,10 @@ static void elf_write(void)
                            linelen, 0, 0, 1, 0);
         p += strlen(p) + 1;
 
-        elf_section_header(p - shstrtab, SHT_RELA, 0, linerelbuf, false,
+        elf_section_header(p - shstrtab, efmt->reltype, 0, linerelbuf, false,
                            linerellen, sec_symtab,
                            sec_debug_line,
-                           efmt->word, efmt->rela_size);
+                           efmt->word, efmt->relsize);
         p += strlen(p) + 1;
 
         elf_section_header(p - shstrtab, SHT_PROGBITS, 0, framebuf, false,
@@ -2076,7 +2034,7 @@ static void elf_write(void)
             elf_section_header(p - shstrtab, efmt->reltype, 0,
                                sects[i]->rel, true, sects[i]->rel->datalen,
                                sec_symtab, sects[i]->shndx,
-                               efmt->word, efmt->rel_size);
+                               efmt->word, efmt->relsize);
             p += strlen(p) + 1;
         }
     }
@@ -2101,7 +2059,7 @@ static void elf_sym(const struct elf_symbol *sym)
 
     /*
      * Careful here. This relies on sym->section being signed; for
-     * special section indicies this value needs to be cast to
+     * special section indices this value needs to be cast to
      * (int16_t) so that it sign-extends, however, here SHN_LORESERVE
      * is used as an unsigned constant.
      */
@@ -2126,9 +2084,9 @@ static void elf32_sym(const struct elf_symbol *sym)
 {
     Elf32_Sym sym32;
 
-    sym32.st_name     = cpu_to_le32(sym->strpos);
-    sym32.st_value    = cpu_to_le32(sym->symv.key);
-    sym32.st_size     = cpu_to_le32(sym->size);
+    sym32.st_name     = htole32(sym->strpos);
+    sym32.st_value    = htole32(sym->symv.key);
+    sym32.st_size     = htole32(sym->size);
     sym32.st_info     = sym->type;
     sym32.st_other    = sym->other;
     sym32.st_shndx    = elf_shndx(sym->section, SHN_XINDEX);
@@ -2139,9 +2097,9 @@ static void elf64_sym(const struct elf_symbol *sym)
 {
     Elf64_Sym sym64;
 
-    sym64.st_name     = cpu_to_le32(sym->strpos);
-    sym64.st_value    = cpu_to_le64(sym->symv.key);
-    sym64.st_size     = cpu_to_le64(sym->size);
+    sym64.st_name     = htole32(sym->strpos);
+    sym64.st_value    = htole64(sym->symv.key);
+    sym64.st_size     = htole64(sym->size);
     sym64.st_info     = sym->type;
     sym64.st_other    = sym->other;
     sym64.st_shndx    = elf_shndx(sym->section, SHN_XINDEX);
@@ -2252,8 +2210,8 @@ static struct SAA *elf32_build_reltab(const struct elf_reloc *r)
         if (sym >= GLOBAL_TEMP_BASE)
             sym += global_offset;
 
-        rel32.r_offset    = cpu_to_le32(r->address);
-        rel32.r_info      = cpu_to_le32(ELF32_R_INFO(sym, r->type));
+        rel32.r_offset    = htole32(r->address);
+        rel32.r_info      = htole32(ELF32_R_INFO(sym, r->type));
         saa_wbytes(s, &rel32, sizeof rel32);
 
         r = r->next;
@@ -2286,9 +2244,9 @@ static struct SAA *elfx32_build_reltab(const struct elf_reloc *r)
         if (sym >= GLOBAL_TEMP_BASE)
             sym += global_offset;
 
-        rela32.r_offset   = cpu_to_le32(r->address);
-        rela32.r_info     = cpu_to_le32(ELF32_R_INFO(sym, r->type));
-        rela32.r_addend   = cpu_to_le32(r->offset);
+        rela32.r_offset   = htole32(r->address);
+        rela32.r_info     = htole32(ELF32_R_INFO(sym, r->type));
+        rela32.r_addend   = htole32(r->offset);
         saa_wbytes(s, &rela32, sizeof rela32);
 
         r = r->next;
@@ -2321,9 +2279,9 @@ static struct SAA *elf64_build_reltab(const struct elf_reloc *r)
         if (sym >= GLOBAL_TEMP_BASE)
             sym += global_offset;
 
-        rela64.r_offset   = cpu_to_le64(r->address);
-        rela64.r_info     = cpu_to_le64(ELF64_R_INFO(sym, r->type));
-        rela64.r_addend   = cpu_to_le64(r->offset);
+        rela64.r_offset   = htole64(r->address);
+        rela64.r_info     = htole64(ELF64_R_INFO(sym, r->type));
+        rela64.r_addend   = htole64(r->offset);
         saa_wbytes(s, &rela64, sizeof rela64);
 
         r = r->next;
@@ -2345,35 +2303,35 @@ static void elf_section_header(int name, int type, uint64_t flags,
     if (!efmt->elf64) {
         Elf32_Shdr  shdr;
 
-        shdr.sh_name         = cpu_to_le32(name);
-        shdr.sh_type         = cpu_to_le32(type);
-        shdr.sh_flags        = cpu_to_le32(flags);
+        shdr.sh_name         = htole32(name);
+        shdr.sh_type         = htole32(type);
+        shdr.sh_flags        = htole32(flags);
         shdr.sh_addr         = 0;
-        shdr.sh_offset       = cpu_to_le32(type == SHT_NULL ? 0 : elf_foffs);
-        shdr.sh_size         = cpu_to_le32(datalen);
+        shdr.sh_offset       = htole32(type == SHT_NULL ? 0 : elf_foffs);
+        shdr.sh_size         = htole32(datalen);
         if (data)
             elf_foffs += ALIGN(datalen, SEC_FILEALIGN);
-        shdr.sh_link         = cpu_to_le32(link);
-        shdr.sh_info         = cpu_to_le32(info);
-        shdr.sh_addralign    = cpu_to_le32(align);
-        shdr.sh_entsize      = cpu_to_le32(entsize);
+        shdr.sh_link         = htole32(link);
+        shdr.sh_info         = htole32(info);
+        shdr.sh_addralign    = htole32(align);
+        shdr.sh_entsize      = htole32(entsize);
 
         nasm_write(&shdr, sizeof shdr, ofile);
     } else {
         Elf64_Shdr  shdr;
 
-        shdr.sh_name         = cpu_to_le32(name);
-        shdr.sh_type         = cpu_to_le32(type);
-        shdr.sh_flags        = cpu_to_le64(flags);
+        shdr.sh_name         = htole32(name);
+        shdr.sh_type         = htole32(type);
+        shdr.sh_flags        = htole64(flags);
         shdr.sh_addr         = 0;
-        shdr.sh_offset       = cpu_to_le64(type == SHT_NULL ? 0 : elf_foffs);
-        shdr.sh_size         = cpu_to_le64(datalen);
+        shdr.sh_offset       = htole64(type == SHT_NULL ? 0 : elf_foffs);
+        shdr.sh_size         = htole64(datalen);
         if (data)
             elf_foffs += ALIGN(datalen, SEC_FILEALIGN);
-        shdr.sh_link        = cpu_to_le32(link);
-        shdr.sh_info        = cpu_to_le32(info);
-        shdr.sh_addralign   = cpu_to_le64(align);
-        shdr.sh_entsize     = cpu_to_le64(entsize);
+        shdr.sh_link        = htole32(link);
+        shdr.sh_info        = htole32(info);
+        shdr.sh_addralign   = htole64(align);
+        shdr.sh_entsize     = htole64(entsize);
 
         nasm_write(&shdr, sizeof shdr, ofile);
     }
@@ -2435,6 +2393,9 @@ static const struct dfmt elf32_df_dwarf = {
     dwarf32_init,
     dwarf_linenum,
     null_debug_deflabel,
+    NULL,                       /* .debug_smacros */
+    NULL,                       /* .debug_include */
+    NULL,                       /* .debug_mmacros */
     null_debug_directive,
     debug_typevalue,
     dwarf_output,
@@ -2448,6 +2409,9 @@ static const struct dfmt elf32_df_stabs = {
     null_debug_init,
     stabs_linenum,
     null_debug_deflabel,
+    NULL,                       /* .debug_smacros */
+    NULL,                       /* .debug_include */
+    NULL,                       /* .debug_mmacros */
     null_debug_directive,
     debug_typevalue,
     stabs_output,
@@ -2469,7 +2433,6 @@ const struct ofmt of_elf32 = {
     elf_stdmac,
     elf32_init,
     null_reset,
-    nasm_do_legacy_output,
     elf32_out,
     elf_deflabel,
     elf_section_names,
@@ -2487,6 +2450,9 @@ static const struct dfmt elf64_df_dwarf = {
     dwarf64_init,
     dwarf_linenum,
     null_debug_deflabel,
+    NULL,                       /* .debug_smacros */
+    NULL,                       /* .debug_include */
+    NULL,                       /* .debug_mmacros */
     null_debug_directive,
     debug_typevalue,
     dwarf_output,
@@ -2500,6 +2466,9 @@ static const struct dfmt elf64_df_stabs = {
     null_debug_init,
     stabs_linenum,
     null_debug_deflabel,
+    NULL,                       /* .debug_smacros */
+    NULL,                       /* .debug_include */
+    NULL,                       /* .debug_mmacros */
     null_debug_directive,
     debug_typevalue,
     stabs_output,
@@ -2521,7 +2490,6 @@ const struct ofmt of_elf64 = {
     elf_stdmac,
     elf64_init,
     null_reset,
-    nasm_do_legacy_output,
     elf64_out,
     elf_deflabel,
     elf_section_names,
@@ -2539,6 +2507,9 @@ static const struct dfmt elfx32_df_dwarf = {
     dwarfx32_init,
     dwarf_linenum,
     null_debug_deflabel,
+    NULL,                       /* .debug_smacros */
+    NULL,                       /* .debug_include */
+    NULL,                       /* .debug_mmacros */
     null_debug_directive,
     debug_typevalue,
     dwarf_output,
@@ -2552,6 +2523,9 @@ static const struct dfmt elfx32_df_stabs = {
     null_debug_init,
     stabs_linenum,
     null_debug_deflabel,
+    NULL,                       /* .debug_smacros */
+    NULL,                       /* .debug_include */
+    NULL,                       /* .debug_mmacros */
     null_debug_directive,
     debug_typevalue,
     stabs_output,
@@ -2573,7 +2547,6 @@ const struct ofmt of_elfx32 = {
     elf_stdmac,
     elfx32_init,
     null_reset,
-    nasm_do_legacy_output,
     elfx32_out,
     elf_deflabel,
     elf_section_names,
@@ -2680,7 +2653,11 @@ static void debug_typevalue(int32_t type)
             stype = STT_NOTYPE;
             break;
     }
-    if (stype == STT_OBJECT && lastsym && !lastsym->type) {
+    /* Set type and size info on most recently seen symbol if we haven't set it already.
+       But avoid setting size info on object (data) symbols in absolute sections (which
+       is primarily structs); some environments get confused with non-zero-extent absolute
+       object symbols and end up showing them in backtraces for NULL fn pointer calls. */
+    if (stype == STT_OBJECT && lastsym && !lastsym->type && lastsym->section != XSHN_ABS) {
         lastsym->size = ssize;
         lastsym->type = stype;
     }
@@ -2808,7 +2785,7 @@ static void stabs_generate(void)
     if (ptr) {
         /*
          * this is the first stab, its strx points to the filename of the
-         * the source-file, the n_desc field should be set to the number
+         * source-file, the n_desc field should be set to the number
          * of remaining stabs
          */
         WRITE_STAB(sptr, fileidx[0], 0, 0, 0, stabstrlen);
@@ -3112,7 +3089,6 @@ static void dwarf_generate(void)
         saa_write16(paranges, dwfmt->sect_version[DWARF_ARANGES]);
         saa_write32(parangesrel, paranges->datalen+4);
         saa_write32(parangesrel, (dwarf_infosym << 8) +  R_386_32); /* reloc to info */
-        saa_write32(parangesrel, 0);
         saa_write32(paranges,0);    /* offset into info */
         saa_write8(paranges,4);     /* pointer size */
         saa_write8(paranges,0);     /* not segmented */
@@ -3133,7 +3109,6 @@ static void dwarf_generate(void)
             /* range table relocation entry */
             saa_write32(parangesrel, paranges->datalen + 4);
             saa_write32(parangesrel, ((uint32_t) (psect->section + 2) << 8) +  R_386_32);
-            saa_write32(parangesrel, (uint32_t) 0);
             /* range table entry */
             saa_write32(paranges,0x0000);   /* range start */
             saa_write32(paranges,sects[psect->section]->len); /* range length */
@@ -3273,31 +3248,27 @@ static void dwarf_generate(void)
         saa_write16(pinfo, dwfmt->sect_version[DWARF_INFO]);
         saa_write32(pinforel, pinfo->datalen + 4);
         saa_write32(pinforel, (dwarf_abbrevsym << 8) +  R_386_32); /* reloc to abbrev */
-        saa_write32(pinforel, 0);
         saa_write32(pinfo,0);       /* offset into abbrev */
         saa_write8(pinfo,4);        /* pointer size */
         saa_write8(pinfo,1);        /* abbrviation number LEB128u */
         saa_write32(pinforel, pinfo->datalen + 4);
         saa_write32(pinforel, ((dwarf_fsect->section + 2) << 8) +  R_386_32);
-        saa_write32(pinforel, 0);
         saa_write32(pinfo,0);       /* DW_AT_low_pc */
         saa_write32(pinforel, pinfo->datalen + 4);
         saa_write32(pinforel, ((dwarf_fsect->section + 2) << 8) +  R_386_32);
-        saa_write32(pinforel, 0);
         saa_write32(pinfo,highaddr);    /* DW_AT_high_pc */
         saa_write32(pinforel, pinfo->datalen + 4);
         saa_write32(pinforel, (dwarf_linesym << 8) +  R_386_32); /* reloc to line */
-        saa_write32(pinforel, 0);
         saa_write32(pinfo,0);       /* DW_AT_stmt_list */
-        saa_wbytes(pinfo, elf_module, strlen(elf_module)+1);
+        saa_wbytes(pinfo, elf_module, strlen(elf_module)+1); /* DW_AT_name */
+        saa_wbytes(pinfo, elf_dir, strlen(elf_dir)+1); /* DW_AT_comp_dir */
         saa_wbytes(pinfo, nasm_signature(), nasm_signature_len()+1);
         saa_write16(pinfo,DW_LANG_Mips_Assembler);
         saa_write8(pinfo,2);        /* abbrviation number LEB128u */
         saa_write32(pinforel, pinfo->datalen + 4);
         saa_write32(pinforel, ((dwarf_fsect->section + 2) << 8) +  R_386_32);
-        saa_write32(pinforel, 0);
         saa_write32(pinfo,0);       /* DW_AT_low_pc */
-        saa_write32(pinfo,0);       /* DW_AT_frame_base */
+        saa_write8(pinfo,0);        /* DW_AT_frame_base */
         saa_write8(pinfo,0);        /* end of entries */
         saalen = pinfo->datalen;
         infolen = saalen + 4;
@@ -3322,13 +3293,14 @@ static void dwarf_generate(void)
         saa_write32(pinfo,0);			/* DW_AT_low_pc */
         saa_write32(pinforel, pinfo->datalen + 4);
         saa_write32(pinforel, ((dwarf_fsect->section + 2) << 8) + R_X86_64_32);
-        saa_write32(pinforel, 0);
-        saa_write32(pinfo,highaddr);		/* DW_AT_high_pc */
+        saa_write32(pinforel, highaddr);
+        saa_write32(pinfo,0);			/* DW_AT_high_pc */
         saa_write32(pinforel, pinfo->datalen + 4);
         saa_write32(pinforel, (dwarf_linesym << 8) + R_X86_64_32); /* reloc to line */
         saa_write32(pinforel, 0);
         saa_write32(pinfo,0);			/* DW_AT_stmt_list */
-        saa_wbytes(pinfo, elf_module, strlen(elf_module)+1);
+        saa_wbytes(pinfo, elf_module, strlen(elf_module)+1); /* DW_AT_name */
+        saa_wbytes(pinfo, elf_dir, strlen(elf_dir)+1); /* DW_AT_comp_dir */
         saa_wbytes(pinfo, nasm_signature(), nasm_signature_len()+1);
         saa_write16(pinfo,DW_LANG_Mips_Assembler);
         saa_write8(pinfo,2);			/* abbrviation number LEB128u */
@@ -3336,7 +3308,7 @@ static void dwarf_generate(void)
         saa_write32(pinforel, ((dwarf_fsect->section + 2) << 8) +  R_X86_64_32);
         saa_write32(pinforel, 0);
         saa_write32(pinfo,0);			/* DW_AT_low_pc */
-        saa_write32(pinfo,0);			/* DW_AT_frame_base */
+        saa_write8(pinfo,0);			/* DW_AT_frame_base */
         saa_write8(pinfo,0);			/* end of entries */
         saalen = pinfo->datalen;
         infolen = saalen + 4;
@@ -3362,13 +3334,14 @@ static void dwarf_generate(void)
         saa_write64(pinfo,0);			/* DW_AT_low_pc */
         saa_write64(pinforel, pinfo->datalen + 4);
         saa_write64(pinforel, ((uint64_t)(dwarf_fsect->section + 2) << 32) +  R_X86_64_64);
-        saa_write64(pinforel, 0);
-        saa_write64(pinfo,highaddr);		/* DW_AT_high_pc */
+        saa_write64(pinforel, highaddr);
+        saa_write64(pinfo,0);			/* DW_AT_high_pc */
         saa_write64(pinforel, pinfo->datalen + 4);
         saa_write64(pinforel, (dwarf_linesym << 32) +  R_X86_64_32); /* reloc to line */
         saa_write64(pinforel, 0);
         saa_write32(pinfo,0);			/* DW_AT_stmt_list */
-        saa_wbytes(pinfo, elf_module, strlen(elf_module)+1);
+        saa_wbytes(pinfo, elf_module, strlen(elf_module)+1); /* DW_AT_name */
+        saa_wbytes(pinfo, elf_dir, strlen(elf_dir)+1); /* DW_AT_comp_dir */
         saa_wbytes(pinfo, nasm_signature(), nasm_signature_len()+1);
         saa_write16(pinfo,DW_LANG_Mips_Assembler);
         saa_write8(pinfo,2);			/* abbrviation number LEB128u */
@@ -3376,7 +3349,7 @@ static void dwarf_generate(void)
         saa_write64(pinforel, ((uint64_t)(dwarf_fsect->section + 2) << 32) +  R_X86_64_64);
         saa_write64(pinforel, 0);
         saa_write64(pinfo,0);			/* DW_AT_low_pc */
-        saa_write64(pinfo,0);			/* DW_AT_frame_base */
+        saa_write8(pinfo,0);			/* DW_AT_frame_base */
         saa_write8(pinfo,0);			/* end of entries */
         saalen = pinfo->datalen;
         infolen = saalen + 4;
@@ -3406,6 +3379,8 @@ static void dwarf_generate(void)
     saa_write8(pabbrev,DW_FORM_data4);
     saa_write8(pabbrev,DW_AT_name);
     saa_write8(pabbrev,DW_FORM_string);
+    saa_write8(pabbrev,DW_AT_comp_dir);
+    saa_write8(pabbrev,DW_FORM_string);
     saa_write8(pabbrev,DW_AT_producer);
     saa_write8(pabbrev,DW_FORM_string);
     saa_write8(pabbrev,DW_AT_language);
@@ -3418,7 +3393,7 @@ static void dwarf_generate(void)
     saa_write8(pabbrev,DW_AT_low_pc);
     saa_write8(pabbrev,DW_FORM_addr);
     saa_write8(pabbrev,DW_AT_frame_base);
-    saa_write8(pabbrev,DW_FORM_data4);
+    saa_write8(pabbrev,DW_FORM_exprloc);
     saa_write16(pabbrev,0);     /* end of entry */
     /* Terminal zero entry */
     saa_write8(pabbrev,0);
@@ -3471,7 +3446,7 @@ static void dwarf_generate(void)
     saa_rnbytes(plines, pbuf, saalen);   /* read a given no. of bytes */
     pbuf += linepoff;
     saa_free(plines);
-    /* concatonate line program ranges */
+    /* concatenate line program ranges */
     linepoff += 13;
     plinesrel = saa_init(1L);
     psect = dwarf_fsect;
@@ -3479,7 +3454,6 @@ static void dwarf_generate(void)
         for (indx = 0; indx < dwarf_nsections; indx++) {
             saa_write32(plinesrel, linepoff);
             saa_write32(plinesrel, ((uint32_t) (psect->section + 2) << 8) +  R_386_32);
-            saa_write32(plinesrel, (uint32_t) 0);
             plinep = psect->psaa;
             saalen = plinep->datalen;
             saa_rnbytes(plinep, pbuf, saalen);

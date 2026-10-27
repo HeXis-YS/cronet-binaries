@@ -4,11 +4,16 @@
 
 #include "quiche/common/quiche_data_reader.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <optional>
+#include <string>
 
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "quiche/common/moq_varint.h"
 #include "quiche/common/platform/api/quiche_bug_tracker.h"
 #include "quiche/common/platform/api/quiche_logging.h"
 #include "quiche/common/quiche_endian.h"
@@ -130,6 +135,13 @@ bool QuicheDataReader::ReadStringPiece(absl::string_view* result, size_t size) {
   return true;
 }
 
+absl::string_view QuicheDataReader::ReadAtMost(size_t size) {
+  size_t actual_size = std::min(size, BytesRemaining());
+  absl::string_view result = absl::string_view(data_ + pos_, actual_size);
+  AdvancePos(actual_size);
+  return result;
+}
+
 bool QuicheDataReader::ReadTag(uint32_t* tag) {
   return ReadBytes(tag, sizeof(*tag));
 }
@@ -229,6 +241,44 @@ bool QuicheDataReader::ReadStringPieceVarInt62(absl::string_view* result) {
     return false;
   }
   return ReadStringPiece(result, result_length);
+}
+
+bool QuicheDataReader::ReadStringVarInt62(std::string& result) {
+  absl::string_view result_view;
+  bool success = ReadStringPieceVarInt62(&result_view);
+  result = std::string(result_view);
+  return success;
+}
+
+std::optional<size_t> QuicheDataReader::PeekMoqVarIntLength() {
+  if (PeekRemainingPayload().empty()) {
+    return std::nullopt;
+  }
+  return GetMoqVarintLengthForFirstByte(PeekByte());
+}
+
+bool QuicheDataReader::ReadMoqVarInt(uint64_t* result) {
+  std::optional<uint64_t> value = ReadMoqVarint(*this);
+  if (!value.has_value()) {
+    return false;
+  }
+  *result = *value;
+  return true;
+}
+
+bool QuicheDataReader::ReadStringPieceMoqVarInt(absl::string_view* result) {
+  uint64_t result_length;
+  if (!ReadMoqVarInt(&result_length)) {
+    return false;
+  }
+  return ReadStringPiece(result, result_length);
+}
+
+bool QuicheDataReader::ReadStringMoqVarInt(std::string& result) {
+  absl::string_view result_view;
+  bool success = ReadStringPieceMoqVarInt(&result_view);
+  result = std::string(result_view);
+  return success;
 }
 
 absl::string_view QuicheDataReader::ReadRemainingPayload() {

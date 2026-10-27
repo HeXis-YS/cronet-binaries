@@ -1,0 +1,26 @@
+From 74ea8d0808c5b3fdc39b0ed2a42d19f7d834a3dd Mon Sep 17 00:00:00 2001
+From: klzgrad <kizdiv@gmail.com>
+Date: Fri, 11 Jan 2019 11:49:08 +0000
+Subject: [PATCH] build: Force determinism in official build
+
+Helps build with ccache.
+---
+ src/build/config/compiler/BUILD.gn | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/build/config/compiler/BUILD.gn b/src/build/config/compiler/BUILD.gn
+index 652107318..5e6d76c0d 100644
+--- a/src/build/config/compiler/BUILD.gn
++++ b/src/build/config/compiler/BUILD.gn
+@@ -1390,7 +1390,7 @@ config("compiler_deterministic") {
+ 
+   # Eliminate build metadata (__DATE__, __TIME__ and __TIMESTAMP__) for
+   # deterministic build.  See https://crbug.com/314403
+-  if (!is_official_build) {
++  if (true) {
+     if (is_win && !is_clang) {
+       cflags += [
+         "/wd4117",  # Trying to define or undefine a predefined macro.
+-- 
+2.53.0
+

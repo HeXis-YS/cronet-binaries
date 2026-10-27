@@ -6,12 +6,15 @@
 #define BASE_WIN_SCOPED_HANDLE_H_
 
 #include <ostream>
+#include <string_view>
 
 #include "base/base_export.h"
 #include "base/check_op.h"
 #include "base/dcheck_is_on.h"
 #include "base/gtest_prod_util.h"
 #include "base/location.h"
+#include "base/types/expected.h"
+#include "base/win/windows_handle_util.h"
 #include "base/win/windows_types.h"
 #include "build/build_config.h"
 
@@ -40,8 +43,12 @@ std::ostream& operator<<(std::ostream& os, HandleOperation operation);
 // Generic wrapper for raw handles that takes care of closing handles
 // automatically. The class interface follows the style of
 // the ScopedFILE class with two additions:
-//   - IsValid() method can tolerate multiple invalid handle values such as NULL
-//     and INVALID_HANDLE_VALUE (-1) for Win32 handles.
+//   - is_valid() and Set() tolerate multiple invalid handle values: in addition
+//     to NULL, pseudo-handles (such as INVALID_HANDLE_VALUE (-1),
+//     GetCurrentProcess(), and GetCurrentThread()) are rejected by
+//     Traits::IsHandleValid() and never stored (leaving the object set to
+//     Traits::NullHandle()). See
+//     docs/security/windows-handle-security-guidelines.md.
 //   - Set() (and the constructors and assignment operators that call it)
 //     preserve the Windows LastError code. This ensures that GetLastError() can
 //     be called after stashing a handle in a GenericScopedHandle object. Doing
@@ -53,13 +60,17 @@ class GenericScopedHandle {
 
   GenericScopedHandle() : handle_(Traits::NullHandle()) {}
 
+  // Takes ownership of `handle` if `Traits::IsHandleValid(handle)` is true;
+  // otherwise (including for NULL and pseudo-handles like INVALID_HANDLE_VALUE,
+  // GetCurrentProcess(), or GetCurrentThread()), `handle` is ignored and this
+  // instance remains invalid (holding `Traits::NullHandle()`).
   explicit GenericScopedHandle(Handle handle) : handle_(Traits::NullHandle()) {
     Set(handle);
   }
 
   GenericScopedHandle(GenericScopedHandle&& other)
       : handle_(Traits::NullHandle()) {
-    Set(other.Take());
+    Set(other.release());
   }
 
   GenericScopedHandle(const GenericScopedHandle&) = delete;
@@ -69,15 +80,15 @@ class GenericScopedHandle {
 
   bool is_valid() const { return Traits::IsHandleValid(handle_); }
 
-  // TODO(crbug.com/1291793): Migrate callers to is_valid().
-  bool IsValid() const { return is_valid(); }
-
   GenericScopedHandle& operator=(GenericScopedHandle&& other) {
     DCHECK_NE(this, &other);
-    Set(other.Take());
+    Set(other.release());
     return *this;
   }
 
+  // Closes any currently held handle and takes ownership of `handle` if
+  // `Traits::IsHandleValid(handle)` is true; otherwise leaves this instance
+  // invalid (holding `Traits::NullHandle()`).
   void Set(Handle handle) {
     if (handle_ != handle) {
       // Preserve old LastError to avoid bug 528394.
@@ -95,8 +106,20 @@ class GenericScopedHandle {
 
   Handle get() const { return handle_; }
 
-  // TODO(crbug.com/1291793): Migrate callers to get().
+  // TODO(crbug.com/40212898): Migrate callers to get().
   Handle Get() const { return get(); }
+
+  // Duplicates the handle with the same access rights in the current process.
+  // Returns an invalid handle if this handle is invalid or if duplication
+  // fails. Because ScopedHandle never holds pseudo-handles, Duplicate() cannot
+  // be used to convert a pseudo-handle into a real handle; see
+  // docs/security/windows-handle-security-guidelines.md.
+  [[nodiscard]] GenericScopedHandle Duplicate() const {
+    if (!is_valid()) {
+      return GenericScopedHandle();
+    }
+    return GenericScopedHandle(Traits::DuplicateHandle(handle_));
+  }
 
   // Transfers ownership away from this object.
   [[nodiscard]] Handle release() {
@@ -109,7 +132,7 @@ class GenericScopedHandle {
     return temp;
   }
 
-  // TODO(crbug.com/1291793): Migrate callers to release().
+  // TODO(crbug.com/40212898): Migrate callers to release().
   [[nodiscard]] Handle Take() { return release(); }
 
   // Explicitly closes the owned handle.
@@ -144,13 +167,26 @@ class HandleTraits {
   // Closes the handle.
   static bool BASE_EXPORT CloseHandle(HANDLE handle);
 
-  // Returns true if the handle value is valid.
+  // Returns true if `handle` is neither null nor a pseudo handle like
+  // GetCurrentProcess() or INVALID_HANDLE_VALUE. This means it has a value in
+  // the range used for real handle values. It is still possible for `handle` to
+  // not be associated with an actual open handle.
+  // Note: Use TakeHandleOfType() to adopt a handle of a particular type with
+  // additional validation.
   static bool IsHandleValid(HANDLE handle) {
-    return handle != nullptr && handle != INVALID_HANDLE_VALUE;
+    return handle != nullptr && !base::win::IsPseudoHandle(handle);
   }
 
   // Returns NULL handle value.
   static HANDLE NullHandle() { return nullptr; }
+
+ private:
+  template <class Traits, class Verifier>
+  friend class GenericScopedHandle;
+
+  // Duplicates a valid `handle` using DuplicateHandle() with
+  // DUPLICATE_SAME_ACCESS.
+  static HANDLE BASE_EXPORT DuplicateHandle(HANDLE handle);
 };
 
 // Do-nothing verifier.
@@ -211,6 +247,15 @@ BASE_EXPORT void DisableHandleVerifier();
 // tracked by the handle verifier and ScopedHandle is not the one closing it,
 // a CHECK is generated.
 BASE_EXPORT void OnHandleBeingClosed(HANDLE handle, HandleOperation operation);
+
+// Returns a smart pointer wrapping `handle` if it references an object of type
+// `object_type_name`. Crashes the process if `handle` is valid but of an
+// unexpected type. This function will fail with STATUS_INVALID_HANDLE if called
+// with the pseudo handle returned by `::GetCurrentProcess()` or
+// `GetCurrentProcessHandle()`.
+BASE_EXPORT expected<ScopedHandle, NTSTATUS> TakeHandleOfType(
+    HANDLE handle,
+    std::wstring_view object_type_name);
 
 }  // namespace win
 }  // namespace base

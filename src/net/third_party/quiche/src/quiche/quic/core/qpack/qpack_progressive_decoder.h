@@ -75,13 +75,14 @@ class QUICHE_EXPORT QpackProgressiveDecoder
 
     // Called when decoding is completed, with Required Insert Count of the
     // decoded header block.  Required Insert Count is defined at
-    // https://quicwg.org/base-drafts/draft-ietf-quic-qpack.html#blocked-streams.
+    // https://rfc-editor.org/rfc/rfc9204.html#section-4.5.1.1.
     virtual void OnDecodingCompleted(QuicStreamId stream_id,
                                      uint64_t required_insert_count) = 0;
   };
 
   QpackProgressiveDecoder() = delete;
   QpackProgressiveDecoder(QuicStreamId stream_id,
+                          QuicByteCount max_buffered_data,
                           BlockedStreamLimitEnforcer* enforcer,
                           DecodingCompletedVisitor* visitor,
                           QpackDecoderHeaderTable* header_table,
@@ -135,6 +136,9 @@ class QUICHE_EXPORT QpackProgressiveDecoder
   bool DeltaBaseToBase(bool sign, uint64_t delta_base, uint64_t* base);
 
   const QuicStreamId stream_id_;
+  // Maximum amount of data which can be stored in `buffer_` before the
+  // connection will be closed.
+  const QuicByteCount max_buffered_data_;
 
   // |prefix_decoder_| only decodes a handful of bytes then it can be
   // destroyed to conserve memory.  |instruction_decoder_|, on the other hand,

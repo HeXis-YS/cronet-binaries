@@ -1,20 +1,28 @@
 // Copyright 2015 The Chromium Authors
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #ifndef BSSL_PKI_CERTIFICATE_POLICIES_H_
 #define BSSL_PKI_CERTIFICATE_POLICIES_H_
 
-#include "fillins/openssl_util.h"
 #include <stdint.h>
-
 #include <vector>
 
 
-#include "input.h"
 #include <optional>
+#include "input.h"
 
-namespace bssl {
+BSSL_NAMESPACE_BEGIN
 
 class CertErrors;
 
@@ -59,48 +67,45 @@ struct PolicyQualifierInfo {
 struct OPENSSL_EXPORT PolicyInformation {
   PolicyInformation();
   ~PolicyInformation();
-  PolicyInformation(const PolicyInformation&);
-  PolicyInformation(PolicyInformation&&);
+  PolicyInformation(const PolicyInformation &);
+  PolicyInformation(PolicyInformation &&);
 
   der::Input policy_oid;
   std::vector<PolicyQualifierInfo> policy_qualifiers;
 };
 
 // Parses a certificatePolicies extension and stores the policy information
-// |*policies|, in the order presented in |extension_value|.
+// `*policies`, in the order presented in `extension_value`.
 //
 // Returns true on success. On failure returns false and may add errors to
-// |errors|, which must be non-null.
+// `errors`, which must be non-null.
 //
-// The values in |policies| are only valid as long as |extension_value| is (as
+// The values in `policies` are only valid as long as `extension_value` is (as
 // it references data).
 OPENSSL_EXPORT bool ParseCertificatePoliciesExtension(
-    const der::Input& extension_value,
-    std::vector<PolicyInformation>* policies,
-    CertErrors* errors);
+    der::Input extension_value, std::vector<PolicyInformation> *policies,
+    CertErrors *errors);
 
 // Parses a certificatePolicies extension and stores the policy OIDs in
-// |*policy_oids|, in sorted order.
+// `*policy_oids`, in sorted order.
 //
 // If policyQualifiers for User Notice or CPS are present then they are
 // ignored (RFC 5280 section 4.2.1.4 says "optional qualifiers, which MAY
 // be present, are not expected to change the definition of the policy."
 //
 // If a policy qualifier other than User Notice/CPS is present, parsing
-// will fail if |fail_parsing_unknown_qualifier_oids| was set to true,
-// otherwise the unrecognized qualifiers wil be skipped and not parsed
+// will fail if `fail_parsing_unknown_qualifier_oids` was set to true,
+// otherwise the unrecognized qualifiers will be skipped and not parsed
 // any further.
 //
 // Returns true on success. On failure returns false and may add errors to
-// |errors|, which must be non-null.
+// `errors`, which must be non-null.
 //
-// The values in |policy_oids| are only valid as long as |extension_value| is
+// The values in `policy_oids` are only valid as long as `extension_value` is
 // (as it references data).
 OPENSSL_EXPORT bool ParseCertificatePoliciesExtensionOids(
-    const der::Input& extension_value,
-    bool fail_parsing_unknown_qualifier_oids,
-    std::vector<der::Input>* policy_oids,
-    CertErrors* errors);
+    der::Input extension_value, bool fail_parsing_unknown_qualifier_oids,
+    std::vector<der::Input> *policy_oids, CertErrors *errors);
 
 struct ParsedPolicyConstraints {
   std::optional<uint8_t> require_explicit_policy;
@@ -109,15 +114,14 @@ struct ParsedPolicyConstraints {
 };
 
 // Parses a PolicyConstraints SEQUENCE as defined by RFC 5280. Returns true on
-// success, and sets |out|.
+// success, and sets `out`.
 [[nodiscard]] OPENSSL_EXPORT bool ParsePolicyConstraints(
-    const der::Input& policy_constraints_tlv,
-    ParsedPolicyConstraints* out);
+    der::Input policy_constraints_tlv, ParsedPolicyConstraints *out);
 
 // Parses an InhibitAnyPolicy as defined by RFC 5280. Returns num certs on
 // success, or empty if parser fails.
 [[nodiscard]] OPENSSL_EXPORT std::optional<uint8_t> ParseInhibitAnyPolicy(
-    const der::Input& inhibit_any_policy_tlv);
+    der::Input inhibit_any_policy_tlv);
 
 struct ParsedPolicyMapping {
   der::Input issuer_domain_policy;
@@ -125,11 +129,10 @@ struct ParsedPolicyMapping {
 };
 
 // Parses a PolicyMappings SEQUENCE as defined by RFC 5280. Returns true on
-// success, and sets |mappings|.
+// success, and sets `mappings`.
 [[nodiscard]] OPENSSL_EXPORT bool ParsePolicyMappings(
-    const der::Input& policy_mappings_tlv,
-    std::vector<ParsedPolicyMapping>* mappings);
+    der::Input policy_mappings_tlv, std::vector<ParsedPolicyMapping> *mappings);
 
-}  // namespace net
+BSSL_NAMESPACE_END
 
 #endif  // BSSL_PKI_CERTIFICATE_POLICIES_H_

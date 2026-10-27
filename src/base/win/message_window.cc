@@ -11,11 +11,13 @@
 
 #include "base/check.h"
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/lazy_instance.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ref.h"
 #include "base/no_destructor.h"
+#include "base/process/memory.h"
 #include "base/strings/string_util.h"
 #include "base/thread_annotations.h"
 #include "base/threading/thread_checker.h"
@@ -175,6 +177,9 @@ bool MessageWindow::DoCreate(MessageCallback message_callback,
       CreateWindow(MAKEINTATOM(window_class.atom()), window_name, 0, 0, 0, 0, 0,
                    HWND_MESSAGE, nullptr, window_class.instance(), this);
   if (!window_) {
+    if (::GetLastError() == ERROR_NOT_ENOUGH_MEMORY) {
+      base::TerminateBecauseOutOfMemory(0);
+    }
     PLOG(ERROR) << "Failed to create a message-only window";
     return false;
   }
@@ -192,37 +197,36 @@ LRESULT CALLBACK MessageWindow::WindowProc(HWND hwnd,
   auto& message_window_map = MessageWindowMap::GetInstanceForCurrentThread();
   MessageWindow* self = message_window_map.Get(hwnd);
 
-  switch (message) {
-    // Set up the self before handling WM_CREATE.
-    case WM_CREATE: {
-      CREATESTRUCT* cs = reinterpret_cast<CREATESTRUCT*>(lparam);
-      self = reinterpret_cast<MessageWindow*>(cs->lpCreateParams);
+  // CreateWindow will send a WM_CREATE message during window creation.
+  if (!self && message == WM_CREATE) [[unlikely]] {
+    CREATESTRUCT* const cs = reinterpret_cast<CREATESTRUCT*>(lparam);
+    self = reinterpret_cast<MessageWindow*>(cs->lpCreateParams);
 
-      // Make |hwnd| available to the message handler. At this point the control
-      // hasn't returned from CreateWindow() yet.
-      self->window_ = hwnd;
+    // Tell the MessageWindow instance the HWND that CreateWindow has produced.
+    self->window_ = hwnd;
 
-      // Store pointer to self to local map.
-      message_window_map.Insert(hwnd, *self);
-      break;
-    }
-
-    // Clear the map key to stop calling the self once WM_DESTROY is
-    // received.
-    case WM_DESTROY: {
-      message_window_map.Erase(hwnd);
-      break;
-    }
+    // Associate the MessageWindow instance with the HWND in the map.
+    message_window_map.Insert(hwnd, *self);
   }
 
-  // Handle the message.
-  if (self) {
-    LRESULT message_result;
-    if (self->message_callback_.Run(message, wparam, lparam, &message_result))
-      return message_result;
+  if (!self) [[unlikely]] {
+    return DefWindowProc(hwnd, message, wparam, lparam);
   }
 
-  return DefWindowProc(hwnd, message, wparam, lparam);
+  LRESULT message_result = {};
+  if (!self->message_callback_.Run(message, wparam, lparam, &message_result)) {
+    message_result = DefWindowProc(hwnd, message, wparam, lparam);
+  }
+
+  if (message == WM_DESTROY) [[unlikely]] {
+    // Tell the MessageWindow instance that it no longer has an HWND.
+    self->window_ = nullptr;
+
+    // Remove this HWND's MessageWindow from the map since it is going away.
+    message_window_map.Erase(hwnd);
+  }
+
+  return message_result;
 }
 
 }  // namespace win

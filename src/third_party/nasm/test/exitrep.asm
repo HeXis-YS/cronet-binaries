@@ -3,10 +3,16 @@
   %rep %1 4
     mov eax,i
     %if i==3
-      %exitrep
+	%exitrep
+       %if bull!shit		; Syntax error if evaluated
+	nop
+       %endif
+       %rep other::bullshit	; Same
+	nop
+       %endrep
     %endif
     mov ebx,i
-    %warning in %?%1 iteration i
+    %note in %?%1 iteration i
     %if i >= 3
 	%error iteration i should not be seen
     %endif
@@ -22,7 +28,7 @@
     %if i==3
       %exitrep
     %endif
-    %warning in %?%1 iteration i
+    %note in %?%1 iteration i
     mov ebx,i
     %if i >= 3
 	%error iteration i should not be seen

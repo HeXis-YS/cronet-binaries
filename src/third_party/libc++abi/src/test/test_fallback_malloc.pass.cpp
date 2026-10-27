@@ -11,9 +11,9 @@
 #include <cassert>
 #include <inttypes.h>
 
-#include <__threading_support>
+#include <__thread/support.h>
 
-// UNSUPPORTED: c++03
+// UNSUPPORTED: c++03, c++11, c++14, c++17, c++20
 // UNSUPPORTED: modules-build && no-threads
 
 // Necessary because we include a private source file of libc++abi, which
@@ -27,6 +27,8 @@ typedef std::deque<void *> container;
 
 TEST_DIAGNOSTIC_PUSH
 TEST_CLANG_DIAGNOSTIC_IGNORED("-Wprivate-header")
+#define _LIBCXXABI_ASSERT(expr, msg) assert((expr) && (msg))
+
 // #define  DEBUG_FALLBACK_MALLOC
 #define INSTRUMENT_FALLBACK_MALLOC
 #include "../src/fallback_malloc.cpp"
@@ -113,7 +115,7 @@ void exhaustion_test1 () {
     ptrs = alloc_series ( 32 );
     std::printf("Allocated %zu 32 byte chunks\n", ptrs.size());
     while ( ptrs.size () > 0 )
-        fallback_free ( pop ( ptrs, ptrs.size () % 1 == 1 ));
+      fallback_free(pop(ptrs, ptrs.size() % 2 == 1));
     print_free_list ();
 }
 
@@ -149,7 +151,7 @@ void exhaustion_test2 () {
     std::printf("Allocated %zu { 32, 48, 72, 108, 162 ... } byte chunks\n",
                 ptrs.size());
     while ( ptrs.size () > 0 )
-        fallback_free ( pop ( ptrs, ptrs.size () % 1 == 1 ));
+      fallback_free(pop(ptrs, ptrs.size() % 2 == 1));
     print_free_list ();
 
 }
@@ -183,7 +185,7 @@ void exhaustion_test3 () {
     ptrs = alloc_series ( allocs, sizeof ( allocs ) / sizeof ( allocs[0] ));
     std::printf("Allocated %zu chunks\n", ptrs.size());
     while ( ptrs.size () > 0 )
-        fallback_free ( pop ( ptrs, ptrs.size () % 1 == 1 ));
+      fallback_free(pop(ptrs, ptrs.size() % 2 == 1));
     print_free_list ();
 
 }

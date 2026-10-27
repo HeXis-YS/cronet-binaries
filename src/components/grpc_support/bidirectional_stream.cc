@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "base/functional/bind.h"
+#include "base/containers/span.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/logging.h"
@@ -100,17 +101,19 @@ int BidirectionalStream::Start(const char* url,
     LOG(ERROR) << "Invalid method " << request_info->method;
     return -1;
   }
-  std::string network_isolation_key_header;
-  if (headers.GetHeader("-network-isolation-key",
-                        &network_isolation_key_header)) {
-    net::SchemefulSite site(GURL{network_isolation_key_header});
+  if (auto isolation = headers.GetHeader("-network-isolation-key")) {
+    net::SchemefulSite site(GURL{*isolation});
     if (site.opaque()) {
       LOG(ERROR) << "Invalid -network-isolation-key "
-                 << network_isolation_key_header;
+                 << *isolation;
       return -1;
     }
   }
   request_info->extra_headers.CopyFrom(headers);
+  if (auto authority = headers.GetHeader("host")) {
+    request_info->extra_headers.SetHeader("-xray-authority", *authority);
+    request_info->extra_headers.RemoveHeader("host");
+  }
   request_info->end_stream_on_headers = end_of_stream;
   write_end_of_stream_ = end_of_stream;
   PostToNetworkThread(FROM_HERE,
@@ -120,10 +123,11 @@ int BidirectionalStream::Start(const char* url,
 }
 
 bool BidirectionalStream::ReadData(char* buffer, int capacity) {
-  if (!buffer)
+  if (!buffer || capacity <= 0)
     return false;
   scoped_refptr<net::WrappedIOBuffer> read_buffer =
-      base::MakeRefCounted<net::WrappedIOBuffer>(buffer);
+      base::MakeRefCounted<net::WrappedIOBuffer>(
+          base::span(buffer, static_cast<size_t>(capacity)));
 
   PostToNetworkThread(
       FROM_HERE, base::BindOnce(&BidirectionalStream::ReadDataOnNetworkThread,
@@ -134,11 +138,12 @@ bool BidirectionalStream::ReadData(char* buffer, int capacity) {
 bool BidirectionalStream::WriteData(const char* buffer,
                                     int count,
                                     bool end_of_stream) {
-  if (!buffer)
+  if (!buffer || count < 0)
     return false;
 
   scoped_refptr<net::WrappedIOBuffer> write_buffer =
-      base::MakeRefCounted<net::WrappedIOBuffer>(buffer);
+      base::MakeRefCounted<net::WrappedIOBuffer>(
+          base::span(buffer, static_cast<size_t>(count)));
 
   PostToNetworkThread(
       FROM_HERE,
@@ -188,7 +193,8 @@ void BidirectionalStream::OnStreamReady(bool request_headers_sent) {
 }
 
 void BidirectionalStream::OnHeadersReceived(
-    const spdy::Http2HeaderBlock& response_headers) {
+    const quiche::HttpHeaderBlock& response_headers,
+    const net::ProxyInfo& used_proxy_info) {
   DCHECK(IsOnNetworkThread());
   DCHECK_EQ(STARTED, read_state_);
   if (!bidi_stream_)
@@ -206,7 +212,7 @@ void BidirectionalStream::OnHeadersReceived(
       protocol = "h2";
       break;
     case net::kProtoQUIC:
-      protocol = "quic/1+spdy/3";
+      protocol = "h3";
       break;
     default:
       break;
@@ -252,7 +258,7 @@ void BidirectionalStream::OnDataSent() {
 }
 
 void BidirectionalStream::OnTrailersReceived(
-    const spdy::Http2HeaderBlock& response_trailers) {
+    const quiche::HttpHeaderBlock& response_trailers) {
   DCHECK(IsOnNetworkThread());
   if (!bidi_stream_)
     return;
@@ -279,9 +285,11 @@ void BidirectionalStream::StartOnNetworkThread(
   DCHECK(request_context_getter_->GetURLRequestContext());
   net::URLRequestContext* request_context =
       request_context_getter_->GetURLRequestContext();
-  request_info->extra_headers.SetHeaderIfMissing(
-      net::HttpRequestHeaders::kUserAgent,
-      request_context->http_user_agent_settings()->GetUserAgent());
+  if (request_context->http_user_agent_settings()) {
+    request_info->extra_headers.SetHeaderIfMissing(
+        net::HttpRequestHeaders::kUserAgent,
+        request_context->http_user_agent_settings()->GetUserAgent());
+  }
   bidi_stream_ = std::make_unique<net::BidirectionalStream>(
       std::move(request_info),
       request_context->http_transaction_factory()->GetSession(),

@@ -14,24 +14,20 @@
 
 #include <atomic>  // For std::memory_order_*.
 #include <memory>
-#include <shared_mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
-#include "base/atomicops.h"
 #include "base/base_export.h"
 #include "base/functional/callback.h"
 #include "base/gtest_prod_util.h"
-#include "base/lazy_instance.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "base/metrics/histogram_base.h"
 #include "base/metrics/ranges_manager.h"
-#include "base/metrics/record_histogram_checker.h"
 #include "base/observer_list_threadsafe.h"
-#include "base/strings/string_piece.h"
+#include "base/run_loop.h"
 #include "base/synchronization/lock.h"
 #include "base/thread_annotations.h"
 #include "base/types/pass_key.h"
@@ -40,6 +36,7 @@ namespace base {
 
 class BucketRanges;
 class HistogramSnapshotManager;
+class RecordHistogramChecker;
 
 // In-memory recorder of usage statistics (aka metrics, aka histograms).
 //
@@ -77,42 +74,73 @@ class BASE_EXPORT StatisticsRecorder {
   // about a histogram sample. This is used in conjunction with
   // ScopedHistogramSampleObserver to get notified when a sample is collected.
   using OnSampleCallback =
-      base::RepeatingCallback<void(const char* /*=histogram_name*/,
+      base::RepeatingCallback<void(std::string_view /*=histogram_name*/,
                                    uint64_t /*=name_hash*/,
-                                   HistogramBase::Sample)>;
+                                   HistogramBase::Sample32)>;
+  using OnSampleWithEventCallback =
+      base::RepeatingCallback<void(std::optional<uint64_t> event_id,
+                                   std::string_view /*=histogram_name*/,
+                                   uint64_t /*=name_hash*/,
+                                   HistogramBase::Sample32)>;
 
   // An observer that gets notified whenever a new sample is recorded for a
   // particular histogram. Clients only need to construct it with the histogram
   // name and the callback to be invoked. The class starts observing on
   // construction and removes itself from the observer list on destruction. The
   // clients are always notified on the same sequence in which they were
-  // registered.
+  // registered. This will not get a notification if created while sending out
+  // that notification.
   class BASE_EXPORT ScopedHistogramSampleObserver {
    public:
     // Constructor. Called with the desired histogram name and the callback to
     // be invoked when a sample is recorded.
-    explicit ScopedHistogramSampleObserver(const std::string& histogram_name,
-                                           OnSampleCallback callback);
+    ScopedHistogramSampleObserver(std::string_view histogram_name,
+                                  OnSampleCallback callback);
+    ScopedHistogramSampleObserver(std::string_view histogram_name,
+                                  OnSampleWithEventCallback callback);
+    ScopedHistogramSampleObserver(std::string_view histogram_name,
+                                  base::RepeatingClosure callback);
     ~ScopedHistogramSampleObserver();
 
    private:
     friend class StatisticsRecorder;
 
     // Runs the callback.
-    void RunCallback(const char* histogram_name,
+    void RunCallback(std::string_view histogram_name,
                      uint64_t name_hash,
-                     HistogramBase::Sample sample);
+                     HistogramBase::Sample32 sample,
+                     std::optional<uint64_t> event_id);
 
     // The name of the histogram to observe.
     const std::string histogram_name_;
 
     // The client supplied callback that is invoked when the histogram sample is
     // collected.
-    const OnSampleCallback callback_;
+    const OnSampleWithEventCallback callback_;
+  };
+
+  // A convenience wrapper around ScopedHistogramSampleObserver. Listens for
+  // changes to the histogram provided at construction. This class only allows
+  // `Wait()` to be called once. If you need to call `Wait()` multiple
+  // times, create multiple instances of this class.
+  class BASE_EXPORT HistogramWaiter {
+   public:
+    explicit HistogramWaiter(std::string_view histogram_name);
+
+    ~HistogramWaiter();
+    HistogramWaiter(const HistogramWaiter&) = delete;
+    HistogramWaiter& operator=(const HistogramWaiter&) = delete;
+
+    // Waits for the next update to the observed histogram.
+    void Wait();
+
+  private:
+    base::RunLoop run_loop_;
+    std::unique_ptr<base::StatisticsRecorder::ScopedHistogramSampleObserver>
+        histogram_observer_;
   };
 
   typedef std::vector<HistogramBase*> Histograms;
-  typedef size_t SnapshotTransactionId;
 
   StatisticsRecorder(const StatisticsRecorder&) = delete;
   StatisticsRecorder& operator=(const StatisticsRecorder&) = delete;
@@ -167,14 +195,23 @@ class BASE_EXPORT StatisticsRecorder {
   static std::string ToJSON(JSONVerbosityLevel verbosity_level);
 
   // Gets existing histograms. |include_persistent| determines whether
-  // histograms held in persistent storage are included.
+  // histograms held in persistent storage are included. Histograms with flags
+  // that intersect with |exclude_flags| are excluded.
+  //
+  // The default value of the |exclude_flags| parameter is set to exclude all
+  // PUMA histograms as a safety measure. This is because PUMA uses a different
+  // system for uploading metrics than UMA, and we need to ensure PUMA
+  // histograms don't break any existing code and vice-versa.
   //
   // The order of returned histograms is not guaranteed.
   //
   // Ownership of the individual histograms remains with the StatisticsRecorder.
   //
   // This method is thread safe.
-  static Histograms GetHistograms(bool include_persistent = true)
+  static Histograms GetHistograms(
+      bool include_persistent = true,
+      int32_t exclude_flags =
+          HistogramBase::Flags::kPumaRcTargetedHistogramFlag)
       LOCKS_EXCLUDED(GetLock());
 
   // Gets BucketRanges used by all histograms registered. The order of returned
@@ -187,7 +224,13 @@ class BASE_EXPORT StatisticsRecorder {
   // if a matching histogram is not found.
   //
   // This method is thread safe.
-  static HistogramBase* FindHistogram(base::StringPiece name);
+  static HistogramBase* FindHistogram(std::string_view name);
+
+  // Finds a histogram by hash and name. Matches the exact name. Returns a null
+  // pointer if a matching histogram is not found.
+  //
+  // This method is thread safe.
+  static HistogramBase* FindHistogram(uint64_t hash, std::string_view name);
 
   // Imports histograms from providers. If |async| is true, the providers may do
   // the work asynchronously (though this is not guaranteed and it is up to the
@@ -208,41 +251,21 @@ class BASE_EXPORT StatisticsRecorder {
   // for each histogram. |required_flags| is used to select which histograms to
   // record. Only histograms with all required flags are selected. If all
   // histograms should be recorded, use |Histogram::kNoFlags| as the required
-  // flag. This is logically equivalent to calling SnapshotUnloggedSamples()
-  // followed by HistogramSnapshotManager::MarkUnloggedSamplesAsLogged() on
-  // |snapshot_manager|. Returns the snapshot transaction ID associated with
-  // this operation. Thread-safe.
-  static SnapshotTransactionId PrepareDeltas(
-      bool include_persistent,
-      HistogramBase::Flags flags_to_set,
-      HistogramBase::Flags required_flags,
-      HistogramSnapshotManager* snapshot_manager)
-      LOCKS_EXCLUDED(snapshot_lock_.Pointer());
-
-  // Same as PrepareDeltas() above, but the samples are not marked as logged.
-  // This includes persistent histograms, and no flags will be set. A call to
-  // HistogramSnapshotManager::MarkUnloggedSamplesAsLogged() on the passed
-  // |snapshot_manager| should be made to mark them as logged. Returns the
-  // snapshot transaction ID associated with this operation. Thread-safe.
-  static SnapshotTransactionId SnapshotUnloggedSamples(
-      HistogramBase::Flags required_flags,
-      HistogramSnapshotManager* snapshot_manager)
-      LOCKS_EXCLUDED(snapshot_lock_.Pointer());
-
-  // Returns the transaction ID of the last snapshot performed (either through
-  // PrepareDeltas() or SnapshotUnloggedSamples()). Returns 0 if a snapshot was
-  // never taken so far. Thread-safe.
-  static SnapshotTransactionId GetLastSnapshotTransactionId()
-      LOCKS_EXCLUDED(snapshot_lock_.Pointer());
+  // flag. Thread-safe.
+  static void PrepareDeltas(bool include_persistent,
+                            HistogramBase::Flags flags_to_set,
+                            HistogramBase::Flags required_flags,
+                            HistogramSnapshotManager* snapshot_manager);
 
   // Retrieves and runs the list of callbacks for the histogram referred to by
   // |histogram_name|, if any.
   //
   // This method is thread safe.
   static void FindAndRunHistogramCallbacks(base::PassKey<HistogramBase>,
-                                           const char* histogram_name,
+                                           std::string_view histogram_name,
                                            uint64_t name_hash,
-                                           HistogramBase::Sample sample);
+                                           HistogramBase::Sample32 sample,
+                                           std::optional<uint64_t> event_id);
 
   // Returns the number of known histograms.
   //
@@ -262,7 +285,7 @@ class BASE_EXPORT StatisticsRecorder {
   // memory is being released.
   //
   // This method is thread safe.
-  static void ForgetHistogramForTesting(base::StringPiece name);
+  static void ForgetHistogramForTesting(std::string_view name);
 
   // Creates a temporary StatisticsRecorder object for testing purposes. All new
   // histograms will be registered in it until it is destructed or pushed aside
@@ -286,7 +309,8 @@ class BASE_EXPORT StatisticsRecorder {
   // Checks if the given histogram should be recorded based on the
   // ShouldRecord() method of the record checker. If the record checker is not
   // set, returns true.
-  // |histogram_hash| corresponds to the result of HashMetricNameAs32Bits().
+  // |histogram_hash| corresponds to the result of HashMetricNameAs32Bits() or
+  // ParseMetricHashTo32Bits().
   //
   // This method is thread safe.
   static bool ShouldRecordHistogram(uint32_t histogram_hash);
@@ -299,12 +323,13 @@ class BASE_EXPORT StatisticsRecorder {
   // |case_sensitive| determines whether the matching should be done in a
   // case sensitive way.
   static Histograms WithName(Histograms histograms,
-                             const std::string& query,
+                             std::string_view query,
                              bool case_sensitive = true);
 
-  using GlobalSampleCallback = void (*)(const char* /*=histogram_name*/,
+  using GlobalSampleCallback = void (*)(std::string_view /*=histogram_name*/,
                                         uint64_t /*=name_hash*/,
-                                        HistogramBase::Sample);
+                                        HistogramBase::Sample32,
+                                        std::optional<uint64_t> /*=event_id*/);
   // Installs a global callback which will be called for every added
   // histogram sample. The given callback is a raw function pointer in order
   // to be accessed lock-free and can be called on any thread.
@@ -324,138 +349,25 @@ class BASE_EXPORT StatisticsRecorder {
     return have_active_callbacks_.load(std::memory_order_relaxed);
   }
 
-#ifdef ARCH_CPU_64_BITS
-  static base::TimeDelta GetAndClearTotalWaitTime() {
-    return lock_.Get().GetAndClearTotalWaitTime();
-  }
-#endif  // ARCH_CPU_64_BITS
-
-  // Returns the synthetic trial group name for the R/W lock trial being ran,
-  // or an empty string if no trial is being run and should not be reported.
-  static StringPiece GetLockTrialGroup();
-
  private:
-  // Wrapper lock class that provides A/B testing between a base::Lock and a
-  // std::shared_mutex and tracks lock wait times. Additionally, allows the use
-  // of thread locking annotations, which are not otherwise supported by
-  // std::shared_mutex.
-  //
-  // Note: std::shared_mutex is currently not generally allowed in Chromium but
-  // this specific use has been explicitly discussed and agreed on
-  // cxx@chromium.org here:
-  // https://groups.google.com/a/chromium.org/g/cxx/c/bIlGr1URn8I/m/ftvVCQPiAQAJ
-  class BASE_EXPORT LOCKABLE SrLock {
-   public:
-    SrLock() : use_shared_mutex_(ShouldUseSharedMutex()) {}
-    ~SrLock() = default;
-
-    void Acquire() EXCLUSIVE_LOCK_FUNCTION() {
-      TimeTicks start = TimeTicks::Now();
-      if (use_shared_mutex_) {
-        mutex_.lock();
-      } else {
-        lock_.Acquire();
-      }
-      IncrementLockWaitTime(TimeTicks::Now() - start);
-    }
-
-    void Release() UNLOCK_FUNCTION() {
-      if (use_shared_mutex_) {
-        mutex_.unlock();
-      } else {
-        lock_.Release();
-      }
-    }
-
-    void AcquireShared() SHARED_LOCK_FUNCTION() {
-      TimeTicks start = TimeTicks::Now();
-      if (use_shared_mutex_) {
-        mutex_.lock_shared();
-      } else {
-        lock_.Acquire();
-      }
-      IncrementLockWaitTime(TimeTicks::Now() - start);
-    }
-
-    void ReleaseShared() UNLOCK_FUNCTION() {
-      if (use_shared_mutex_) {
-        mutex_.unlock_shared();
-      } else {
-        lock_.Release();
-      }
-    }
-
-    void AssertAcquired() {
-      if (use_shared_mutex_) {
-        // Not available with std::shared_mutex. This can be implemented on top
-        // of that API, similar to what base::Lock does.
-      } else {
-        lock_.AssertAcquired();
-      }
-    }
-
-#ifdef ARCH_CPU_64_BITS
-    TimeDelta GetAndClearTotalWaitTime() {
-      return Microseconds(
-          subtle::NoBarrier_AtomicExchange(&total_lock_wait_time_micros_, 0));
-    }
-#endif  // ARCH_CPU_64_BITS
-
-    bool use_shared_mutex() const { return use_shared_mutex_; }
-
-   private:
-    // Determines if the shared mutex should be used. Should only be called
-    // once when the lock is created.
-    static bool ShouldUseSharedMutex();
-
-    void IncrementLockWaitTime(TimeDelta delta) {
-#ifdef ARCH_CPU_64_BITS
-      subtle::NoBarrier_AtomicIncrement(&total_lock_wait_time_micros_,
-                                        delta.InMicroseconds());
-#endif  // ARCH_CPU_64_BITS
-    }
-
-#ifdef ARCH_CPU_64_BITS
-    // Cumulative wait time on acquiring the lock (both R and W modes) since the
-    // the last call to GetAndClearTotalWaitTime().
-    // Note: Requires 64-bit arch for atomic increments.
-    subtle::Atomic64 total_lock_wait_time_micros_ = 0;
-#endif  // ARCH_CPU_64_BITS
-
-    // If true, |mutex_| will be used in R/W mode; otherwise |lock_| is used.
-    const bool use_shared_mutex_;
-    std::shared_mutex mutex_;
-    Lock lock_;
-  };
-
-  class SCOPED_LOCKABLE SrAutoReaderLock {
-   public:
-    explicit SrAutoReaderLock(SrLock& lock) EXCLUSIVE_LOCK_FUNCTION(lock)
-        : lock_(lock) {
-      lock_->AcquireShared();
-    }
-
-    ~SrAutoReaderLock() UNLOCK_FUNCTION() { lock_->ReleaseShared(); }
-
-   private:
-    raw_ref<SrLock> lock_;
-  };
-
-  using SrAutoWriterLock = internal::BasicAutoLock<SrLock>;
-  static SrLock& GetLock() { return lock_.Get(); }
-  static void AssertLockHeld() { lock_.Get().AssertAcquired(); }
+  // Global lock for internal synchronization.
+  // Note: Care must be taken to not read or write anything to persistent memory
+  // while holding this lock, as that could cause a file I/O stall.
+  static Lock& GetLock();
+  static void AssertLockHeld();
 
   // Returns the histogram registered with |hash|, if there is one. Returns
   // nullptr otherwise.
   // Note: |name| is only used in DCHECK builds to assert that there was no
   // collision (i.e. different histograms with the same hash).
   HistogramBase* FindHistogramByHashInternal(uint64_t hash,
-                                             StringPiece name) const
+                                             std::string_view name) const
       EXCLUSIVE_LOCKS_REQUIRED(GetLock());
 
-  // Adds an observer to be notified when a new sample is recorded on the
-  // histogram referred to by |histogram_name|. Can be called before or after
-  // the histogram is created.
+  // Adds an observer to be notified when a new sample is recorded on
+  // the histogram referred to by |histogram_name|. Observers added
+  // while sending out notification are not notified. Can be called
+  // before or after the histogram is created.
   //
   // This method is thread safe.
   static void AddHistogramSampleObserver(
@@ -521,20 +433,6 @@ class BASE_EXPORT StatisticsRecorder {
 
   // Previous global recorder that existed when this one was created.
   raw_ptr<StatisticsRecorder> previous_ = nullptr;
-
-  // Global lock for internal synchronization.
-  // Note: Care must be taken to not read or write anything to persistent memory
-  // while holding this lock, as that could cause a file I/O stall.
-  static LazyInstance<SrLock>::Leaky lock_;
-
-  // Global lock for internal synchronization of histogram snapshots.
-  static LazyInstance<base::Lock>::Leaky snapshot_lock_;
-
-  // A strictly increasing number that is incremented every time a snapshot is
-  // taken (by either calling SnapshotUnloggedSamples() or PrepareDeltas()).
-  // This represents the transaction ID of the last snapshot taken.
-  static SnapshotTransactionId last_snapshot_transaction_id_
-      GUARDED_BY(snapshot_lock_.Get());
 
   // Current global recorder. This recorder is used by static methods. When a
   // new global recorder is created by CreateTemporaryForTesting(), then the

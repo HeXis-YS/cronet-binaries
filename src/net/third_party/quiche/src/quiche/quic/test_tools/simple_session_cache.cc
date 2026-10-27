@@ -5,6 +5,8 @@
 #include "quiche/quic/test_tools/simple_session_cache.h"
 
 #include <memory>
+#include <string>
+#include <utility>
 
 #include "quiche/quic/core/crypto/quic_crypto_client_config.h"
 
@@ -15,9 +17,10 @@ void SimpleSessionCache::Insert(const QuicServerId& server_id,
                                 bssl::UniquePtr<SSL_SESSION> session,
                                 const TransportParameters& params,
                                 const ApplicationState* application_state) {
-  auto it = cache_entries_.find(server_id);
+  auto it = cache_entries_.find(server_id.cache_key());
   if (it == cache_entries_.end()) {
-    it = cache_entries_.insert(std::make_pair(server_id, Entry())).first;
+    it = cache_entries_.insert(std::make_pair(server_id.cache_key(), Entry()))
+             .first;
   }
   if (session != nullptr) {
     it->second.session = std::move(session);
@@ -32,7 +35,7 @@ void SimpleSessionCache::Insert(const QuicServerId& server_id,
 std::unique_ptr<QuicResumptionState> SimpleSessionCache::Lookup(
     const QuicServerId& server_id, QuicWallTime /*now*/,
     const SSL_CTX* /*ctx*/) {
-  auto it = cache_entries_.find(server_id);
+  auto it = cache_entries_.find(server_id.cache_key());
   if (it == cache_entries_.end()) {
     return nullptr;
   }
@@ -61,7 +64,7 @@ void SimpleSessionCache::ClearEarlyData(const QuicServerId& /*server_id*/) {
 
 void SimpleSessionCache::OnNewTokenReceived(const QuicServerId& server_id,
                                             absl::string_view token) {
-  auto it = cache_entries_.find(server_id);
+  auto it = cache_entries_.find(server_id.cache_key());
   if (it == cache_entries_.end()) {
     return;
   }
@@ -73,6 +76,16 @@ void SimpleSessionCache::RemoveExpiredEntries(QuicWallTime /*now*/) {
 }
 
 void SimpleSessionCache::Clear() { cache_entries_.clear(); }
+
+void SimpleSessionCache::UpdateMaxSize(size_t /*max_entries*/) {
+  // SimpleSessionCache does not support updating the maximum size of the cache.
+}
+
+size_t SimpleSessionCache::GetSize() const { return cache_entries_.size(); }
+
+size_t SimpleSessionCache::GetMaxSize() const {
+  return std::numeric_limits<size_t>::max();
+}
 
 }  // namespace test
 }  // namespace quic

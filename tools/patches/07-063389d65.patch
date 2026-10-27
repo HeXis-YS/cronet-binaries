@@ -1,0 +1,25 @@
+From 063389d65f1b42abe672add1b01a0ebe8d2adb6e Mon Sep 17 00:00:00 2001
+From: klzgrad <kizdiv@gmail.com>
+Date: Sun, 16 May 2021 20:57:51 +0800
+Subject: [PATCH] android: build: Disable Android java templates
+
+---
+ src/build_overrides/build.gni | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/build_overrides/build.gni b/src/build_overrides/build.gni
+index ea3301998..fdf2e9c5b 100644
+--- a/src/build_overrides/build.gni
++++ b/src/build_overrides/build.gni
+@@ -11,7 +11,7 @@ import("//build/config/gclient_args.gni")
+ # default_android_ndk_version = "r10e"
+ 
+ # Some non-Chromium builds don't support building java targets.
+-enable_java_templates = true
++enable_java_templates = false
+ 
+ # Variable that can be used to support multiple build scenarios, like when
+ # V8 is embedded within a target.
+-- 
+2.53.0
+

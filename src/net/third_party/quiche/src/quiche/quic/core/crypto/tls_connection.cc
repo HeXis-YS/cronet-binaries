@@ -4,9 +4,13 @@
 
 #include "quiche/quic/core/crypto/tls_connection.h"
 
+#include <utility>
+
 #include "absl/strings/string_view.h"
 #include "openssl/ssl.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
+#include "quiche/quic/platform/api/quic_flag_utils.h"
+#include "quiche/quic/platform/api/quic_flags.h"
 
 namespace quic {
 
@@ -34,7 +38,6 @@ class SslIndexSingleton {
 
  private:
   SslIndexSingleton() {
-    CRYPTO_library_init();
     ssl_ex_data_index_connection_ =
         SSL_get_ex_new_index(0, nullptr, nullptr, nullptr, nullptr);
     QUICHE_CHECK_LE(0, ssl_ex_data_index_connection_);
@@ -94,6 +97,7 @@ TlsConnection::TlsConnection(SSL_CTX* ssl_ctx,
     : delegate_(delegate),
       ssl_(SSL_new(ssl_ctx)),
       ssl_config_(std::move(ssl_config)) {
+  SSL_set_shed_handshake_config(ssl(), /*enable=*/1);
   SSL_set_ex_data(
       ssl(), SslIndexSingleton::GetInstance()->ssl_ex_data_index_connection(),
       this);
@@ -106,10 +110,8 @@ TlsConnection::TlsConnection(SSL_CTX* ssl_ctx,
         ssl(), ssl_config_.signing_algorithm_prefs->data(),
         ssl_config_.signing_algorithm_prefs->size());
   }
-  if (ssl_config_.disable_ticket_support.has_value()) {
-    if (*ssl_config_.disable_ticket_support) {
-      SSL_set_options(ssl(), SSL_OP_NO_TICKET);
-    }
+  if (ssl_config_.disable_ticket_support) {
+    SSL_set_options(ssl(), SSL_OP_NO_TICKET);
   }
 }
 
@@ -127,7 +129,6 @@ void TlsConnection::DisableTicketSupport() {
 
 // static
 bssl::UniquePtr<SSL_CTX> TlsConnection::CreateSslCtx() {
-  CRYPTO_library_init();
   bssl::UniquePtr<SSL_CTX> ssl_ctx(SSL_CTX_new(TLS_with_buffers_method()));
   SSL_CTX_set_min_proto_version(ssl_ctx.get(), TLS1_3_VERSION);
   SSL_CTX_set_max_proto_version(ssl_ctx.get(), TLS1_3_VERSION);

@@ -4,73 +4,101 @@
 
 #include "quiche/http2/hpack/huffman/hpack_huffman_encoder.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <string>
+
+#include "absl/strings/string_view.h"
 #include "quiche/http2/hpack/huffman/huffman_spec_tables.h"
+#include "quiche/common/platform/api/quiche_flag_utils.h"
+#include "quiche/common/platform/api/quiche_flags.h"
 #include "quiche/common/platform/api/quiche_logging.h"
+#include "quiche/common/quiche_endian.h"
 
 namespace http2 {
 
+namespace {
+
+void FlushAccumulator(uint64_t accumulator, size_t to_write, char* dest) {
+  const uint32_t word = static_cast<uint32_t>(accumulator >> 32);
+  const uint32_t net_word = quiche::QuicheEndian::HostToNet32(word);
+  std::memcpy(dest, &net_word, to_write);
+}
+
+}  // namespace
+
 size_t HuffmanSize(absl::string_view plain) {
-  size_t bits = 0;
+  uint64_t bits = 0;
   for (const uint8_t c : plain) {
     bits += HuffmanSpecTables::kCodeLengths[c];
   }
-  return (bits + 7) / 8;
+  uint64_t result = (bits + 7) / 8;
+  if (result > std::numeric_limits<uint32_t>::max()) {
+    return plain.size();
+  }
+  return result;
 }
 
-void HuffmanEncode(absl::string_view plain, size_t encoded_size,
-                   std::string* huffman) {
-  QUICHE_DCHECK(huffman != nullptr);
-  huffman->reserve(huffman->size() + encoded_size);
-  uint64_t bit_buffer = 0;  // High-bit is next bit to output. Not clear if that
-                            // is more performant than having the low-bit be the
-                            // last to be output.
-  size_t bits_unused = 64;  // Number of bits available for the next code.
-  for (uint8_t c : plain) {
-    size_t code_length = HuffmanSpecTables::kCodeLengths[c];
-    if (bits_unused < code_length) {
-      // There isn't enough room in bit_buffer for the code of c.
-      // Flush until bits_unused > 56 (i.e. 64 - 8).
-      do {
-        char h = static_cast<char>(bit_buffer >> 56);
-        bit_buffer <<= 8;
-        bits_unused += 8;
-        // Perhaps would be more efficient if we populated an array of chars,
-        // so we don't have to call push_back each time. Reconsider if used
-        // for production.
-        huffman->push_back(h);
-      } while (bits_unused <= 56);
+void HuffmanEncode(absl::string_view input, size_t encoded_size,
+                   std::string* output) {
+  // Uses the 64-bit accumulator path for inputs >= 25 bytes. For smaller
+  // inputs, the overhead outweighs the benefits, causing a regression.
+  if (input.size() >= 25 &&
+      GetQuicheReloadableFlag(hpack_huffman_encoder_64bit_accumulator)) {
+    QUICHE_RELOADABLE_FLAG_COUNT(hpack_huffman_encoder_64bit_accumulator);
+    const size_t original_size = output->size();
+    // The destination must be large enough to contain the original `output` as
+    // well as the new encoded data.
+    const size_t final_size = original_size + encoded_size;
+    // Reserve an extra four bytes to avoid accessing unallocated memory (even
+    // though it would only be OR'd with zeros and thus not modified).
+    output->resize(final_size + sizeof(uint32_t), 0);
+
+    char* dest = output->data() + original_size;
+    // Maintains the bits to be written. The next code is shifted and OR'd
+    // into the accumulator.
+    uint64_t accumulator = 0;
+    // Number of bits currently in the accumulator.
+    int count = 0;
+
+    for (const uint8_t c : input) {
+      const uint32_t left_code = HuffmanSpecTables::kLeftCodes[c];
+      const uint8_t len = HuffmanSpecTables::kCodeLengths[c];
+      // Shifts the 32-bit left-aligned code to the right by the current bit
+      // count and merges it into the 64-bit accumulator.
+      accumulator |= (static_cast<uint64_t>(left_code) << 32) >> count;
+      count += len;
+      // When the accumulator has at least 32 bits, flushes them as a 32-bit
+      // big-endian word.
+      if (count >= 32) {
+        FlushAccumulator(accumulator, sizeof(uint32_t), dest);
+        dest += sizeof(uint32_t);
+        accumulator <<= 32;
+        count -= 32;
+      }
     }
-    uint64_t code = HuffmanSpecTables::kRightCodes[c];
-    size_t shift_by = bits_unused - code_length;
-    bit_buffer |= (code << shift_by);
-    bits_unused -= code_length;
-  }
-  // bit_buffer contains (64-bits_unused) bits that still need to be flushed.
-  // Output whole bytes until we don't have any whole bytes left.
-  size_t bits_used = 64 - bits_unused;
-  while (bits_used >= 8) {
-    char h = static_cast<char>(bit_buffer >> 56);
-    bit_buffer <<= 8;
-    bits_used -= 8;
-    huffman->push_back(h);
-  }
-  if (bits_used > 0) {
-    // We have less than a byte left to output. The spec calls for padding out
-    // the final byte with the leading bits of the EOS symbol (30 1-bits).
-    constexpr uint64_t leading_eos_bits = 0b11111111;
-    bit_buffer |= (leading_eos_bits << (56 - bits_used));
-    char h = static_cast<char>(bit_buffer >> 56);
-    huffman->push_back(h);
-  }
-}
 
-void HuffmanEncodeFast(absl::string_view input, size_t encoded_size,
-                       std::string* output) {
+    // Writes the remaining bits (up to 31 bits).
+    if (count > 0) {
+      // HPACK requires end-of-stream padding to be 1s.
+      accumulator |= (~0ULL >> count);
+      const size_t remaining_bytes = (count + 7) / 8;
+      FlushAccumulator(accumulator, remaining_bytes, dest);
+    }
+
+    output->resize(final_size);
+    return;
+  }
+
   const size_t original_size = output->size();
+  // The destination must be large enough to contain the original `output` as
+  // well as the new encoded data.
   const size_t final_size = original_size + encoded_size;
   // Reserve an extra four bytes to avoid accessing unallocated memory (even
   // though it would only be OR'd with zeros and thus not modified).
-  output->resize(final_size + 4, 0);
+  output->resize(final_size + sizeof(uint32_t), 0);
 
   // Pointer to first appended byte.
   char* const first = &*output->begin() + original_size;

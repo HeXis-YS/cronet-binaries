@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import("//build/config/compiler/compiler.gni")
+import("//build/config/compiler/pgo/pgo.gni")
 
 declare_args() {
   # Whether to compile support for Allocation Stack Trace Recorder.
@@ -14,8 +15,7 @@ declare_args() {
   #
   # Although it should work on other platforms as well, for the above reasons,
   # we currently enable it only for Android when compiling for Arm64.
-  build_allocation_stack_trace_recorder =
-      !is_official_build && current_cpu == "arm64" && is_android
+  build_allocation_stack_trace_recorder = current_cpu == "arm64" && is_android
 }
 
 declare_args() {
@@ -26,6 +26,14 @@ declare_args() {
   # Even if it's disabled we still collect some data, i.e. total number of
   # allocations. All other data will be set to a default value.
   build_allocation_trace_recorder_full_reporting = false
+}
+
+declare_args() {
+  # If enabled, clang produces an extremely verbose amount of warnings about
+  # places in the code where CHECKS() (typically performance-sensitive bounds
+  # checks) could not be elided by the optimizer. Useful for hunting down a
+  # performance-regression when moving to safer types.
+  enable_check_elision_warning = false
 }
 
 assert(!(build_allocation_stack_trace_recorder && is_fuchsia),
@@ -40,3 +48,6 @@ assert(
     build_allocation_stack_trace_recorder ||
         !build_allocation_trace_recorder_full_reporting,
     "Report for stack trace recorder is enabled, but the recorder is disabled!")
+
+assert(!enable_check_elision_warning || !is_debug,
+       "Check elision warning requires an optimized build!")

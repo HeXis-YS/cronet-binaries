@@ -1,10 +1,17 @@
 #! /usr/bin/env perl
 # Copyright 2005-2016 The OpenSSL Project Authors. All Rights Reserved.
 #
-# Licensed under the OpenSSL license (the "License").  You may not use
-# this file except in compliance with the License.  You can obtain a copy
-# in the file LICENSE in the source distribution or at
-# https://www.openssl.org/source/license.html
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 # Ascetic x86_64 AT&T to MASM/NASM assembler translator by <appro>.
@@ -86,6 +93,7 @@ my $PTR=" PTR";
 
 my $nasmref=2.03;
 my $nasm=0;
+my %segment_had_labels;
 
 if    ($flavour eq "mingw64")	{ $gas=1; $elf=0; $win64=1;
 				  # TODO(davidben): Before supporting the
@@ -120,9 +128,9 @@ my %globals;
 	    if ($self->{op} =~ /^(movz)x?([bw]).*/) {	# movz is pain...
 		$self->{op} = $1;
 		$self->{sz} = $2;
-	    } elsif ($self->{op} =~ /call|jmp/) {
+	    } elsif ($self->{op} =~ /call|jmp|^rdrand$/) {
 		$self->{sz} = "";
-	    } elsif ($self->{op} =~ /^p/ && $' !~ /^(ush|op|insrw)/) { # SSEn
+	    } elsif ($self->{op} =~ /^p/ && $' !~ /^(ush|op|insrw|ext[ql]?$|dep[ql]?$)/) { # SSEn
 		$self->{sz} = "";
 	    } elsif ($self->{op} =~ /^[vk]/) { # VEX or k* such as kmov
 		$self->{sz} = "";
@@ -714,16 +722,21 @@ my %globals;
     }
 }
 { package seh_directive;
-    # This implements directives, like MASM's, for specifying Windows unwind
-    # codes. See https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64?view=msvc-170
-    # for details on the Windows unwind mechanism. Unlike MASM's directives, we
-    # have no .seh_endprolog directive. Instead, the last prolog directive is
-    # implicitly the end of the prolog.
+    # This implements directives, like MASM, gas, and clang-assembler for
+    # specifying Windows unwind codes. See
+    # https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64?view=msvc-170
+    # for details on the Windows unwind mechanism. As perlasm generally uses gas
+    # syntax, the syntax is patterned after the gas spelling, described in
+    # https://sourceware.org/legacy-ml/binutils/2009-08/msg00193.html
+    #
+    # TODO(https://crbug.com/boringssl/571): Translate to the MASM directives
+    # when using the MASM output. Emit as-is when using "mingw64" output, which
+    # is Windows with gas syntax.
     #
     # TODO(https://crbug.com/boringssl/259): For now, SEH directives are ignored
     # on non-Windows platforms. This means functions need to specify both CFI
     # and SEH directives, often redundantly. Ideally we'd abstract between the
-    # two. E.g., we can synthesize CFI from SEH prologs, but SEH does not
+    # two. E.g., we can synthesize CFI from SEH prologues, but SEH does not
     # annotate epilogs, so we'd need to combine parts from both. Or we can
     # restrict ourselves to a subset of CFI and synthesize SEH from CFI.
     #
@@ -732,7 +745,7 @@ my %globals;
     # complication is the current scheme modifies RDI and RSI (non-volatile on
     # Windows) at the start of the function, and saves them in the parameter
     # stack area. This can be expressed with .seh_savereg, but .seh_savereg is
-    # only usable late in the prolog. However, unwind information gives enough
+    # only usable late in the prologue. However, unwind information gives enough
     # information to locate the parameter stack area at any point in the
     # function, so we can defer conversion or implement other schemes.
 
@@ -777,6 +790,11 @@ my %globals;
 	die "Missing .seh_startproc directive" unless %info;
     }
 
+    sub _check_in_prologue {
+	_check_in_proc();
+	die "Invalid SEH directive after .seh_endprologue" if defined($info{endprologue});
+    }
+
     sub _check_not_in_proc {
 	die "Missing .seh_endproc directive" if %info;
     }
@@ -794,8 +812,8 @@ my %globals;
 	    info_label => $info_label,
 	    # start_label is the start of the function.
 	    start_label => $start_label,
-	    # endprolog is the label of the last unwind code in the function.
-	    endprolog => $start_label,
+	    # endprologue is the label of the end of the prologue.
+	    endprologue => undef,
 	    # unwind_codes contains the textual representation of the
 	    # unwind codes in the function so far.
 	    unwind_codes => "",
@@ -821,14 +839,14 @@ my %globals;
 
     sub _add_unwind_code {
 	my ($op, $value, @extra) = @_;
-	_check_in_proc();
+	_check_in_prologue();
 	if ($op != $UWOP_PUSH_NONVOL) {
 	    $info{has_nonpushreg} = 1;
 	} elsif ($info{has_nonpushreg}) {
-	    die ".seh_pushreg directives must appear first in the prolog";
+	    die ".seh_pushreg directives must appear first in the prologue";
 	}
 
-	my $label = _new_unwind_label("prolog");
+	my $label = _new_unwind_label("prologue");
 	# Encode an UNWIND_CODE structure. See
 	# https://learn.microsoft.com/en-us/cpp/build/exception-handling-x64?view=msvc-170#struct-unwind_code
 	my $encoded = $op | ($value << 4);
@@ -844,17 +862,13 @@ ____
 	$info{num_codes} += 1 + scalar(@extra);
 	# Unwind codes are listed in reverse order.
 	$info{unwind_codes} = $codes . $info{unwind_codes};
-	# Track the label of the last unwind code. It implicitly is the end of
-	# the prolog. MASM has an endprolog directive, but it seems to be
-	# unnecessary.
-	$info{endprolog} = $label;
 	return $label;
     }
 
     sub _updating_fixed_allocation {
-	_check_in_proc();
+	_check_in_prologue();
 	if ($info{frame_reg} != 0) {
-	    # Windows documentation does not explicitly forbid .seh_allocstack
+	    # Windows documentation does not explicitly forbid .seh_stackalloc
 	    # after .seh_setframe, but it appears to have no effect. Offsets are
 	    # still relative to the fixed allocation when the frame register was
 	    # established.
@@ -862,7 +876,7 @@ ____
 	}
 	if ($info{has_offset}) {
 	    # Windows documentation does not explicitly forbid .seh_savereg
-	    # before .seh_allocstack, but it does not work very well. Offsets
+	    # before .seh_stackalloc, but it does not work very well. Offsets
 	    # are relative to the top of the final fixed allocation, not where
 	    # RSP currently is.
 	    die "directives with an offset must come after the fixed allocation is established.";
@@ -871,11 +885,8 @@ ____
 
     sub _endproc {
 	_check_in_proc();
-	if ($info{num_codes} == 0) {
-	    # If a Windows function has no directives (i.e. it doesn't touch the
-	    # stack), it is a leaf function and is not expected to appear in
-	    # .pdata or .xdata.
-	    die ".seh_endproc found with no unwind codes";
+	if (!defined($info{endprologue})) {
+	    die "Missing .seh_endprologue";
 	}
 
 	my $end_label = _new_unwind_label("end");
@@ -894,11 +905,21 @@ ____
 	$xdata .= <<____;
 $info{info_label}:
 	.byte	1	# version 1, no flags
-	.byte	$info{endprolog}-$info{start_label}
+	.byte	$info{endprologue}-$info{start_label}
 	.byte	$info{num_codes}
 	.byte	$frame_encoded
 $info{unwind_codes}
 ____
+
+	# UNWIND_INFOs must be 4-byte aligned. If needed, we must add an extra
+	# unwind code. This does not change the unwind code count. Windows
+	# documentation says "For alignment purposes, this array always has an
+	# even number of entries, and the final entry is potentially unused. In
+	# that case, the array is one longer than indicated by the count of
+	# unwind codes field."
+	if ($info{num_codes} & 1) {
+	    $xdata .= "\t.value\t0\n";
+	}
 
 	%info = ();
 	return $end_label;
@@ -916,7 +937,7 @@ ____
 	    my $label;
 	    SWITCH: for ($dir) {
 		/^startproc$/ && do {
-		    $label = _startproc();
+		    $label = _startproc($1);
 		    last;
 		};
 		/^pushreg$/ && do {
@@ -926,7 +947,7 @@ ____
 		    $label = _add_unwind_code($UWOP_PUSH_NONVOL, $reg_num);
 		    last;
 		};
-		/^allocstack$/ && do {
+		/^stackalloc$/ && do {
 		    my $num = eval($$line);
 		    if ($num <= 0 || $num % 8 != 0) {
 			die "invalid stack allocation: $num";
@@ -976,7 +997,7 @@ ____
 		    $info{has_offset} = 1;
 		    last;
 		};
-		/^savexmm128$/ && do {
+		/^savexmm$/ && do {
 		    $$line =~ /%xmm(\d+)\s*,\s*(.+)/ or die "could not parse .seh_$dir";
 		    my $reg_num = $1;
 		    my $offset = eval($2);
@@ -989,6 +1010,19 @@ ____
 			$label = _add_unwind_code($UWOP_SAVE_XMM128_FAR, $reg_num, $offset >> 16, $offset & 0xffff);
 		    }
 		    $info{has_offset} = 1;
+		    last;
+		};
+		/^endprologue$/ && do {
+		    _check_in_prologue();
+		    if ($info{num_codes} == 0) {
+			# If a Windows function has no directives (i.e. it
+			# doesn't touch the stack), it is a leaf function and is
+			# not expected to appear in .pdata or .xdata.
+			die ".seh_endprologue found with no unwind codes";
+		    }
+
+		    $label = _new_unwind_label("endprologue");
+		    $info{endprologue} = $label;
 		    last;
 		};
 		/^endproc$/ && do {
@@ -1028,27 +1062,6 @@ ____
     }
 }
 { package directive;	# pick up directives, which start with .
-    my %sections;
-    sub nasm_section {
-	my ($name, $qualifiers) = @_;
-	my $ret = "section\t$name";
-	if (exists $sections{$name}) {
-	    # Work around https://bugzilla.nasm.us/show_bug.cgi?id=3392701. Only
-	    # emit section qualifiers the first time a section is referenced.
-	    # For all subsequent references, require the qualifiers match and
-	    # omit them.
-	    #
-	    # See also https://crbug.com/1422018 and b/270643835.
-	    my $old = $sections{$name};
-	    die "Inconsistent qualifiers: $qualifiers vs $old" if ($qualifiers ne "" && $qualifiers ne $old);
-	} else {
-	    $sections{$name} = $qualifiers;
-	    if ($qualifiers ne "") {
-		$ret .= " $qualifiers";
-	    }
-	}
-	return $ret;
-    }
     sub re {
 	my	($class, $line) = @_;
 	my	$self = {};
@@ -1157,7 +1170,7 @@ ____
 	    SWITCH: for ($dir) {
 		/\.text/    && do { my $v=undef;
 				    if ($nasm) {
-					$v=nasm_section(".text", "code align=64")."\n";
+					$v="section	.text code align=64\n";
 				    } else {
 					$v="$current_segment\tENDS\n" if ($current_segment);
 					$current_segment = ".text\$";
@@ -1170,7 +1183,7 @@ ____
 				  };
 		/\.data/    && do { my $v=undef;
 				    if ($nasm) {
-					$v=nasm_section(".data", "data align=8")."\n";
+					$v="section	.data data align=8\n";
 				    } else {
 					$v="$current_segment\tENDS\n" if ($current_segment);
 					$current_segment = "_DATA";
@@ -1184,14 +1197,13 @@ ____
 				    $$line = ".CRT\$XCU" if ($$line eq ".init");
 				    $$line = ".rdata" if ($$line eq ".rodata");
 				    if ($nasm) {
-					my $qualifiers = "";
+					$v="section	$$line";
 					if ($$line=~/\.([prx])data/) {
-					    $qualifiers = "rdata align=";
-					    $qualifiers .= $1 eq "p"? 4 : 8;
+					    $v.=" rdata align=";
+					    $v.=$1 eq "p"? 4 : 8;
 					} elsif ($$line=~/\.CRT\$/i) {
-					    $qualifiers = "rdata align=8";
+					    $v.=" rdata align=8";
 					}
-					$v = nasm_section($$line, $qualifiers);
 				    } else {
 					$v="$current_segment\tENDS\n" if ($current_segment);
 					$v.="$$line\tSEGMENT";
@@ -1286,203 +1298,11 @@ ____
     }
 }
 
-# Upon initial x86_64 introduction SSE>2 extensions were not introduced
-# yet. In order not to be bothered by tracing exact assembler versions,
-# but at the same time to provide a bare security minimum of AES-NI, we
-# hard-code some instructions. Extensions past AES-NI on the other hand
-# are traced by examining assembler version in individual perlasm
-# modules...
-
-my %regrm = (	"%eax"=>0, "%ecx"=>1, "%edx"=>2, "%ebx"=>3,
-		"%esp"=>4, "%ebp"=>5, "%esi"=>6, "%edi"=>7	);
-
-sub rex {
- my $opcode=shift;
- my ($dst,$src,$rex)=@_;
-
-   $rex|=0x04 if($dst>=8);
-   $rex|=0x01 if($src>=8);
-   push @$opcode,($rex|0x40) if ($rex);
-}
-
-my $movq = sub {	# elderly gas can't handle inter-register movq
-  my $arg = shift;
-  my @opcode=(0x66);
-    if ($arg =~ /%xmm([0-9]+),\s*%r(\w+)/) {
-	my ($src,$dst)=($1,$2);
-	if ($dst !~ /[0-9]+/)	{ $dst = $regrm{"%e$dst"}; }
-	rex(\@opcode,$src,$dst,0x8);
-	push @opcode,0x0f,0x7e;
-	push @opcode,0xc0|(($src&7)<<3)|($dst&7);	# ModR/M
-	@opcode;
-    } elsif ($arg =~ /%r(\w+),\s*%xmm([0-9]+)/) {
-	my ($src,$dst)=($2,$1);
-	if ($dst !~ /[0-9]+/)	{ $dst = $regrm{"%e$dst"}; }
-	rex(\@opcode,$src,$dst,0x8);
-	push @opcode,0x0f,0x6e;
-	push @opcode,0xc0|(($src&7)<<3)|($dst&7);	# ModR/M
-	@opcode;
-    } else {
-	();
-    }
-};
-
-my $pextrd = sub {
-    if (shift =~ /\$([0-9]+),\s*%xmm([0-9]+),\s*(%\w+)/) {
-      my @opcode=(0x66);
-	my $imm=$1;
-	my $src=$2;
-	my $dst=$3;
-	if ($dst =~ /%r([0-9]+)d/)	{ $dst = $1; }
-	elsif ($dst =~ /%e/)		{ $dst = $regrm{$dst}; }
-	rex(\@opcode,$src,$dst);
-	push @opcode,0x0f,0x3a,0x16;
-	push @opcode,0xc0|(($src&7)<<3)|($dst&7);	# ModR/M
-	push @opcode,$imm;
-	@opcode;
-    } else {
-	();
-    }
-};
-
-my $pinsrd = sub {
-    if (shift =~ /\$([0-9]+),\s*(%\w+),\s*%xmm([0-9]+)/) {
-      my @opcode=(0x66);
-	my $imm=$1;
-	my $src=$2;
-	my $dst=$3;
-	if ($src =~ /%r([0-9]+)/)	{ $src = $1; }
-	elsif ($src =~ /%e/)		{ $src = $regrm{$src}; }
-	rex(\@opcode,$dst,$src);
-	push @opcode,0x0f,0x3a,0x22;
-	push @opcode,0xc0|(($dst&7)<<3)|($src&7);	# ModR/M
-	push @opcode,$imm;
-	@opcode;
-    } else {
-	();
-    }
-};
-
-my $pshufb = sub {
-    if (shift =~ /%xmm([0-9]+),\s*%xmm([0-9]+)/) {
-      my @opcode=(0x66);
-	rex(\@opcode,$2,$1);
-	push @opcode,0x0f,0x38,0x00;
-	push @opcode,0xc0|($1&7)|(($2&7)<<3);		# ModR/M
-	@opcode;
-    } else {
-	();
-    }
-};
-
-my $palignr = sub {
-    if (shift =~ /\$([0-9]+),\s*%xmm([0-9]+),\s*%xmm([0-9]+)/) {
-      my @opcode=(0x66);
-	rex(\@opcode,$3,$2);
-	push @opcode,0x0f,0x3a,0x0f;
-	push @opcode,0xc0|($2&7)|(($3&7)<<3);		# ModR/M
-	push @opcode,$1;
-	@opcode;
-    } else {
-	();
-    }
-};
-
-my $pclmulqdq = sub {
-    if (shift =~ /\$([x0-9a-f]+),\s*%xmm([0-9]+),\s*%xmm([0-9]+)/) {
-      my @opcode=(0x66);
-	rex(\@opcode,$3,$2);
-	push @opcode,0x0f,0x3a,0x44;
-	push @opcode,0xc0|($2&7)|(($3&7)<<3);		# ModR/M
-	my $c=$1;
-	push @opcode,$c=~/^0/?oct($c):$c;
-	@opcode;
-    } else {
-	();
-    }
-};
-
-my $rdrand = sub {
-    if (shift =~ /%[er](\w+)/) {
-      my @opcode=();
-      my $dst=$1;
-	if ($dst !~ /[0-9]+/) { $dst = $regrm{"%e$dst"}; }
-	rex(\@opcode,0,$dst,8);
-	push @opcode,0x0f,0xc7,0xf0|($dst&7);
-	@opcode;
-    } else {
-	();
-    }
-};
-
-my $rdseed = sub {
-    if (shift =~ /%[er](\w+)/) {
-      my @opcode=();
-      my $dst=$1;
-	if ($dst !~ /[0-9]+/) { $dst = $regrm{"%e$dst"}; }
-	rex(\@opcode,0,$dst,8);
-	push @opcode,0x0f,0xc7,0xf8|($dst&7);
-	@opcode;
-    } else {
-	();
-    }
-};
-
-# Not all AVX-capable assemblers recognize AMD XOP extension. Since we
-# are using only two instructions hand-code them in order to be excused
-# from chasing assembler versions...
-
-sub rxb {
- my $opcode=shift;
- my ($dst,$src1,$src2,$rxb)=@_;
-
-   $rxb|=0x7<<5;
-   $rxb&=~(0x04<<5) if($dst>=8);
-   $rxb&=~(0x01<<5) if($src1>=8);
-   $rxb&=~(0x02<<5) if($src2>=8);
-   push @$opcode,$rxb;
-}
-
-my $vprotd = sub {
-    if (shift =~ /\$([x0-9a-f]+),\s*%xmm([0-9]+),\s*%xmm([0-9]+)/) {
-      my @opcode=(0x8f);
-	rxb(\@opcode,$3,$2,-1,0x08);
-	push @opcode,0x78,0xc2;
-	push @opcode,0xc0|($2&7)|(($3&7)<<3);		# ModR/M
-	my $c=$1;
-	push @opcode,$c=~/^0/?oct($c):$c;
-	@opcode;
-    } else {
-	();
-    }
-};
-
-my $vprotq = sub {
-    if (shift =~ /\$([x0-9a-f]+),\s*%xmm([0-9]+),\s*%xmm([0-9]+)/) {
-      my @opcode=(0x8f);
-	rxb(\@opcode,$3,$2,-1,0x08);
-	push @opcode,0x78,0xc3;
-	push @opcode,0xc0|($2&7)|(($3&7)<<3);		# ModR/M
-	my $c=$1;
-	push @opcode,$c=~/^0/?oct($c):$c;
-	@opcode;
-    } else {
-	();
-    }
-};
-
-# Intel Control-flow Enforcement Technology extension. All functions and
-# indirect branch targets will have to start with this instruction...
-
-my $endbranch = sub {
-    (0xf3,0x0f,0x1e,0xfa);
-};
-
 ########################################################################
 
+my $comment = "//";
+$comment = ";" if ($masm || $nasm);
 {
-  my $comment = "//";
-  $comment = ";" if ($masm || $nasm);
   print <<___;
 $comment This file is generated from a similarly-named Perl script in the BoringSSL
 $comment source tree. Do not edit by hand.
@@ -1501,7 +1321,7 @@ default	rel
 \%define _CET_ENDBR
 
 \%ifdef BORINGSSL_PREFIX
-\%include "boringssl_prefix_symbols_nasm.inc"
+\%include "boringssl_prefix_symbols_internal_x86_64_win_asm.inc"
 \%endif
 ___
 } elsif ($masm) {
@@ -1532,33 +1352,70 @@ sub process_line {
     my $line = shift;
     $line =~ s|\R$||;           # Better chomp
 
+    my @comments = ();
+
     if ($nasm) {
 	$line =~ s|^#ifdef |%ifdef |;
 	$line =~ s|^#ifndef |%ifndef |;
 	$line =~ s|^#endif|%endif|;
-	$line =~ s|[#!].*$||;	# get rid of asm-style comments...
+	$line =~ s|[#!](.*)$||  # get rid of asm-style comments...
+	    and push @comments, $1;
     } else {
 	# Get rid of asm-style comments but not preprocessor directives. The
 	# former are identified by having a letter after the '#' and starting in
 	# the first column.
 	$line =~ s|!.*$||;
-	$line =~ s|(?<=.)#.*$||;
-	$line =~ s|^#([^a-z].*)?$||;
+	$line =~ s|(?<=.)#(.*)$||
+	    and push @comments, $1;
+	$line =~ s|^#([^a-z].*)?$||
+	    and push @comments, $1;
     }
 
-    $line =~ s|/\*.*\*/||;	# ... and C-style comments...
+    $line =~ s|/\*(.*)\*/||	# ... and C-style comments...
+	and push @comments, $1;
     $line =~ s|^\s+||;		# ... and skip white spaces in beginning
     $line =~ s|\s+$||;		# ... and at the end
 
-    if (my $label=label->re(\$line))	{ print $label->out(); }
+    my $comments = join ' ', map { s|^\s+||; s|\s+$||; $_; } @comments;
+    my $commentprefix = @comments ? "$comment " : '';
+    my $commentspace = @comments ? '  ' : '';
+
+    my $pre_line = '';
+
+    if (my $label=label->re(\$line)) {
+	if ($gas) {
+	    my $name = ($globals{$label->{value}} or $label->{value});
+	    if ($name =~ /^\Q$decor\E/) {
+		if (!$segment_had_labels{$current_segment}) {
+		    # With `.subsections_via_symbols`, an asm-local label
+		    # cannot be the first label of a section.
+		    die "Section $current_segment starts with an asm-local .Label - please add at least a file-local label at the start";
+		}
+	    } else {
+		if ($segment_had_labels{$current_segment}++ && $flavour eq "macosx") {
+		    # The macOS linker may split object files at symbol
+		    # definitions to eliminate dead code. It however is unable
+		    # to track jumps across these bounds, and also, for some
+		    # data objects it may cause layout to change. Marking every
+		    # symbol an alternate entry point is safe and should turn
+		    # the optimization into a NOP for these assembly files and
+		    # may add necessary relocations. It however is invalid to
+		    # mark the _first_ symbol of a section so, as it always is
+		    # considered an entry point.
+		    printf ".alt_entry %s\n", $name;
+		}
+	    }
+	}
+	$pre_line .= $label->out();
+    }
 
     if (my $directive=directive->re(\$line)) {
-	printf "%s",$directive->out();
+	$pre_line .= $directive->out();
     } elsif (my $opcode=opcode->re(\$line)) {
 	my $asm = eval("\$".$opcode->mnemonic());
 
 	if ((ref($asm) eq 'CODE') && scalar(my @bytes=&$asm($line))) {
-	    print $gas?".byte\t":"DB\t",join(',',@bytes),"\n";
+	    print $pre_line, $gas?".byte\t":"DB\t",join(',',@bytes),$commentspace,$commentprefix,$comment,"\n";
 	    next;
 	}
 
@@ -1586,7 +1443,7 @@ sub process_line {
 	    if ($gas) {
 		$insn = $opcode->out($#args>=1?$args[$#args]->size():$sz);
 		@args = map($_->out($sz),@args);
-		printf "\t%s\t%s",$insn,join(",",@args);
+		$pre_line .= sprintf "\t%s\t%s",$insn,join(",",@args);
 	    } else {
 		$insn = $opcode->out();
 		foreach (@args) {
@@ -1599,14 +1456,18 @@ sub process_line {
 		}
 		@args = reverse(@args);
 		undef $sz if ($nasm && $opcode->mnemonic() eq "lea");
-		printf "\t%s\t%s",$insn,join(",",map($_->out($sz),@args));
+		$pre_line .= sprintf "\t%s\t%s",$insn,join(",",map($_->out($sz),@args));
 	    }
 	} else {
-	    printf "\t%s",$opcode->out();
+	    $pre_line .= sprintf "\t%s",$opcode->out();
 	}
     }
 
-    print $line,"\n";
+    $line = $pre_line . $line;
+    $commentspace = ''
+	if $line !~ /[^\n]$/;
+
+    print $line, $commentspace, $commentprefix, $comments, "\n";
 }
 
 while(defined(my $line=<>)) {

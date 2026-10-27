@@ -23,7 +23,7 @@
 #include "quiche/quic/tools/quic_backend_response.h"
 #include "quiche/quic/tools/quic_simple_server_backend.h"
 #include "quiche/quic/tools/quic_simple_server_stream.h"
-#include "quiche/spdy/core/http2_header_block.h"
+#include "quiche/common/http/http_header_block.h"
 
 namespace quic {
 
@@ -53,14 +53,16 @@ class QuicSimpleServerSession : public QuicServerSessionBase {
  protected:
   // QuicSession methods:
   QuicSpdyStream* CreateIncomingStream(QuicStreamId id) override;
-  QuicSpdyStream* CreateIncomingStream(PendingStream* pending) override;
   QuicSpdyStream* CreateOutgoingBidirectionalStream() override;
-  QuicSimpleServerStream* CreateOutgoingUnidirectionalStream() override;
 
   // QuicServerSessionBaseMethod:
   std::unique_ptr<QuicCryptoServerStreamBase> CreateQuicCryptoServerStream(
       const QuicCryptoServerConfig* crypto_config,
       QuicCompressedCertsCache* compressed_certs_cache) override;
+
+  // Overridden to handle conversion from bidi pending stream.
+  QuicStream* ProcessBidirectionalPendingStream(
+      PendingStream& pending) override;
 
   QuicSimpleServerBackend* server_backend() {
     return quic_simple_server_backend_;

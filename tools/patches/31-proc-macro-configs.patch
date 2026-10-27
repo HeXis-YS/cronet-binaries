@@ -1,0 +1,16 @@
+--- a/src/build/config/BUILDCONFIG.gn
++++ b/src/build/config/BUILDCONFIG.gn
+@@ -547,11 +547,11 @@
+     default_shared_library_configs + [ "//build/rust:proc_macro_extern" ] +
+     # Rust proc macros don't support (Thin)LTO, so always remove it.
+     [
+-      "//build/config/compiler:thinlto_optimize_max",
++      "//build/config/compiler:thinlto_optimize_default",
+       "//build/config/compiler:thinlto_optimize_max",
+     ] -
+     [
+-      "//build/config/compiler:thinlto_optimize_max",
++      "//build/config/compiler:thinlto_optimize_default",
+       "//build/config/compiler:thinlto_optimize_max",
+     ]
+ 

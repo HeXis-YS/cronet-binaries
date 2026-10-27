@@ -4,7 +4,11 @@
 
 #include "net/quic/web_transport_client.h"
 
+#include <ostream>
+#include <string_view>
+
 #include "base/memory/raw_ptr.h"
+#include "base/notreached.h"
 #include "net/quic/dedicated_web_transport_http3_client.h"
 
 namespace net {
@@ -21,11 +25,24 @@ class FailedWebTransportClient : public WebTransportClient {
                /*safe_to_report_details=*/true),
         visitor_(visitor) {}
   void Connect() override { visitor_->OnConnectionFailed(error_); }
-  void Close(const absl::optional<WebTransportCloseInfo>& close_info) override {
+  void Close(const std::optional<WebTransportCloseInfo>& close_info) override {
+    NOTREACHED();
+  }
+  void CloseIfNonceMatches(base::UnguessableToken nonce) override {
     NOTREACHED();
   }
 
   quic::WebTransportSession* session() override { return nullptr; }
+  std::optional<quic::QuicByteCount> GetMaxDatagramSize() const override {
+    return std::nullopt;
+  }
+
+  void RegisterSendStream(uint32_t stream_id) override { NOTREACHED(); }
+  void UnregisterSendStream(uint32_t stream_id) override { NOTREACHED(); }
+  std::optional<WebTransportSendStreamStats> GetSendStreamStats(
+      uint32_t stream_id) const override {
+    return std::nullopt;
+  }
 
  private:
   WebTransportError error_;
@@ -36,6 +53,12 @@ class FailedWebTransportClient : public WebTransportClient {
 std::ostream& operator<<(std::ostream& os, WebTransportState state) {
   os << WebTransportStateString(state);
   return os;
+}
+
+std::ostream& operator<<(std::ostream& os,
+                         const WebTransportSendStreamStats& stats) {
+  return os << "{bytes_sent: " << stats.bytes_sent
+            << ", bytes_acknowledged: " << stats.bytes_acknowledged << "}";
 }
 
 const char* WebTransportStateString(WebTransportState state) {
@@ -57,7 +80,7 @@ const char* WebTransportStateString(WebTransportState state) {
 
 WebTransportCloseInfo::WebTransportCloseInfo() = default;
 WebTransportCloseInfo::WebTransportCloseInfo(uint32_t code,
-                                             base::StringPiece reason)
+                                             std::string_view reason)
     : code(code), reason(reason) {}
 WebTransportCloseInfo::~WebTransportCloseInfo() = default;
 bool WebTransportCloseInfo::operator==(
@@ -79,15 +102,17 @@ std::unique_ptr<WebTransportClient> CreateWebTransportClient(
     const url::Origin& origin,
     WebTransportClientVisitor* visitor,
     const NetworkAnonymizationKey& anonymization_key,
+    handles::NetworkHandle target_network,
     URLRequestContext* context,
     const WebTransportParameters& parameters) {
-  if (url.scheme() == url::kHttpsScheme) {
+  if (url.GetScheme() == url::kHttpsScheme) {
     if (!parameters.enable_web_transport_http3) {
       return std::make_unique<FailedWebTransportClient>(
           ERR_DISALLOWED_URL_SCHEME, visitor);
     }
     return std::make_unique<DedicatedWebTransportHttp3Client>(
-        url, origin, visitor, anonymization_key, context, parameters);
+        url, origin, visitor, anonymization_key, target_network, context,
+        parameters);
   }
 
   return std::make_unique<FailedWebTransportClient>(ERR_UNKNOWN_URL_SCHEME,

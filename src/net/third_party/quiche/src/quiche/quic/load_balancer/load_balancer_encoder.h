@@ -7,9 +7,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 
 #include "absl/numeric/int128.h"
-#include "absl/types/optional.h"
 #include "quiche/quic/core/connection_id_generator.h"
 #include "quiche/quic/core/crypto/quic_random.h"
 #include "quiche/quic/core/quic_connection_id.h"
@@ -27,13 +27,15 @@ class LoadBalancerEncoderPeer;
 inline constexpr uint8_t kLoadBalancerUnroutableLen = 8;
 // When the encoder is self-encoding the connection ID length, these are the
 // bits of the first byte that do so.
-constexpr uint8_t kLoadBalancerLengthMask = (1 << kConnectionIdLengthBits) - 1;
+inline constexpr uint8_t kLoadBalancerLengthMask =
+    (1 << kConnectionIdLengthBits) - 1;
 
 // The bits of the connection ID first byte that encode the config ID.
-constexpr uint8_t kLoadBalancerConfigIdMask = ~kLoadBalancerLengthMask;
+inline constexpr uint8_t kLoadBalancerConfigIdMask = ~kLoadBalancerLengthMask;
 // The config ID that means the connection ID does not contain routing
 // information.
-constexpr uint8_t kLoadBalancerUnroutableConfigId = kNumLoadBalancerConfigs;
+inline constexpr uint8_t kLoadBalancerUnroutableConfigId =
+    kNumLoadBalancerConfigs;
 // The bits of the connection ID first byte that correspond to a connection ID
 // that does not contain routing information.
 constexpr uint8_t kLoadBalancerUnroutablePrefix =
@@ -89,7 +91,7 @@ class QUIC_EXPORT_PRIVATE LoadBalancerEncoder
   // random. |unroutable_connection_id_length| specifies the length of
   // connection IDs to be generated when there is no active config. It must not
   // be 0 and must not be larger than the RFC9000 maximum of 20.
-  static absl::optional<LoadBalancerEncoder> Create(
+  static std::optional<LoadBalancerEncoder> Create(
       QuicRandom& random, LoadBalancerEncoderVisitorInterface* visitor,
       bool len_self_encoded,
       uint8_t unroutable_connection_id_len = kLoadBalancerUnroutableLen);
@@ -107,10 +109,6 @@ class QUIC_EXPORT_PRIVATE LoadBalancerEncoder
   // on.
   virtual void DeleteConfig();
 
-  // Returns the number of additional connection IDs that can be generated with
-  // the current config, or 0 if there is no current config.
-  absl::uint128 num_nonces_left() const { return num_nonces_left_; }
-
   // Functions below are declared virtual to enable mocking.
   // Returns true if there is an active configuration.
   virtual bool IsEncoding() const { return config_.has_value(); }
@@ -126,9 +124,9 @@ class QUIC_EXPORT_PRIVATE LoadBalancerEncoder
   QuicConnectionId GenerateConnectionId();
 
   // Functions from ConnectionIdGeneratorInterface
-  absl::optional<QuicConnectionId> GenerateNextConnectionId(
+  std::optional<QuicConnectionId> GenerateNextConnectionId(
       const QuicConnectionId& original) override;
-  absl::optional<QuicConnectionId> MaybeReplaceConnectionId(
+  std::optional<QuicConnectionId> MaybeReplaceConnectionId(
       const QuicConnectionId& original,
       const ParsedQuicVersion& version) override;
   uint8_t ConnectionIdLength(uint8_t first_byte) const override;
@@ -154,9 +152,9 @@ class QUIC_EXPORT_PRIVATE LoadBalancerEncoder
   const bool len_self_encoded_;
   LoadBalancerEncoderVisitorInterface* const visitor_;
 
-  absl::optional<LoadBalancerConfig> config_;
-  absl::uint128 seed_, num_nonces_left_ = 0;
-  absl::optional<LoadBalancerServerId> server_id_;
+  std::optional<LoadBalancerConfig> config_;
+  absl::uint128 seed_, next_nonce_, nonce_mask_;
+  std::optional<LoadBalancerServerId> server_id_;
   uint8_t connection_id_lengths_[kNumLoadBalancerConfigs + 1];
 };
 

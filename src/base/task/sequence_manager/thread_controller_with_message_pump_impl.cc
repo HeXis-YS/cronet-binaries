@@ -6,24 +6,27 @@
 
 #include <algorithm>
 #include <atomic>
+#include <memory>
+#include <optional>
 #include <utility>
 
 #include "base/auto_reset.h"
 #include "base/feature_list.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
-#include "base/memory/raw_ref.h"
+#include "base/memory/stack_allocated.h"
 #include "base/message_loop/message_pump.h"
 #include "base/metrics/histogram.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/strings/strcat.h"
+#include "base/synchronization/lock.h"
+#include "base/synchronization/lock_metrics_recorder.h"
 #include "base/task/sequence_manager/tasks.h"
 #include "base/task/task_features.h"
 #include "base/threading/hang_watcher.h"
 #include "base/time/tick_clock.h"
 #include "base/time/time.h"
-#include "base/trace_event/base_tracing.h"
+#include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 #if BUILDFLAG(IS_IOS)
 #include "base/message_loop/message_pump_apple.h"
@@ -31,9 +34,7 @@
 #include "base/message_loop/message_pump_android.h"
 #endif
 
-namespace base {
-namespace sequence_manager {
-namespace internal {
+namespace base::sequence_manager::internal {
 namespace {
 
 // Returns |next_run_time| capped at 1 day from |lazy_now|. This is used to
@@ -46,29 +47,17 @@ TimeTicks CapAtOneDay(TimeTicks next_run_time, LazyNow* lazy_now) {
   return std::min(next_run_time, lazy_now->Now() + Days(1));
 }
 
-// Feature to run tasks by batches before pumping out messages.
-BASE_FEATURE(kRunTasksByBatches,
-             "RunTasksByBatches",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-#if BUILDFLAG(IS_WIN)
-// If enabled, deactivate the high resolution timer immediately in DoWork(),
-// instead of waiting for next DoIdleWork.
-BASE_FEATURE(kUseLessHighResTimers,
-             "UseLessHighResTimers",
+BASE_FEATURE(kAvoidScheduleWorkDuringNativeEventProcessing,
              base::FEATURE_ENABLED_BY_DEFAULT);
-std::atomic_bool g_use_less_high_res_timers = true;
 
-// If enabled, high resolution timer will be used all the time on Windows. This
-// is for test only.
-BASE_FEATURE(kAlwaysUseHighResTimers,
-             "AlwaysUseHighResTimers",
+BASE_FEATURE(kCurrentTaskRunnerInheritsThreadType,
              base::FEATURE_DISABLED_BY_DEFAULT);
-#endif
 
-std::atomic_bool g_run_tasks_by_batches = false;
+std::atomic_bool g_run_tasks_by_batches = true;
+std::atomic_bool g_avoid_schedule_calls_during_native_event_processing = false;
+std::atomic_bool g_current_task_runner_inherits_thread_type = false;
 
-base::TimeDelta GetLeewayForWakeUp(absl::optional<WakeUp> wake_up) {
+base::TimeDelta GetLeewayForWakeUp(std::optional<WakeUp> wake_up) {
   if (!wake_up || wake_up->delay_policy == subtle::DelayPolicy::kPrecise) {
     return TimeDelta();
   }
@@ -79,29 +68,27 @@ base::TimeDelta GetLeewayForWakeUp(absl::optional<WakeUp> wake_up) {
 
 // static
 void ThreadControllerWithMessagePumpImpl::InitializeFeatures() {
-  g_run_tasks_by_batches.store(FeatureList::IsEnabled(kRunTasksByBatches),
+  g_run_tasks_by_batches.store(FeatureList::IsEnabled(base::kRunTasksByBatches),
                                std::memory_order_relaxed);
-#if BUILDFLAG(IS_WIN)
-  g_use_less_high_res_timers.store(
-      FeatureList::IsEnabled(kUseLessHighResTimers), std::memory_order_relaxed);
-  if (FeatureList::IsEnabled(kAlwaysUseHighResTimers)) {
-    Time::ActivateHighResolutionTimer(true);
-  }
-#endif
+  g_avoid_schedule_calls_during_native_event_processing.store(
+      FeatureList::IsEnabled(kAvoidScheduleWorkDuringNativeEventProcessing),
+      std::memory_order_relaxed);
+  g_current_task_runner_inherits_thread_type.store(
+      FeatureList::IsEnabled(kCurrentTaskRunnerInheritsThreadType),
+      std::memory_order_relaxed);
 }
 
 // static
-void ThreadControllerWithMessagePumpImpl::ResetFeatures() {
-  g_run_tasks_by_batches.store(
-      kRunTasksByBatches.default_state == FEATURE_ENABLED_BY_DEFAULT,
-      std::memory_order_relaxed);
+void ThreadControllerWithMessagePumpImpl::ResetFeaturesForTesting() {
+  g_run_tasks_by_batches.store(true, std::memory_order_relaxed);
 }
 
 ThreadControllerWithMessagePumpImpl::ThreadControllerWithMessagePumpImpl(
     const SequenceManager::Settings& settings)
     : ThreadController(settings.clock),
       work_deduplicator_(associated_thread_),
-      can_run_tasks_by_batches_(settings.can_run_tasks_by_batches) {}
+      can_run_tasks_by_batches_(settings.can_run_tasks_by_batches),
+      is_main_thread_(settings.is_main_thread) {}
 
 ThreadControllerWithMessagePumpImpl::ThreadControllerWithMessagePumpImpl(
     std::unique_ptr<MessagePump> message_pump,
@@ -154,8 +141,9 @@ void ThreadControllerWithMessagePumpImpl::BindToCurrentThread(
       &sequence_local_storage_map_);
   {
     base::internal::CheckedAutoLock task_runner_lock(task_runner_lock_);
-    if (task_runner_)
+    if (task_runner_) {
       InitializeSingleThreadTaskRunnerCurrentDefaultHandle();
+    }
   }
   if (work_deduplicator_.BindToCurrentThread() ==
       ShouldScheduleWork::kScheduleImmediate) {
@@ -187,10 +175,30 @@ void ThreadControllerWithMessagePumpImpl::ScheduleWork() {
     pump_->ScheduleWork();
   }
 }
+void ThreadControllerWithMessagePumpImpl::BeginNativeWorkBeforeDoWork() {
+  do_work_needed_before_wait_ = true;
+
+  if (!g_avoid_schedule_calls_during_native_event_processing.load(
+          std::memory_order_relaxed)) {
+    return;
+  }
+
+  // Native nested loops don't guarantee that `DoWork()` will be called after
+  // executing native work. This is the invariant that is needed to avoid
+  // calls to `ScheduleWork()`. Since these calls can't be skipped there is
+  // nothing left to do in this function.
+  if (task_execution_allowed_in_native_nested_loop_) {
+    return;
+  }
+
+  // Reuse the deduplicator facility to indicate that there is no need for
+  // ScheduleWork() until the next time we look for work.
+  work_deduplicator_.OnWorkStarted();
+}
 
 void ThreadControllerWithMessagePumpImpl::SetNextDelayedDoWork(
     LazyNow* lazy_now,
-    absl::optional<WakeUp> wake_up) {
+    std::optional<WakeUp> wake_up) {
   DCHECK(!wake_up || !wake_up->is_immediate());
   // It's very rare for PostDelayedTask to be called outside of a DoWork in
   // production, so most of the time this does nothing.
@@ -200,7 +208,7 @@ void ThreadControllerWithMessagePumpImpl::SetNextDelayedDoWork(
   }
   TimeTicks run_time =
       wake_up.has_value()
-          ? pump_->AjdustDelayedRunTime(wake_up->earliest_time(), wake_up->time,
+          ? pump_->AdjustDelayedRunTime(wake_up->earliest_time(), wake_up->time,
                                         wake_up->latest_time())
           : TimeTicks::Max();
   DCHECK_LT(lazy_now->Now(), run_time);
@@ -220,9 +228,11 @@ bool ThreadControllerWithMessagePumpImpl::RunsTasksInCurrentSequence() {
 }
 
 void ThreadControllerWithMessagePumpImpl::SetDefaultTaskRunner(
-    scoped_refptr<SingleThreadTaskRunner> task_runner) {
+    scoped_refptr<SingleThreadTaskRunner> task_runner,
+    ThreadType thread_type) {
   base::internal::CheckedAutoLock lock(task_runner_lock_);
   task_runner_ = task_runner;
+  main_thread_only().thread_type_ = thread_type;
   if (associated_thread_->IsBound()) {
     DCHECK(associated_thread_->IsBoundToCurrentThread());
     // Thread task runner handle will be created in BindToCurrentThread().
@@ -234,10 +244,13 @@ void ThreadControllerWithMessagePumpImpl::
     InitializeSingleThreadTaskRunnerCurrentDefaultHandle() {
   // Only one SingleThreadTaskRunner::CurrentDefaultHandle can exist at any
   // time, so reset the old one.
-  main_thread_only().thread_task_runner_handle.reset();
-  main_thread_only().thread_task_runner_handle =
-      std::make_unique<SingleThreadTaskRunner::CurrentDefaultHandle>(
-          task_runner_);
+  main_thread_only().thread_task_runner_handle.emplace(task_runner_);
+
+  if (is_main_thread_) {
+    main_thread_only().main_thread_default_task_runner_handle.emplace(
+        task_runner_);
+  }
+
   // When the task runner is known, bind the power manager. Power notifications
   // are received through that sequence.
   power_monitor_.BindToCurrentThread();
@@ -247,10 +260,6 @@ scoped_refptr<SingleThreadTaskRunner>
 ThreadControllerWithMessagePumpImpl::GetDefaultTaskRunner() {
   base::internal::CheckedAutoLock lock(task_runner_lock_);
   return task_runner_;
-}
-
-void ThreadControllerWithMessagePumpImpl::RestoreDefaultTaskRunner() {
-  // There is no default task runner (as opposed to ThreadControllerImpl).
 }
 
 void ThreadControllerWithMessagePumpImpl::AddNestingObserver(
@@ -278,6 +287,7 @@ void ThreadControllerWithMessagePumpImpl::OnBeginWorkItemImpl(
   hang_watch_scope_.emplace();
   work_id_provider_->IncrementWorkId();
   run_level_tracker_.OnWorkStarted(lazy_now);
+  main_thread_only().task_source->OnBeginWork();
 }
 
 void ThreadControllerWithMessagePumpImpl::OnEndWorkItem(int run_level_depth) {
@@ -296,6 +306,10 @@ void ThreadControllerWithMessagePumpImpl::OnEndWorkItemImpl(
 }
 
 void ThreadControllerWithMessagePumpImpl::BeforeWait() {
+  // DoWork is guaranteed to be called after native work batches and before
+  // wait.
+  CHECK(!do_work_needed_before_wait_);
+
   // In most cases, DoIdleWork() will already have cleared the
   // `hang_watch_scope_` but in some cases where the native side of the
   // MessagePump impl is instrumented, it's possible to get a BeforeWait()
@@ -313,8 +327,7 @@ ThreadControllerWithMessagePumpImpl::DoWork() {
 #if BUILDFLAG(IS_WIN)
   // We've been already in a wakeup here. Deactivate the high res timer of OS
   // immediately instead of waiting for next DoIdleWork().
-  if (g_use_less_high_res_timers.load(std::memory_order_relaxed) &&
-      main_thread_only().in_high_res_mode) {
+  if (main_thread_only().in_high_res_mode) {
     main_thread_only().in_high_res_mode = false;
     Time::ActivateHighResolutionTimer(false);
   }
@@ -323,21 +336,10 @@ ThreadControllerWithMessagePumpImpl::DoWork() {
 
   work_deduplicator_.OnWorkStarted();
   LazyNow continuation_lazy_now(time_source_);
-  absl::optional<WakeUp> next_wake_up = DoWorkImpl(&continuation_lazy_now);
+  std::optional<WakeUp> next_wake_up = DoWorkImpl(&continuation_lazy_now);
 
-  // If we are yielding after DoWorkImpl (a work batch) set the flag boolean.
-  // This will inform the MessagePump to schedule a new continuation based on
-  // the information below, but even if its immediate let the native sequence
-  // have a chance to run.
-  // When we have |g_run_tasks_by_batches| active we want to always set the flag
-  // to true to have a similar behavior on Android as on the desktop platforms
-  // for this experiment.
-  if (RunsTasksByBatches() ||
-      (!main_thread_only().yield_to_native_after_batch.is_null() &&
-       continuation_lazy_now.Now() <
-           main_thread_only().yield_to_native_after_batch)) {
-    next_work_info.yield_to_native = true;
-  }
+  do_work_needed_before_wait_ = false;
+
   // Schedule a continuation.
   WorkDeduplicator::NextTask next_task =
       (next_wake_up && next_wake_up->is_immediate())
@@ -358,7 +360,7 @@ ThreadControllerWithMessagePumpImpl::DoWork() {
 
   // The MessagePump will schedule the wake up on our behalf, so we need to
   // update |next_work_info.delayed_run_time|.
-  TimeTicks next_delayed_do_work = pump_->AjdustDelayedRunTime(
+  TimeTicks next_delayed_do_work = pump_->AdjustDelayedRunTime(
       next_wake_up->earliest_time(), next_wake_up->time,
       next_wake_up->latest_time());
 
@@ -379,7 +381,7 @@ ThreadControllerWithMessagePumpImpl::DoWork() {
   return next_work_info;
 }
 
-absl::optional<WakeUp> ThreadControllerWithMessagePumpImpl::DoWorkImpl(
+std::optional<WakeUp> ThreadControllerWithMessagePumpImpl::DoWorkImpl(
     LazyNow* continuation_lazy_now) {
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("sequence_manager"),
                "ThreadControllerImpl::DoWork");
@@ -388,8 +390,9 @@ absl::optional<WakeUp> ThreadControllerWithMessagePumpImpl::DoWorkImpl(
     // Broadcast in a trace event that application tasks were disallowed. This
     // helps spot nested loops that intentionally starve application tasks.
     TRACE_EVENT0("base", "ThreadController: application tasks disallowed");
-    if (main_thread_only().quit_runloop_after == TimeTicks::Max())
-      return absl::nullopt;
+    if (main_thread_only().quit_runloop_after == TimeTicks::Max()) {
+      return std::nullopt;
+    }
     return WakeUp{main_thread_only().quit_runloop_after};
   }
 
@@ -400,11 +403,11 @@ absl::optional<WakeUp> ThreadControllerWithMessagePumpImpl::DoWorkImpl(
   const base::TimeDelta batch_duration =
       RunsTasksByBatches() ? base::Milliseconds(8) : base::Milliseconds(0);
 
-  const absl::optional<base::TimeTicks> start_time =
+  const std::optional<base::TimeTicks> start_time =
       batch_duration.is_zero()
-          ? absl::nullopt
-          : absl::optional<base::TimeTicks>(time_source_->NowTicks());
-  absl::optional<base::TimeTicks> recent_time = start_time;
+          ? std::nullopt
+          : std::optional<base::TimeTicks>(time_source_->NowTicks());
+  std::optional<base::TimeTicks> recent_time = start_time;
 
   // Loops for |batch_duration|, or |work_batch_size| times if |batch_duration|
   // is zero.
@@ -427,7 +430,7 @@ absl::optional<WakeUp> ThreadControllerWithMessagePumpImpl::DoWorkImpl(
         power_monitor_.IsProcessInPowerSuspendState()
             ? SequencedTaskSource::SelectTaskOption::kSkipDelayedTask
             : SequencedTaskSource::SelectTaskOption::kDefault;
-    absl::optional<SequencedTaskSource::SelectedTask> selected_task =
+    std::optional<SequencedTaskSource::SelectedTask> selected_task =
         main_thread_only().task_source->SelectNextTask(lazy_now_select_task,
                                                        select_task_option);
     LazyNow lazy_now_task_selected(time_source_);
@@ -453,7 +456,19 @@ absl::optional<WakeUp> ThreadControllerWithMessagePumpImpl::DoWorkImpl(
     {
       // Always track the start of the task, as this is low-overhead.
       TaskAnnotator::LongTaskTracker long_task_tracker(
-          time_source_, selected_task->task, &task_annotator_);
+          time_source_, selected_task->task, &task_annotator_,
+          lazy_now_task_selected.Now());
+
+      base::internal::CurrentTaskImportanceOverride thread_type_override(
+          selected_task->thread_type);
+      std::optional<SingleThreadTaskRunner::CurrentDefaultHandle>
+          thread_task_runner_handle;
+      if (g_current_task_runner_inherits_thread_type &&
+          selected_task->thread_type < main_thread_only().thread_type_) {
+        thread_task_runner_handle.emplace(
+            selected_task->task.task_runner,
+            SingleThreadTaskRunner::CurrentDefaultHandle::MayAlreadyExist{});
+      }
 
       // Note: all arguments after task are just passed to a TRACE_EVENT for
       // logging so lambda captures are safe as lambda is executed inline.
@@ -490,12 +505,14 @@ absl::optional<WakeUp> ThreadControllerWithMessagePumpImpl::DoWorkImpl(
 
     // When Quit() is called we must stop running the batch because the
     // caller expects per-task granularity.
-    if (main_thread_only().quit_pending)
+    if (main_thread_only().quit_pending) {
       break;
+    }
   }
 
-  if (main_thread_only().quit_pending)
-    return absl::nullopt;
+  if (main_thread_only().quit_pending) {
+    return std::nullopt;
+  }
 
   work_deduplicator_.WillCheckForMoreWork();
 
@@ -505,8 +522,6 @@ absl::optional<WakeUp> ThreadControllerWithMessagePumpImpl::DoWorkImpl(
       power_monitor_.IsProcessInPowerSuspendState()
           ? SequencedTaskSource::SelectTaskOption::kSkipDelayedTask
           : SequencedTaskSource::SelectTaskOption::kDefault;
-  main_thread_only().task_source->RemoveAllCanceledDelayedTasksFromFront(
-      continuation_lazy_now);
   return main_thread_only().task_source->GetPendingWakeUp(continuation_lazy_now,
                                                           select_task_option);
 }
@@ -516,21 +531,24 @@ bool ThreadControllerWithMessagePumpImpl::RunsTasksByBatches() const {
          g_run_tasks_by_batches.load(std::memory_order_relaxed);
 }
 
-bool ThreadControllerWithMessagePumpImpl::DoIdleWork() {
+void ThreadControllerWithMessagePumpImpl::DoIdleWork() {
   struct OnIdle {
+    STACK_ALLOCATED();
+
+   public:
     OnIdle(const TickClock* time_source, RunLevelTracker& run_level_tracker_ref)
         : lazy_now(time_source), run_level_tracker(run_level_tracker_ref) {}
 
     // Very last step before going idle, must be fast as this is hidden from the
     // DoIdleWork trace event below.
-    ~OnIdle() { run_level_tracker->OnIdle(lazy_now); }
+    ~OnIdle() { run_level_tracker.OnIdle(lazy_now); }
 
     LazyNow lazy_now;
 
    private:
-    const raw_ref<RunLevelTracker> run_level_tracker;
+    RunLevelTracker& run_level_tracker;
   };
-  absl::optional<OnIdle> on_idle;
+  std::optional<OnIdle> on_idle;
 
   // Must be after `on_idle` as this trace event's scope must end before the END
   // of the "ThreadController active" trace event emitted from
@@ -547,7 +565,7 @@ bool ThreadControllerWithMessagePumpImpl::DoIdleWork() {
     // going to sleep after resume.
 
     const bool need_high_res_mode =
-        main_thread_only().task_source->HasPendingHighResolutionTasks();
+        main_thread_only().task_source->NextWakeUpNeedsHighRes();
     if (main_thread_only().in_high_res_mode != need_high_res_mode) {
       // On Windows we activate the high resolution timer so that the wait
       // _if_ triggered by the timer happens with good resolution. If we don't
@@ -559,14 +577,20 @@ bool ThreadControllerWithMessagePumpImpl::DoIdleWork() {
   }
 #endif  // BUILDFLAG(IS_WIN)
 
-  if (main_thread_only().task_source->OnSystemIdle()) {
-    // The OnSystemIdle() callback resulted in more immediate work, so schedule
-    // a DoWork callback. For some message pumps returning true from here is
-    // sufficient to do that but not on mac.
-    pump_->ScheduleWork();
-    return false;
+  auto* recorder = base::LockMetricsRecorder::GetForCurrentThread();
+  if (recorder) {
+    recorder->ReportLockAcquisitionTimes();
   }
 
+  if (main_thread_only().task_source->OnIdle()) {
+    work_id_provider_->IncrementWorkId();
+    // The OnIdle() callback resulted in more immediate work, so schedule a
+    // DoWork callback. For some message pumps returning true from here is
+    // sufficient to do that but not on mac.
+    pump_->ScheduleWork();
+    return;
+  }
+  work_id_provider_->IncrementWorkId();
   // This is mostly redundant with the identical call in BeforeWait (upcoming)
   // but some uninstrumented MessagePump impls don't call BeforeWait so it must
   // also be done here.
@@ -579,14 +603,13 @@ bool ThreadControllerWithMessagePumpImpl::DoIdleWork() {
   if (main_thread_only().quit_runloop_after != TimeTicks::Max() &&
       main_thread_only().quit_runloop_after <= on_idle->lazy_now.Now()) {
     Quit();
-    return false;
+    return;
   }
 
   // RunLoop::Delegate knows whether we called Run() or RunUntilIdle().
-  if (ShouldQuitWhenIdle())
+  if (ShouldQuitWhenIdle()) {
     Quit();
-
-  return false;
+  }
 }
 
 int ThreadControllerWithMessagePumpImpl::RunDepth() {
@@ -596,6 +619,11 @@ int ThreadControllerWithMessagePumpImpl::RunDepth() {
 void ThreadControllerWithMessagePumpImpl::Run(bool application_tasks_allowed,
                                               TimeDelta timeout) {
   DCHECK(RunsTasksInCurrentSequence());
+
+  // Inside a `RunLoop`, all work that has mutual exclusion or ordering
+  // expectations with the task source is tracked, so it's safe to allow running
+  // tasks synchronously in `RunOrPostTask()`.
+  main_thread_only().task_source->SetRunTaskSynchronouslyAllowed(true);
 
   LazyNow lazy_now_run_loop_start(time_source_);
 
@@ -637,19 +665,28 @@ void ThreadControllerWithMessagePumpImpl::Run(bool application_tasks_allowed,
     hang_watch_scope_.reset();
   }
   work_id_provider_->IncrementWorkId();
+
+  // Work outside of a `RunLoop` may have mutual exclusion or ordering
+  // guarantees with the task source, so disallow running tasks synchronously in
+  // `RunOrPostTask()`.
+  if (run_level_tracker_.num_run_levels() == 0) {
+    main_thread_only().task_source->SetRunTaskSynchronouslyAllowed(false);
+  }
 }
 
 void ThreadControllerWithMessagePumpImpl::OnBeginNestedRunLoop() {
   // We don't need to ScheduleWork here! That's because the call to pump_->Run()
   // above, which is always called for RunLoop().Run(), guarantees a call to
   // DoWork on all platforms.
-  if (main_thread_only().nesting_observer)
+  if (main_thread_only().nesting_observer) {
     main_thread_only().nesting_observer->OnBeginNestedRunLoop();
+  }
 }
 
 void ThreadControllerWithMessagePumpImpl::OnExitNestedRunLoop() {
-  if (main_thread_only().nesting_observer)
+  if (main_thread_only().nesting_observer) {
     main_thread_only().nesting_observer->OnExitNestedRunLoop();
+  }
 }
 
 void ThreadControllerWithMessagePumpImpl::Quit() {
@@ -668,20 +705,27 @@ void ThreadControllerWithMessagePumpImpl::EnsureWorkScheduled() {
   }
 }
 
-void ThreadControllerWithMessagePumpImpl::SetTaskExecutionAllowed(
-    bool allowed) {
+void ThreadControllerWithMessagePumpImpl::
+    SetTaskExecutionAllowedInNativeNestedLoop(bool allowed) {
   if (allowed) {
     // We need to schedule work unconditionally because we might be about to
     // enter an OS level nested message loop. Unlike a RunLoop().Run() we don't
     // get a call to DoWork on entering for free.
     work_deduplicator_.OnWorkRequested();  // Set the pending DoWork flag.
-    pump_->ScheduleWork();
   } else {
     // We've (probably) just left an OS level nested message loop. Make sure a
     // subsequent PostTask within the same Task doesn't ScheduleWork with the
     // pump (this will be done anyway when the task exits).
     work_deduplicator_.OnWorkStarted();
   }
+  if (!pump_->HandleNestedNativeLoopWithApplicationTasks(allowed)) {
+    // Pump does not have its own support for native nested loops,
+    // ThreadController must handle scheduling for upcoming tasks.
+    if (allowed) {
+      pump_->ScheduleWork();
+    }
+  }
+  task_execution_allowed_in_native_nested_loop_ = allowed;
   main_thread_only().task_execution_allowed = allowed;
 }
 
@@ -691,11 +735,6 @@ bool ThreadControllerWithMessagePumpImpl::IsTaskExecutionAllowed() const {
 
 MessagePump* ThreadControllerWithMessagePumpImpl::GetBoundMessagePump() const {
   return pump_.get();
-}
-
-void ThreadControllerWithMessagePumpImpl::PrioritizeYieldingToNative(
-    base::TimeTicks prioritize_until) {
-  main_thread_only().yield_to_native_after_batch = prioritize_until;
 }
 
 #if BUILDFLAG(IS_IOS)
@@ -716,12 +755,11 @@ void ThreadControllerWithMessagePumpImpl::AttachToMessagePump() {
 #endif
 
 bool ThreadControllerWithMessagePumpImpl::ShouldQuitRunLoopWhenIdle() {
-  if (run_level_tracker_.num_run_levels() == 0)
+  if (run_level_tracker_.num_run_levels() == 0) {
     return false;
+  }
   // It's only safe to call ShouldQuitWhenIdle() when in a RunLoop.
   return ShouldQuitWhenIdle();
 }
 
-}  // namespace internal
-}  // namespace sequence_manager
-}  // namespace base
+}  // namespace base::sequence_manager::internal

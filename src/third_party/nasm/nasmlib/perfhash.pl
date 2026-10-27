@@ -1,36 +1,6 @@
 #!/usr/bin/perl
-## --------------------------------------------------------------------------
-##
-##   Copyright 1996-2017 The NASM Authors - All Rights Reserved
-##   See the file AUTHORS included with the NASM distribution for
-##   the specific copyright holders.
-##
-##   Redistribution and use in source and binary forms, with or without
-##   modification, are permitted provided that the following
-##   conditions are met:
-##
-##   * Redistributions of source code must retain the above copyright
-##     notice, this list of conditions and the following disclaimer.
-##   * Redistributions in binary form must reproduce the above
-##     copyright notice, this list of conditions and the following
-##     disclaimer in the documentation and/or other materials provided
-##     with the distribution.
-##
-##     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
-##     CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
-##     INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
-##     MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-##     DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
-##     CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-##     SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
-##     NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-##     LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-##     HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-##     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
-##     OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
-##     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-##
-## --------------------------------------------------------------------------
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright 1996-2017 The NASM Authors - All Rights Reserved
 
 #
 # Generate a perfect hash for general case-insensitive string-to-enum
@@ -334,25 +304,20 @@ if ($output eq 'h') {
     }
     print F "\n};\n\n";
 
-    print F "#define UNUSED_HASH_ENTRY (65536/3)\n\n";
+    print F "#define INVALID_HASH_ENTRY (65536/3)\n\n";
 
     printf F "static const int16_t %s_hashvals[%d] = ", $name, $n*2;
     $c = '{';
-    for (my $i = 0; $i < $n; $i++) {
-	my $h = ${$g}[$i*2+0];
-	print F "$c\n    ", defined($h) ? $h : 'UNUSED_HASH_ENTRY';
-	$c = ',';
-    }
-    for (my $i = 0; $i < $n; $i++) {
-	my $h = ${$g}[$i*2+1];
-	print F "$c\n    ", defined($h) ? $h : 'UNUSED_HASH_ENTRY';
+    for (my $i = 0; $i < $n*2; $i++) {
+	my $h = ${$g}[$i];
+	print F "$c\n    ", defined($h) ? $h : 'INVALID_HASH_ENTRY';
 	$c = ',';
     }
     print F "\n};\n\n";
 
     print F "const struct perfect_hash ${name}_hash = {\n";
     printf F "    UINT64_C(0x%08x%08x),\n", $$sv[0], $$sv[1]; # crcinit
-    printf F "    UINT32_C(0x%x),\n", $n-1;		      # hashmask
+    printf F "    UINT32_C(0x%x),\n", ($n-1) << 1;	      # hashmask
     printf F "    UINT32_C(%u),\n", $tbllen;		      # tbllen
     printf F "    %d,\n", $tbloffs;			      # tbloffs
     printf F "    (%s),\n", $errval;			      # errval

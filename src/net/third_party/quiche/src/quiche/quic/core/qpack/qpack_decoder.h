@@ -79,6 +79,9 @@ class QUICHE_EXPORT QpackDecoder
   // QpackProgressiveDecoder instance is destroyed or the decoder calls
   // |handler->OnHeaderBlockEnd()|.
   std::unique_ptr<QpackProgressiveDecoder> CreateProgressiveDecoder(
+      QuicStreamId stream_id, QuicByteCount max_buffered_data,
+      QpackProgressiveDecoder::HeadersHandlerInterface* handler);
+  std::unique_ptr<QpackProgressiveDecoder> CreateProgressiveDecoder(
       QuicStreamId stream_id,
       QpackProgressiveDecoder::HeadersHandlerInterface* handler);
 
@@ -121,7 +124,7 @@ class QUICHE_EXPORT QpackDecoder
   // acknowledgement for (through Header Acknowledgement and Insert Count
   // Increment instructions).  The encoder must keep track of it in order to be
   // able to send Insert Count Increment instructions.  See
-  // https://quicwg.org/base-drafts/draft-ietf-quic-qpack.html#known-received-count.
+  // https://rfc-editor.org/rfc/rfc9204.html#section-2.1.4.
   uint64_t known_received_count_;
 };
 

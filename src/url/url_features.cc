@@ -7,69 +7,55 @@
 
 namespace url {
 
-BASE_FEATURE(kUseIDNA2008NonTransitional,
-             "UseIDNA2008NonTransitional",
-             base::FEATURE_ENABLED_BY_DEFAULT);
+BASE_FEATURE(kDisallowSpaceCharacterInURLHostParsing,
+             base::FEATURE_DISABLED_BY_DEFAULT);
 
-// Kill switch for crbug.com/1362507.
-BASE_FEATURE(kRecordIDNA2008Metrics,
-             "RecordIDNA2008Metrics",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-
-BASE_FEATURE(kStrictIPv4EmbeddedIPv6AddressParsing,
-             "StrictIPv4EmbeddedIPv6AddressParsing",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-
-// Kill switch for crbug.com/1220361.
-BASE_FEATURE(kResolveBareFragmentWithColonOnNonHierarchical,
-             "ResolveBareFragmentWithColonOnNonHierarchical",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-
-// Kill switch for crbug.com/1252531.
-BASE_FEATURE(kDontDecodeAsciiPercentEncodedURLPath,
-             "DontDecodeAsciiPercentEncodedURLPath",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-
-// Kill switch for https://crbug.com/1416013.
-BASE_FEATURE(kStandardCompliantHostCharacters,
-             "StandardCompliantHostCharacters",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-
-bool IsUsingIDNA2008NonTransitional() {
+bool IsDisallowingSpaceCharacterInURLHostParsing() {
   // If the FeatureList isn't available yet, fall back to the feature's default
   // state. This may happen during early startup, see crbug.com/1441956.
   if (!base::FeatureList::GetInstance()) {
-    return kUseIDNA2008NonTransitional.default_state ==
+    return kDisallowSpaceCharacterInURLHostParsing.default_state ==
            base::FEATURE_ENABLED_BY_DEFAULT;
   }
-
-  return base::FeatureList::IsEnabled(kUseIDNA2008NonTransitional);
+  return base::FeatureList::IsEnabled(kDisallowSpaceCharacterInURLHostParsing);
 }
 
-bool IsUsingDontDecodeAsciiPercentEncodedURLPath() {
-  // If the FeatureList isn't available yet, fall back to the feature's default
-  // state. This may happen during early startup, see https://crbug.com/1478960.
-  if (!base::FeatureList::GetInstance()) {
-    return kDontDecodeAsciiPercentEncodedURLPath.default_state ==
-           base::FEATURE_ENABLED_BY_DEFAULT;
-  }
+BASE_FEATURE(kUseIDNAContextJRules, base::FEATURE_ENABLED_BY_DEFAULT);
 
-  return base::FeatureList::IsEnabled(kDontDecodeAsciiPercentEncodedURLPath);
-}
-
-bool IsUsingStandardCompliantHostCharacters() {
+bool IsUsingIDNAContextJRules() {
   // If the FeatureList isn't available yet, fall back to the feature's default
   // state. This may happen during early startup, see crbug.com/1441956.
   if (!base::FeatureList::GetInstance()) {
-    return kStandardCompliantHostCharacters.default_state ==
+    return kUseIDNAContextJRules.default_state ==
            base::FEATURE_ENABLED_BY_DEFAULT;
   }
-
-  return base::FeatureList::IsEnabled(kStandardCompliantHostCharacters);
+  return base::FeatureList::IsEnabled(kUseIDNAContextJRules);
 }
 
-bool IsRecordingIDNA2008Metrics() {
-  return base::FeatureList::IsEnabled(kRecordIDNA2008Metrics);
+BASE_FEATURE(kNonSpecialLeadingSlashHandling, base::FEATURE_ENABLED_BY_DEFAULT);
+
+bool IsNonSpecialLeadingSlashHandlingEnabled() {
+  if (!base::FeatureList::GetInstance()) {
+    return kNonSpecialLeadingSlashHandling.default_state ==
+           base::FEATURE_ENABLED_BY_DEFAULT;
+  }
+  return base::FeatureList::IsEnabled(kNonSpecialLeadingSlashHandling);
 }
+
+BASE_FEATURE(kPreservePercentEncodedDotInPath,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+bool IsPreservingPercentEncodedDotInPath() {
+  // If the FeatureList isn't available yet, fall back to the feature's default
+  // state. This may happen during early startup, see crbug.com/1441956.
+  if (!base::FeatureList::GetInstance()) {
+    return kPreservePercentEncodedDotInPath.default_state ==
+           base::FEATURE_ENABLED_BY_DEFAULT;
+  }
+  return base::FeatureList::IsEnabled(kPreservePercentEncodedDotInPath);
+}
+
+BASE_FEATURE(kCacheGurlSchemeIsHttpOrHttpsResult,
+             base::FEATURE_DISABLED_BY_DEFAULT);
 
 }  // namespace url

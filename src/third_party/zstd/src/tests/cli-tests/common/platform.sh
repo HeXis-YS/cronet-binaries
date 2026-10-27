@@ -18,11 +18,15 @@ esac
 
 case "$UNAME" in
   Darwin) MD5SUM="md5 -r" ;;
-  FreeBSD) MD5SUM="gmd5sum" ;;
   NetBSD) MD5SUM="md5 -n" ;;
   OpenBSD) MD5SUM="md5" ;;
   *) MD5SUM="md5sum" ;;
 esac
+
+md5hash() {
+  $MD5SUM | dd bs=1 count=32 status=none
+  echo
+}
 
 DIFF="diff"
 case "$UNAME" in
@@ -34,4 +38,10 @@ then
     hasMT=""
 else
     hasMT="true"
+fi
+
+if zstd -vv --version | grep -q 'non-deterministic'; then
+  NON_DETERMINISTIC="true"
+else
+  NON_DETERMINISTIC=""
 fi

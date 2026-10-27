@@ -9,12 +9,13 @@
 #include <string.h>
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/containers/span.h"
 #include "base/gtest_prod_util.h"
+#include "base/memory/raw_span.h"
 #include "base/memory/ref_counted.h"
-#include "base/strings/string_piece.h"
 #include "base/time/time.h"
 #include "net/base/hash_value.h"
 #include "net/base/net_export.h"
@@ -24,6 +25,10 @@
 namespace base {
 class Pickle;
 class PickleIterator;
+}
+
+namespace bssl {
+enum class SignatureAlgorithm;
 }
 
 namespace net {
@@ -44,10 +49,7 @@ class NET_EXPORT X509Certificate
   enum PublicKeyType {
     kPublicKeyTypeUnknown,
     kPublicKeyTypeRSA,
-    kPublicKeyTypeDSA,
     kPublicKeyTypeECDSA,
-    kPublicKeyTypeDH,
-    kPublicKeyTypeECDH
   };
 
   enum Format {
@@ -99,13 +101,13 @@ class NET_EXPORT X509Certificate
   // handle is returned. The other certificates in the chain are intermediate
   // certificates.
   static scoped_refptr<X509Certificate> CreateFromDERCertChain(
-      const std::vector<base::StringPiece>& der_certs);
+      const std::vector<std::string_view>& der_certs);
 
   // Create an X509Certificate from a chain of DER encoded certificates with
   // non-standard parsing options.
   // Do not use without consulting //net owners.
   static scoped_refptr<X509Certificate> CreateFromDERCertChainUnsafeOptions(
-      const std::vector<base::StringPiece>& der_certs,
+      const std::vector<std::string_view>& der_certs,
       UnsafeCreateOptions options);
 
   // Create an X509Certificate from the DER-encoded representation.
@@ -160,7 +162,9 @@ class NET_EXPORT X509Certificate
   void Persist(base::Pickle* pickle) const;
 
   // The serial number, DER encoded, possibly including a leading 00 byte.
-  const std::string& serial_number() const { return parsed_.serial_number_; }
+  base::span<const uint8_t> serial_number() const {
+    return parsed_.serial_number_;
+  }
 
   // The subject of the certificate.  For HTTPS server certificates, this
   // represents the web server.  The common name of the subject should match
@@ -175,8 +179,21 @@ class NET_EXPORT X509Certificate
   // the |valid_expiry| date.
   // If we were unable to parse either date from the certificate (or if the cert
   // lacks either date), the date will be null (i.e., is_null() will be true).
-  const base::Time& valid_start() const { return parsed_.valid_start_; }
-  const base::Time& valid_expiry() const { return parsed_.valid_expiry_; }
+  base::Time valid_start() const { return parsed_.valid_start_; }
+  base::Time valid_expiry() const { return parsed_.valid_expiry_; }
+
+  // The signature algorithm (listed in the TBSCertificate) used to sign the
+  // certificate.
+  std::optional<bssl::SignatureAlgorithm> signature_algorithm() const {
+    return parsed_.signature_algorithm_;
+  }
+
+  void set_valid_start_for_testing(base::Time time) {
+    const_cast<ParsedFields&>(parsed_).valid_start_ = time;
+  }
+  void set_valid_expiry_for_testing(base::Time time) {
+    const_cast<ParsedFields&>(parsed_).valid_expiry_ = time;
+  }
 
   // Gets the subjectAltName extension field from the certificate, if any.
   // For future extension; currently this only returns those name types that
@@ -206,12 +223,12 @@ class NET_EXPORT X509Certificate
   // Verifies that |hostname| matches this certificate.
   // Does not verify that the certificate is valid, only that the certificate
   // matches this host.
-  bool VerifyNameMatch(const std::string& hostname) const;
+  bool VerifyNameMatch(std::string_view hostname) const;
 
   // Returns the PEM encoded data from a DER encoded certificate. If the
   // return value is true, then the PEM encoded certificate is written to
   // |pem_encoded|.
-  static bool GetPEMEncodedFromDER(base::StringPiece der_encoded,
+  static bool GetPEMEncodedFromDER(std::string_view der_encoded,
                                    std::string* pem_encoded);
 
   // Returns the PEM encoded data from a CRYPTO_BUFFER. If the return value is
@@ -233,20 +250,36 @@ class NET_EXPORT X509Certificate
                                size_t* size_bits,
                                PublicKeyType* type);
 
+  // Returns the bytes in CRYPTO_BUFFER that hold this certificate's DER encoded
+  // data. The data is not guaranteed to be valid DER or to encode a valid
+  // Certificate object.
+  base::span<const uint8_t> cert_span() const;
+
   // Returns the CRYPTO_BUFFER holding this certificate's DER encoded data. The
   // data is not guaranteed to be valid DER or to encode a valid Certificate
   // object.
-  CRYPTO_BUFFER* cert_buffer() const { return cert_buffer_.get(); }
+  //
+  // To access the CRYPTO_BUFFER's bytes, use `cert_span()` above.
+  CRYPTO_BUFFER* cert_buffer() const { return cert_buffers_.front().get(); }
 
   // Returns the associated intermediate certificates that were specified
   // during creation of this object, if any. The intermediates are not
   // guaranteed to be valid DER or to encode valid Certificate objects.
   // Ownership follows the "get" rule: it is the caller's responsibility to
   // retain the elements of the result.
-  const std::vector<bssl::UniquePtr<CRYPTO_BUFFER>>& intermediate_buffers()
+  const base::span<const bssl::UniquePtr<CRYPTO_BUFFER>> intermediate_buffers()
       const {
-    return intermediate_ca_certs_;
+    return base::span(cert_buffers_).subspan(1u);
   }
+
+  // Returns the full list of certificate buffers specified for this object.
+  // In other words, `cert_buffer()` followed by `intermediate_buffers()`.
+  const std::vector<bssl::UniquePtr<CRYPTO_BUFFER>>& cert_buffers() const {
+    return cert_buffers_;
+  }
+
+  // Returns a copy of the full list of certificate buffers.
+  std::vector<bssl::UniquePtr<CRYPTO_BUFFER>> CopyCertBuffers() const;
 
   // Creates all possible CRYPTO_BUFFERs from |data| encoded in a specific
   // |format|. Returns an empty collection on failure.
@@ -296,8 +329,12 @@ class NET_EXPORT X509Certificate
     // This certificate is not valid after |valid_expiry_|
     base::Time valid_expiry_;
 
-    // The serial number of this certificate, DER encoded.
-    std::string serial_number_;
+    // The serial number of this certificate, DER encoded. References data
+    // owned by `cert_buffer`.
+    base::raw_span<const uint8_t> serial_number_;
+
+    // The signature algorithm in the certificate.
+    std::optional<bssl::SignatureAlgorithm> signature_algorithm_;
   };
 
   // Construct an X509Certificate from a CRYPTO_BUFFER containing the
@@ -320,19 +357,19 @@ class NET_EXPORT X509Certificate
   // extension, if present. Note these IP addresses are NOT ascii-encoded:
   // they must be 4 or 16 bytes of network-ordered data, for IPv4 and IPv6
   // addresses, respectively.
-  static bool VerifyHostname(const std::string& hostname,
+  static bool VerifyHostname(std::string_view hostname,
                              const std::vector<std::string>& cert_san_dns_names,
                              const std::vector<std::string>& cert_san_ip_addrs);
 
-  // Fields that were parsed from |cert_buffer_|.
+  // Handles to the DER encoded certificate data.
+  // The first element is the certificate represented by this object with the
+  // following elements representing the intermediates/chain, if any.
+  const std::vector<bssl::UniquePtr<CRYPTO_BUFFER>> cert_buffers_;
+
+  // Fields that were parsed from `cert_buffers_.front()`. Needs to be after
+  // `cert_buffers_` as it references data owned by that, and thus needs
+  // to be destroyed first.
   const ParsedFields parsed_;
-
-  // A handle to the DER encoded certificate data.
-  const bssl::UniquePtr<CRYPTO_BUFFER> cert_buffer_;
-
-  // Untrusted intermediate certificates associated with this certificate
-  // that may be needed for chain building.
-  const std::vector<bssl::UniquePtr<CRYPTO_BUFFER>> intermediate_ca_certs_;
 };
 
 }  // namespace net

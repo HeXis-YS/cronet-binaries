@@ -15,12 +15,11 @@
 # zstd-decompress : decompressor-only version of zstd
 # ##########################################################################
 
-.PHONY: default
-default: zstd-release
+# default target (when running `make` with no argument)
+zstd-release:
 
-LIBZSTD := ../lib
-
-include $(LIBZSTD)/libzstd.mk
+LIBZSTD_MK_DIR = ../lib
+include $(LIBZSTD_MK_DIR)/libzstd.mk
 
 ifeq ($(shell $(CC) -v 2>&1 | $(GREP) -c "gcc version "), 1)
   ALIGN_LOOP = -falign-loops=32
@@ -171,7 +170,7 @@ endif
 
 zstd : $(BUILD_DIR)/zstd
 	if [ $(BIN_ISDIFFERENT) -eq 1 ]; then \
-		cp -f $<$(EXT) $@$(EXT); \
+		$(CP) $<$(EXT) $@$(EXT); \
 		echo zstd build completed; \
 	else \
 		echo zstd already built; \
@@ -223,7 +222,7 @@ zstd-noxz : zstd
 
 ## zstd-dll: zstd executable linked to dynamic library libzstd (must have same version)
 .PHONY: zstd-dll
-zstd-dll : LDFLAGS+= -L$(LIBZSTD)
+zstd-dll : LDFLAGS+= -L$(LIB_BINDIR)
 zstd-dll : LDLIBS += -lzstd
 zstd-dll : ZSTDLIB_LOCAL_SRC = xxhash.c pool.c threading.c
 zstd-dll : zstd
@@ -233,7 +232,7 @@ zstd-dll : zstd
 .PHONY: zstd-pgo
 zstd-pgo : LLVM_PROFDATA?=llvm-profdata
 zstd-pgo : PROF_GENERATE_FLAGS=-fprofile-generate $(if $(findstring gcc,$(CC)),-fprofile-dir=.)
-zstd-pgo : PROF_USE_FLAGS=-fprofile-use $(if $(findstring gcc,$(CC)),-fprofile-dir=. -Werror=missing-profile -Wno-error=coverage-mismatch)
+zstd-pgo : PROF_USE_FLAGS=-fprofile-use $(if $(findstring gcc,$(CC)),-fprofile-dir=. -Wno-error=missing-profile -Wno-error=coverage-mismatch)
 zstd-pgo :
 	$(MAKE) clean HASH_DIR=$(HASH_DIR)
 	$(MAKE) zstd HASH_DIR=$(HASH_DIR) MOREFLAGS="$(PROF_GENERATE_FLAGS)"
@@ -272,7 +271,7 @@ zstd-dictBuilder: $(ZSTDLIB_COMMON_SRC) $(ZSTDLIB_COMPRESS_SRC) $(ZDICT_SRC) zst
 
 CLEAN += zstdmt
 zstdmt: zstd
-	ln -sf zstd zstdmt
+	$(LN) -sf zstd zstdmt
 
 .PHONY: generate_res
 generate_res: $(RES64_FILE) $(RES32_FILE)
@@ -346,7 +345,7 @@ include $(wildcard $(DEPFILES))
 #-----------------------------------------------------------------------------
 # make install is validated only for Linux, macOS, BSD, Hurd and Solaris targets
 #-----------------------------------------------------------------------------
-ifneq (,$(filter $(UNAME),Linux Darwin GNU/kFreeBSD GNU OpenBSD FreeBSD NetBSD DragonFly SunOS Haiku AIX MSYS_NT CYGWIN_NT))
+ifneq (,$(filter $(INSTALL_OS_LIST),$(UNAME)))
 
 HAVE_COLORNEVER = $(shell echo a | egrep --color=never a > /dev/null 2> /dev/null && echo 1 || echo 0)
 EGREP_OPTIONS ?=
@@ -389,14 +388,14 @@ datarootdir ?= $(PREFIX)/share
 mandir      ?= $(datarootdir)/man
 man1dir     ?= $(mandir)/man1
 
-ifneq (,$(filter $(UNAME),OpenBSD FreeBSD NetBSD DragonFly SunOS))
+ifneq (,$(filter OpenBSD NetBSD DragonFly SunOS,$(UNAME)))
   MANDIR  ?= $(PREFIX)/man
   MAN1DIR ?= $(MANDIR)/man1
 else
   MAN1DIR ?= $(man1dir)
 endif
 
-ifneq (,$(filter $(UNAME),SunOS))
+ifneq (,$(filter SunOS,$(UNAME)))
   INSTALL ?= ginstall
 else
   INSTALL ?= install
@@ -415,15 +414,15 @@ install:
 	[ -e $(DESTDIR)$(MAN1DIR) ] || $(INSTALL) -d -m 755 $(DESTDIR)$(MAN1DIR)/
 	@echo Installing binaries
 	$(INSTALL_PROGRAM) zstd$(EXT) $(DESTDIR)$(BINDIR)/zstd$(EXT)
-	ln -sf zstd$(EXT) $(DESTDIR)$(BINDIR)/zstdcat$(EXT)
-	ln -sf zstd$(EXT) $(DESTDIR)$(BINDIR)/unzstd$(EXT)
-	ln -sf zstd$(EXT) $(DESTDIR)$(BINDIR)/zstdmt$(EXT)
+	$(LN) -sf zstd$(EXT) $(DESTDIR)$(BINDIR)/zstdcat$(EXT)
+	$(LN) -sf zstd$(EXT) $(DESTDIR)$(BINDIR)/unzstd$(EXT)
+	$(LN) -sf zstd$(EXT) $(DESTDIR)$(BINDIR)/zstdmt$(EXT)
 	$(INSTALL_SCRIPT) zstdless $(DESTDIR)$(BINDIR)/zstdless
 	$(INSTALL_SCRIPT) zstdgrep $(DESTDIR)$(BINDIR)/zstdgrep
 	@echo Installing man pages
 	$(INSTALL_MAN) zstd.1 $(DESTDIR)$(MAN1DIR)/zstd.1
-	ln -sf zstd.1 $(DESTDIR)$(MAN1DIR)/zstdcat.1
-	ln -sf zstd.1 $(DESTDIR)$(MAN1DIR)/unzstd.1
+	$(LN) -sf zstd.1 $(DESTDIR)$(MAN1DIR)/zstdcat.1
+	$(LN) -sf zstd.1 $(DESTDIR)$(MAN1DIR)/unzstd.1
 	$(INSTALL_MAN) zstdgrep.1 $(DESTDIR)$(MAN1DIR)/zstdgrep.1
 	$(INSTALL_MAN) zstdless.1 $(DESTDIR)$(MAN1DIR)/zstdless.1
 	@echo zstd installation completed

@@ -1,28 +1,24 @@
-// Copyright (c) 2016, Google Inc.
+// Copyright 2016 The BoringSSL Authors
 //
-// Permission to use, copy, modify, and/or distribute this software for any
-// purpose with or without fee is hereby granted, provided that the above
-// copyright notice and this permission notice appear in all copies.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
-// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
-// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
-// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package runner
 
 import (
-	"bufio"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net"
-	"strconv"
-	"strings"
 	"sync"
 )
 
@@ -85,8 +81,8 @@ func (r *recordingConn) LogSpecial(message string, data []byte) {
 	r.appendFlow(specialFlow, message, data)
 }
 
-// WriteTo writes hex dumps to w that contains the recorded traffic.
-func (r *recordingConn) WriteTo(w io.Writer) {
+// WriteFlowsTo writes hex dumps to w that contains the recorded traffic.
+func (r *recordingConn) WriteFlowsTo(w io.Writer) {
 	fmt.Fprintf(w, ">>> runner is %s, shim is %s\n", r.local, r.peer)
 	for i, flow := range r.flows {
 		switch flow.flowType {
@@ -119,53 +115,4 @@ func (r *recordingConn) Transcript() []byte {
 		ret = append(ret, flow.data...)
 	}
 	return ret
-}
-
-func parseTestData(r io.Reader) (flows [][]byte, err error) {
-	var currentFlow []byte
-
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		line := scanner.Text()
-		// If the line starts with ">>> " then it marks the beginning
-		// of a new flow.
-		if strings.HasPrefix(line, ">>> ") {
-			if len(currentFlow) > 0 || len(flows) > 0 {
-				flows = append(flows, currentFlow)
-				currentFlow = nil
-			}
-			continue
-		}
-
-		// Otherwise the line is a line of hex dump that looks like:
-		// 00000170  fc f5 06 bf (...)  |.....X{&?......!|
-		// (Some bytes have been omitted from the middle section.)
-
-		if i := strings.IndexByte(line, ' '); i >= 0 {
-			line = line[i:]
-		} else {
-			return nil, errors.New("invalid test data")
-		}
-
-		if i := strings.IndexByte(line, '|'); i >= 0 {
-			line = line[:i]
-		} else {
-			return nil, errors.New("invalid test data")
-		}
-
-		hexBytes := strings.Fields(line)
-		for _, hexByte := range hexBytes {
-			val, err := strconv.ParseUint(hexByte, 16, 8)
-			if err != nil {
-				return nil, errors.New("invalid hex byte in test data: " + err.Error())
-			}
-			currentFlow = append(currentFlow, byte(val))
-		}
-	}
-
-	if len(currentFlow) > 0 {
-		flows = append(flows, currentFlow)
-	}
-
-	return flows, nil
 }

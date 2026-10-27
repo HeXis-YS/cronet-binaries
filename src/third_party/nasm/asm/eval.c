@@ -1,35 +1,5 @@
-/* ----------------------------------------------------------------------- *
- *
- *   Copyright 1996-2018 The NASM Authors - All Rights Reserved
- *   See the file AUTHORS included with the NASM distribution for
- *   the specific copyright holders.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following
- *   conditions are met:
- *
- *   * Redistributions of source code must retain the above copyright
- *     notice, this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above
- *     copyright notice, this list of conditions and the following
- *     disclaimer in the documentation and/or other materials provided
- *     with the distribution.
- *
- *     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND
- *     CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES,
- *     INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- *     MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- *     DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- *     CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *     SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- *     NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- *     LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- *     HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- *     CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- *     OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
- *     EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * ----------------------------------------------------------------------- */
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright 1996-2024 The NASM Authors - All Rights Reserved */
 
 /*
  * eval.c    expression evaluator for the Netwide Assembler
@@ -694,21 +664,13 @@ static expr *expr5(void)
 static expr *eval_floatize(enum floatize type)
 {
     uint8_t result[16], *p;     /* Up to 128 bits */
-    static const struct {
-        int bytes, start, len;
-    } formats[] = {
-        {  1, 0, 1 },           /* FLOAT_8 */
-        {  2, 0, 2 },           /* FLOAT_16 */
-        {  4, 0, 4 },           /* FLOAT_32 */
-        {  8, 0, 8 },           /* FLOAT_64 */
-        { 10, 0, 8 },           /* FLOAT_80M */
-        { 10, 8, 2 },           /* FLOAT_80E */
-        { 16, 0, 8 },           /* FLOAT_128L */
-        { 16, 8, 8 },           /* FLOAT_128H */
-    };
     int sign = 1;
     int64_t val;
+    size_t len;
     int i;
+    const struct ieee_format *fmt;
+
+    fmt = &fp_formats[type];
 
     scan();
     if (tt != '(') {
@@ -724,7 +686,7 @@ static expr *eval_floatize(enum floatize type)
         nasm_nonfatal("expecting floating-point number");
         return NULL;
     }
-    if (!float_const(tokval->t_charptr, sign, result, formats[type].bytes))
+    if (!float_const(tokval->t_charptr, sign, result, type))
         return NULL;
     scan();
     if (tt != ')') {
@@ -732,9 +694,12 @@ static expr *eval_floatize(enum floatize type)
         return NULL;
     }
 
-    p = result+formats[type].start+formats[type].len;
+    len = fmt->bytes - fmt->offset;
+    if (len > 8)
+        len = 8;                /* Max 64 bits */
+    p = result + len + fmt->offset;
     val = 0;
-    for (i = formats[type].len; i; i--) {
+    for (i = len; i; i--) {
         p--;
         val = (val << 8) + *p;
     }
@@ -771,6 +736,7 @@ static expr *eval_strfunc(enum strfunc type, const char *name)
     }
 
     val = readstrnum(string, string_len, &rn_warn);
+    nasm_free(string);
     if (parens) {
         scan();
         if (tt != ')') {
@@ -923,6 +889,7 @@ static expr *expr6(void)
         return e;
 
     case TOKEN_NUM:
+    case TOKEN_BRCCONST:
     case TOKEN_STR:
     case TOKEN_REG:
     case TOKEN_ID:
@@ -933,6 +900,7 @@ static expr *expr6(void)
         begintemp();
         switch (tt) {
         case TOKEN_NUM:
+        case TOKEN_BRCCONST:
             addtotemp(EXPR_SIMPLE, tokval->t_integer);
             break;
         case TOKEN_STR:

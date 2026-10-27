@@ -4,25 +4,34 @@
 
 #include "quiche/quic/core/quic_time_wait_list_manager.h"
 
-#include <errno.h>
-
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <memory>
+#include <ostream>
 #include <utility>
+#include <vector>
 
+#include "absl/base/nullability.h"
 #include "absl/strings/string_view.h"
-#include "quiche/quic/core/crypto/crypto_protocol.h"
-#include "quiche/quic/core/crypto/quic_decrypter.h"
-#include "quiche/quic/core/crypto/quic_encrypter.h"
+#include "quiche/quic/core/quic_alarm.h"
+#include "quiche/quic/core/quic_alarm_factory.h"
 #include "quiche/quic/core/quic_clock.h"
 #include "quiche/quic/core/quic_connection_id.h"
 #include "quiche/quic/core/quic_framer.h"
+#include "quiche/quic/core/quic_packet_writer.h"
 #include "quiche/quic/core/quic_packets.h"
+#include "quiche/quic/core/quic_time.h"
+#include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/core/quic_utils.h"
+#include "quiche/quic/core/quic_versions.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
 #include "quiche/quic/platform/api/quic_flag_utils.h"
 #include "quiche/quic/platform/api/quic_flags.h"
 #include "quiche/quic/platform/api/quic_logging.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/common/platform/api/quiche_logging.h"
+#include "quiche/common/platform/api/quiche_reference_counted.h"
 #include "quiche/common/quiche_text_utils.h"
 
 namespace quic {
@@ -84,67 +93,47 @@ QuicTimeWaitListManager::~QuicTimeWaitListManager() {
   connection_id_clean_up_alarm_->Cancel();
 }
 
-QuicTimeWaitListManager::ConnectionIdMap::iterator
-QuicTimeWaitListManager::FindConnectionIdDataInMap(
+QuicTimeWaitListManager::ConnectionIdData* absl_nullable
+QuicTimeWaitListManager::FindConnectionIdData(
     const QuicConnectionId& connection_id) {
-  auto it = indirect_connection_id_map_.find(connection_id);
-  if (it == indirect_connection_id_map_.end()) {
-    return connection_id_map_.end();
+  auto it = connection_id_data_map_.find(connection_id);
+  if (it == connection_id_data_map_.end()) {
+    return nullptr;
   }
-  return connection_id_map_.find(it->second);
-}
-
-void QuicTimeWaitListManager::AddConnectionIdDataToMap(
-    const QuicConnectionId& canonical_connection_id, int num_packets,
-    TimeWaitAction action, TimeWaitConnectionInfo info) {
-  for (const auto& cid : info.active_connection_ids) {
-    indirect_connection_id_map_[cid] = canonical_connection_id;
-  }
-  ConnectionIdData data(num_packets, clock_->ApproximateNow(), action,
-                        std::move(info));
-  connection_id_map_.emplace(
-      std::make_pair(canonical_connection_id, std::move(data)));
-}
-
-void QuicTimeWaitListManager::RemoveConnectionDataFromMap(
-    ConnectionIdMap::iterator it) {
-  for (const auto& cid : it->second.info.active_connection_ids) {
-    indirect_connection_id_map_.erase(cid);
-  }
-  connection_id_map_.erase(it);
+  return it->second.get();
 }
 
 void QuicTimeWaitListManager::AddConnectionIdToTimeWait(
     TimeWaitAction action, TimeWaitConnectionInfo info) {
-  QUICHE_DCHECK(!info.active_connection_ids.empty());
-  const QuicConnectionId& canonical_connection_id =
-      info.active_connection_ids.front();
+  if (info.active_connection_ids.empty()) {
+    QUIC_BUG(empty_active_connection_ids);
+    return;
+  }
   QUICHE_DCHECK(action != SEND_TERMINATION_PACKETS ||
                 !info.termination_packets.empty());
   QUICHE_DCHECK(action != DO_NOTHING || info.ietf_quic);
-  int num_packets = 0;
-  auto it = FindConnectionIdDataInMap(canonical_connection_id);
-  const bool new_connection_id = it == connection_id_map_.end();
-  if (!new_connection_id) {  // Replace record if it is reinserted.
-    num_packets = it->second.num_packets;
-    RemoveConnectionDataFromMap(it);
-  }
+
   TrimTimeWaitListIfNeeded();
-  int64_t max_connections = GetQuicFlag(quic_time_wait_list_max_connections);
-  QUICHE_DCHECK(connection_id_map_.empty() ||
-                num_connections() < static_cast<size_t>(max_connections));
-  if (new_connection_id) {
-    for (const auto& cid : info.active_connection_ids) {
-      visitor_->OnConnectionAddedToTimeWaitList(cid);
+
+  quiche::QuicheReferenceCountedPointer<RefCountedConnectionIdData> data(
+      new RefCountedConnectionIdData(/*num_packets=*/0,
+                                     clock_->ApproximateNow(), action,
+                                     std::move(info), num_connections_));
+  std::vector<QuicConnectionId> active_connection_ids;
+  active_connection_ids.swap(data->info.active_connection_ids);
+  for (const auto& cid : active_connection_ids) {
+    auto it = connection_id_data_map_.find(cid);
+    if (it != connection_id_data_map_.end()) {
+      QUIC_CODE_COUNT(quic_time_wait_list_manager_duplicated_cid);
+      connection_id_data_map_.erase(it);
     }
+    connection_id_data_map_.insert({cid, data});
   }
-  AddConnectionIdDataToMap(canonical_connection_id, num_packets, action,
-                           std::move(info));
 }
 
 bool QuicTimeWaitListManager::IsConnectionIdInTimeWait(
     QuicConnectionId connection_id) const {
-  return indirect_connection_id_map_.contains(connection_id);
+  return connection_id_data_map_.contains(connection_id);
 }
 
 void QuicTimeWaitListManager::OnBlockedWriterCanWrite() {
@@ -161,15 +150,18 @@ void QuicTimeWaitListManager::OnBlockedWriterCanWrite() {
 void QuicTimeWaitListManager::ProcessPacket(
     const QuicSocketAddress& self_address,
     const QuicSocketAddress& peer_address, QuicConnectionId connection_id,
-    PacketHeaderFormat header_format, size_t received_packet_length,
-    std::unique_ptr<QuicPerPacketContext> packet_context) {
+    PacketHeaderFormat header_format, size_t received_packet_length) {
   QUICHE_DCHECK(IsConnectionIdInTimeWait(connection_id));
   // TODO(satyamshekhar): Think about handling packets from different peer
   // addresses.
-  auto it = FindConnectionIdDataInMap(connection_id);
-  QUICHE_DCHECK(it != connection_id_map_.end());
+  ConnectionIdData* connection_data = FindConnectionIdData(connection_id);
+  if (connection_data == nullptr) {
+    QUIC_BUG(missing_connection_id_data)
+        << "Connection data not found for " << connection_id
+        << " in time wait list.";
+    return;
+  }
   // Increment the received packet count.
-  ConnectionIdData* connection_data = &it->second;
   ++(connection_data->num_packets);
   const QuicTime now = clock_->ApproximateNow();
   QuicTime::Delta delta = QuicTime::Delta::Zero();
@@ -210,9 +202,9 @@ void QuicTimeWaitListManager::ProcessPacket(
           // Send stateless reset in response to short header packets.
           SendPublicReset(self_address, peer_address, connection_id,
                           connection_data->info.ietf_quic,
-                          received_packet_length, std::move(packet_context));
+                          received_packet_length);
           return;
-        case GOOGLE_QUIC_PACKET:
+        case GOOGLE_QUIC_Q043_PACKET:
           if (connection_data->info.ietf_quic) {
             QUIC_CODE_COUNT(quic_received_gquic_packet_for_ietf_quic);
           }
@@ -221,8 +213,7 @@ void QuicTimeWaitListManager::ProcessPacket(
 
       for (const auto& packet : connection_data->info.termination_packets) {
         SendOrQueuePacket(std::make_unique<QueuedPacket>(
-                              self_address, peer_address, packet->Clone()),
-                          packet_context.get());
+            self_address, peer_address, packet->Clone()));
       }
       return;
 
@@ -233,8 +224,7 @@ void QuicTimeWaitListManager::ProcessPacket(
       }
       for (const auto& packet : connection_data->info.termination_packets) {
         SendOrQueuePacket(std::make_unique<QueuedPacket>(
-                              self_address, peer_address, packet->Clone()),
-                          packet_context.get());
+            self_address, peer_address, packet->Clone()));
       }
       return;
 
@@ -243,8 +233,7 @@ void QuicTimeWaitListManager::ProcessPacket(
         QUIC_CODE_COUNT(quic_stateless_reset_long_header_packet);
       }
       SendPublicReset(self_address, peer_address, connection_id,
-                      connection_data->info.ietf_quic, received_packet_length,
-                      std::move(packet_context));
+                      connection_data->info.ietf_quic, received_packet_length);
       return;
     case DO_NOTHING:
       QUIC_CODE_COUNT(quic_time_wait_list_do_nothing);
@@ -257,8 +246,7 @@ void QuicTimeWaitListManager::SendVersionNegotiationPacket(
     QuicConnectionId client_connection_id, bool ietf_quic,
     bool use_length_prefix, const ParsedQuicVersionVector& supported_versions,
     const QuicSocketAddress& self_address,
-    const QuicSocketAddress& peer_address,
-    std::unique_ptr<QuicPerPacketContext> packet_context) {
+    const QuicSocketAddress& peer_address) {
   std::unique_ptr<QuicEncryptedPacket> version_packet =
       QuicFramer::BuildVersionNegotiationPacket(
           server_connection_id, client_connection_id, ietf_quic,
@@ -271,8 +259,7 @@ void QuicTimeWaitListManager::SendVersionNegotiationPacket(
                 << quiche::QuicheTextUtils::HexDump(absl::string_view(
                        version_packet->data(), version_packet->length()));
   SendOrQueuePacket(std::make_unique<QueuedPacket>(self_address, peer_address,
-                                                   std::move(version_packet)),
-                    packet_context.get());
+                                                   std::move(version_packet)));
 }
 
 // Returns true if the number of packets received for this connection_id is a
@@ -284,8 +271,7 @@ bool QuicTimeWaitListManager::ShouldSendResponse(int received_packet_count) {
 void QuicTimeWaitListManager::SendPublicReset(
     const QuicSocketAddress& self_address,
     const QuicSocketAddress& peer_address, QuicConnectionId connection_id,
-    bool ietf_quic, size_t received_packet_length,
-    std::unique_ptr<QuicPerPacketContext> packet_context) {
+    bool ietf_quic, size_t received_packet_length) {
   if (ietf_quic) {
     std::unique_ptr<QuicEncryptedPacket> ietf_reset_packet =
         BuildIetfStatelessResetPacket(connection_id, received_packet_length);
@@ -300,10 +286,8 @@ void QuicTimeWaitListManager::SendPublicReset(
                   << quiche::QuicheTextUtils::HexDump(
                          absl::string_view(ietf_reset_packet->data(),
                                            ietf_reset_packet->length()));
-    SendOrQueuePacket(
-        std::make_unique<QueuedPacket>(self_address, peer_address,
-                                       std::move(ietf_reset_packet)),
-        packet_context.get());
+    SendOrQueuePacket(std::make_unique<QueuedPacket>(
+        self_address, peer_address, std::move(ietf_reset_packet)));
     return;
   }
   // Google QUIC public resets donot elicit resets in response.
@@ -311,7 +295,6 @@ void QuicTimeWaitListManager::SendPublicReset(
   packet.connection_id = connection_id;
   // TODO(satyamshekhar): generate a valid nonce for this connection_id.
   packet.nonce_proof = 1010101;
-  // TODO(wub): This is wrong for proxied sessions. Fix it.
   packet.client_address = peer_address;
   GetEndpointId(&packet.endpoint_id);
   // Takes ownership of the packet.
@@ -321,16 +304,14 @@ void QuicTimeWaitListManager::SendPublicReset(
                 << quiche::QuicheTextUtils::HexDump(absl::string_view(
                        reset_packet->data(), reset_packet->length()));
   SendOrQueuePacket(std::make_unique<QueuedPacket>(self_address, peer_address,
-                                                   std::move(reset_packet)),
-                    packet_context.get());
+                                                   std::move(reset_packet)));
 }
 
 void QuicTimeWaitListManager::SendPacket(const QuicSocketAddress& self_address,
                                          const QuicSocketAddress& peer_address,
                                          const QuicEncryptedPacket& packet) {
   SendOrQueuePacket(std::make_unique<QueuedPacket>(self_address, peer_address,
-                                                   packet.Clone()),
-                    nullptr);
+                                                   packet.Clone()));
 }
 
 std::unique_ptr<QuicEncryptedPacket> QuicTimeWaitListManager::BuildPublicReset(
@@ -349,8 +330,7 @@ QuicTimeWaitListManager::BuildIetfStatelessResetPacket(
 // Either sends the packet and deletes it or makes pending queue the
 // owner of the packet.
 bool QuicTimeWaitListManager::SendOrQueuePacket(
-    std::unique_ptr<QueuedPacket> packet,
-    const QuicPerPacketContext* /*packet_context*/) {
+    std::unique_ptr<QueuedPacket> packet) {
   if (packet == nullptr) {
     QUIC_LOG(ERROR) << "Tried to send or queue a null packet";
     return true;
@@ -399,11 +379,15 @@ bool QuicTimeWaitListManager::WriteToWire(QueuedPacket* queued_packet) {
   return true;
 }
 
+QuicTime QuicTimeWaitListManager::GetOldestConnectionTime() const {
+  QUICHE_DCHECK(has_connections());
+  return connection_id_data_map_.begin()->second->time_added;
+}
+
 void QuicTimeWaitListManager::SetConnectionIdCleanUpAlarm() {
   QuicTime::Delta next_alarm_interval = QuicTime::Delta::Zero();
-  if (!connection_id_map_.empty()) {
-    QuicTime oldest_connection_id =
-        connection_id_map_.begin()->second.time_added;
+  if (has_connections()) {
+    QuicTime oldest_connection_id = GetOldestConnectionTime();
     QuicTime now = clock_->ApproximateNow();
     if (now - oldest_connection_id < time_wait_period_) {
       next_alarm_interval = oldest_connection_id + time_wait_period_ - now;
@@ -422,24 +406,20 @@ void QuicTimeWaitListManager::SetConnectionIdCleanUpAlarm() {
 
 bool QuicTimeWaitListManager::MaybeExpireOldestConnection(
     QuicTime expiration_time) {
-  if (connection_id_map_.empty()) {
+  if (!has_connections()) {
     return false;
   }
-  auto it = connection_id_map_.begin();
-  QuicTime oldest_connection_id_time = it->second.time_added;
+  auto it = connection_id_data_map_.begin();
+  QuicTime oldest_connection_id_time = it->second->time_added;
   if (oldest_connection_id_time > expiration_time) {
     // Too recent, don't retire.
     return false;
   }
-  // This connection_id has lived its age, retire it now.
-  QUIC_DLOG(INFO) << "Connection " << it->first
-                  << " expired from time wait list";
-  RemoveConnectionDataFromMap(it);
-  if (expiration_time == QuicTime::Infinite()) {
-    QUIC_CODE_COUNT(quic_time_wait_list_trim_full);
-  } else {
-    QUIC_CODE_COUNT(quic_time_wait_list_expire_connections);
-  }
+  // Remove all entries with the same ConnectionIdData.
+  const RefCountedConnectionIdData* data = it->second.get();
+  do {
+    it = connection_id_data_map_.erase(it);
+  } while (it != connection_id_data_map_.end() && it->second.get() == data);
   return true;
 }
 
@@ -448,6 +428,7 @@ void QuicTimeWaitListManager::CleanUpOldConnectionIds() {
   QuicTime expiration = now - time_wait_period_;
 
   while (MaybeExpireOldestConnection(expiration)) {
+    QUIC_CODE_COUNT(quic_time_wait_list_expire_connections);
   }
 
   SetConnectionIdCleanUpAlarm();
@@ -459,10 +440,20 @@ void QuicTimeWaitListManager::TrimTimeWaitListIfNeeded() {
   if (kMaxConnections < 0) {
     return;
   }
-  while (!connection_id_map_.empty() &&
-         num_connections() >= static_cast<size_t>(kMaxConnections)) {
+  while (has_connections() &&
+         num_connections_ >= static_cast<size_t>(kMaxConnections)) {
     MaybeExpireOldestConnection(QuicTime::Infinite());
+    QUIC_CODE_COUNT(quic_time_wait_list_trim_full);
   }
+
+  QUICHE_DCHECK(!has_connections() ||
+                num_connections_ < static_cast<size_t>(kMaxConnections));
+}
+
+bool QuicTimeWaitListManager::has_connections() const {
+  QUIC_BUG_IF(quic_time_wait_list_num_connections_inconsistent,
+              num_connections_ > connection_id_data_map_.size());
+  return num_connections_ > 0;
 }
 
 QuicTimeWaitListManager::ConnectionIdData::ConnectionIdData(

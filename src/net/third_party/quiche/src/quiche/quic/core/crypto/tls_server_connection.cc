@@ -4,12 +4,22 @@
 
 #include "quiche/quic/core/crypto/tls_server_connection.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
+#include "openssl/base.h"
 #include "openssl/ssl.h"
 #include "quiche/quic/core/crypto/proof_source.h"
+#include "quiche/quic/core/crypto/tls_connection.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/platform/api/quic_flag_utils.h"
 #include "quiche/quic/platform/api/quic_flags.h"
+#include "quiche/common/platform/api/quiche_logging.h"
 
 namespace quic {
 
@@ -59,10 +69,41 @@ bssl::UniquePtr<SSL_CTX> TlsServerConnection::CreateSslCtx(
   return ssl_ctx;
 }
 
-void TlsServerConnection::SetCertChain(
-    const std::vector<CRYPTO_BUFFER*>& cert_chain) {
-  SSL_set_chain_and_key(ssl(), cert_chain.data(), cert_chain.size(), nullptr,
-                        &TlsServerConnection::kPrivateKeyMethod);
+absl::Status TlsServerConnection::ConfigureSSL(
+    ProofSourceHandleCallback::ConfigureSSLFunc configure_ssl) {
+  return std::move(configure_ssl)(*ssl(),  // never nullptr
+                                  TlsServerConnection::kPrivateKeyMethod);
+}
+
+void TlsServerConnection::AddCertChain(CryptoBuffers cert_chain,
+                                       absl::string_view trust_anchor_id) {
+  bssl::UniquePtr<SSL_CREDENTIAL> credential(SSL_CREDENTIAL_new_x509());
+  std::unique_ptr<CredentialExData> exdata;
+  exdata = std::make_unique<CredentialExData>(std::move(cert_chain));
+  SSL_CREDENTIAL_set1_cert_chain(credential.get(),
+                                 exdata->cert_chain_buffers.value.data(),
+                                 exdata->cert_chain_buffers.value.size());
+  if (ssl_config().signing_algorithm_prefs.has_value()) {
+    SSL_CREDENTIAL_set1_signing_algorithm_prefs(
+        credential.get(), ssl_config().signing_algorithm_prefs->data(),
+        ssl_config().signing_algorithm_prefs->size());
+  }
+  SSL_CREDENTIAL_set_private_key_method(
+      credential.get(), &TlsServerConnection::kPrivateKeyMethod);
+  if (!trust_anchor_id.empty()) {
+    QUIC_CODE_COUNT(quic_tls_server_connection_trust_anchor_id_present);
+    SSL_CREDENTIAL_set1_trust_anchor_id(
+        credential.get(),
+        reinterpret_cast<const uint8_t*>(trust_anchor_id.data()),
+        trust_anchor_id.size());
+    SSL_CREDENTIAL_set_must_match_issuer(credential.get(), 1);
+  } else {
+    QUIC_CODE_COUNT(quic_tls_server_connection_trust_anchor_id_empty);
+  }
+  if (exdata != nullptr) {
+    SetCredentialExData(*credential, std::move(exdata));
+  }
+  SSL_add1_credential(ssl(), credential.get());
 }
 
 void TlsServerConnection::SetClientCertMode(ClientCertMode client_cert_mode) {

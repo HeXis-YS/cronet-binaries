@@ -4,8 +4,10 @@
 
 #include "quiche/quic/core/quic_trace_visitor.h"
 
+#include <cstdint>
 #include <string>
 
+#include "quiche/quic/core/congestion_control/send_algorithm_interface.h"
 #include "quiche/quic/core/quic_types.h"
 #include "quiche/common/quiche_endian.h"
 
@@ -78,6 +80,7 @@ void QuicTraceVisitor::OnPacketSent(
       case MTU_DISCOVERY_FRAME:
       case STOP_WAITING_FRAME:
       case ACK_FRAME:
+      case IMMEDIATE_ACK_FRAME:
         QUIC_BUG(quic_bug_12732_1)
             << "Frames of type are not retransmittable and are not supposed "
                "to be in retransmittable_frames";
@@ -91,9 +94,10 @@ void QuicTraceVisitor::OnPacketSent(
       case PATH_RESPONSE_FRAME:
       case PATH_CHALLENGE_FRAME:
       case STOP_SENDING_FRAME:
-      case MESSAGE_FRAME:
+      case DATAGRAM_FRAME:
       case CRYPTO_FRAME:
       case NEW_TOKEN_FRAME:
+      case RESET_STREAM_AT_FRAME:
         break;
 
       // Ignore gQUIC-specific frames.
@@ -222,10 +226,12 @@ void QuicTraceVisitor::PopulateFrameInfo(const QuicFrame& frame,
     case PATH_RESPONSE_FRAME:
     case PATH_CHALLENGE_FRAME:
     case STOP_SENDING_FRAME:
-    case MESSAGE_FRAME:
+    case DATAGRAM_FRAME:
     case CRYPTO_FRAME:
     case NEW_TOKEN_FRAME:
     case ACK_FREQUENCY_FRAME:
+    case IMMEDIATE_ACK_FRAME:
+    case RESET_STREAM_AT_FRAME:
       break;
 
     case NUM_FRAME_TYPES:
@@ -283,8 +289,7 @@ void QuicTraceVisitor::OnSuccessfulVersionNegotiation(
 
 void QuicTraceVisitor::OnApplicationLimited() {
   quic_trace::Event* event = trace_.add_events();
-  event->set_time_us(
-      ConvertTimestampToRecordedFormat(connection_->clock()->ApproximateNow()));
+  event->set_time_us(NowInRecordedFormat());
   event->set_event_type(quic_trace::APPLICATION_LIMITED);
 }
 
@@ -293,8 +298,7 @@ void QuicTraceVisitor::OnAdjustNetworkParameters(QuicBandwidth bandwidth,
                                                  QuicByteCount /*old_cwnd*/,
                                                  QuicByteCount /*new_cwnd*/) {
   quic_trace::Event* event = trace_.add_events();
-  event->set_time_us(
-      ConvertTimestampToRecordedFormat(connection_->clock()->ApproximateNow()));
+  event->set_time_us(NowInRecordedFormat());
   event->set_event_type(quic_trace::EXTERNAL_PARAMETERS);
 
   quic_trace::ExternalNetworkParameters* parameters =
@@ -325,22 +329,26 @@ void QuicTraceVisitor::PopulateTransportState(
   state->set_smoothed_rtt_us(rtt_stats->smoothed_rtt().ToMicroseconds());
   state->set_last_rtt_us(rtt_stats->latest_rtt().ToMicroseconds());
 
+  const SendAlgorithmInterface* send_algorithm =
+      connection_->sent_packet_manager().GetSendAlgorithm();
   state->set_cwnd_bytes(
       connection_->sent_packet_manager().GetCongestionWindowInBytes());
   QuicByteCount in_flight =
       connection_->sent_packet_manager().GetBytesInFlight();
   state->set_in_flight_bytes(in_flight);
-  state->set_pacing_rate_bps(connection_->sent_packet_manager()
-                                 .GetSendAlgorithm()
-                                 ->PacingRate(in_flight)
-                                 .ToBitsPerSecond());
+  state->set_pacing_rate_bps(
+      send_algorithm->PacingRate(in_flight).ToBitsPerSecond());
+  state->set_bandwidth_estimate_bps(
+      send_algorithm->BandwidthEstimate().ToBitsPerSecond());
 
-  if (connection_->sent_packet_manager()
-          .GetSendAlgorithm()
-          ->GetCongestionControlType() == kPCC) {
-    state->set_congestion_control_state(
-        connection_->sent_packet_manager().GetSendAlgorithm()->GetDebugState());
+  if (send_algorithm->GetCongestionControlType() == kPCC) {
+    state->set_congestion_control_state(send_algorithm->GetDebugState());
   }
+}
+
+uint64_t QuicTraceVisitor::NowInRecordedFormat() {
+  return ConvertTimestampToRecordedFormat(
+      connection_->clock()->ApproximateNow());
 }
 
 }  // namespace quic

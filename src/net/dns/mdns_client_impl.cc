@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -15,7 +16,6 @@
 #include "base/location.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/observer_list.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/string_util.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/clock.h"
@@ -29,7 +29,7 @@
 #include "net/dns/public/util.h"
 #include "net/dns/record_rdata.h"
 #include "net/socket/datagram_socket.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/re2/src/re2/re2.h"
 
 // TODO(gene): Remove this temporary method of disabling NSEC support once it
 // becomes clear whether this feature should be
@@ -68,13 +68,17 @@ void RecordQueryMetric(mdnsQueryType query_type, std::string_view host) {
       "_uscan._tcp.local",
   });
 
-  if (base::EndsWith(host, "_googlecast._tcp.local")) {
+  if (host.ends_with("_googlecast._tcp.local")) {
     base::UmaHistogramEnumeration("Network.Mdns.Googlecast", query_type);
-  } else if (base::ranges::any_of(kPrintScanServices,
-                                  [&host](std::string_view service) {
-                                    return base::EndsWith(host, service);
-                                  })) {
+  } else if (std::ranges::any_of(kPrintScanServices,
+                                 [&host](std::string_view service) {
+                                   return host.ends_with(service);
+                                 })) {
     base::UmaHistogramEnumeration("Network.Mdns.PrintScan", query_type);
+  } else if (RE2::FullMatch(host,
+                            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                            "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\.local$")) {
+    base::UmaHistogramEnumeration("Network.Mdns.UUID", query_type);
   } else {
     base::UmaHistogramEnumeration("Network.Mdns.Other", query_type);
   }
@@ -143,7 +147,7 @@ void MDnsConnection::SocketHandler::OnDatagramReceived(int rv) {
 void MDnsConnection::SocketHandler::Send(const scoped_refptr<IOBuffer>& buffer,
                                          unsigned size) {
   if (send_in_progress_) {
-    send_queue_.push(std::make_pair(buffer, size));
+    send_queue_.emplace(buffer, size);
     return;
   }
   int rv =
@@ -256,7 +260,7 @@ int MDnsClientImpl::Core::Init(MDnsSocketFactory* socket_factory) {
 }
 
 bool MDnsClientImpl::Core::SendQuery(uint16_t rrtype, const std::string& name) {
-  absl::optional<std::vector<uint8_t>> name_dns =
+  std::optional<std::vector<uint8_t>> name_dns =
       dns_names_util::DottedNameToNetwork(name);
   if (!name_dns.has_value())
     return false;
@@ -317,7 +321,7 @@ void MDnsClientImpl::Core::HandlePacket(DnsResponse* response,
     // Cleanup time may have changed.
     ScheduleCleanup(cache_.next_expiration());
 
-    update_keys.insert(std::make_pair(update_key, update));
+    update_keys.emplace(update_key, update);
   }
 
   for (const auto& update_key : update_keys) {
@@ -412,7 +416,7 @@ void MDnsClientImpl::Core::RemoveListener(MDnsListenerImpl* listener) {
   ListenerKey key(listener->GetName(), listener->GetType());
   auto observer_list_iterator = listeners_.find(key);
 
-  DCHECK(observer_list_iterator != listeners_.end());
+  CHECK(observer_list_iterator != listeners_.end());
   DCHECK(observer_list_iterator->second->HasObserver(listener));
 
   observer_list_iterator->second->RemoveObserver(listener);
@@ -423,7 +427,7 @@ void MDnsClientImpl::Core::RemoveListener(MDnsListenerImpl* listener) {
     // happens while iterating over the observer list.
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(&MDnsClientImpl::Core::CleanupObserverList,
-                                  AsWeakPtr(), key));
+                                  weak_ptr_factory_.GetWeakPtr(), key));
   }
 }
 
@@ -602,9 +606,6 @@ void MDnsListenerImpl::HandleRecordUpdate(MDnsCache::UpdateType update_type,
       case MDnsCache::NoChange:
       default:
         NOTREACHED();
-        // Dummy assignment to suppress compiler warning.
-        update_external = MDnsListener::RECORD_CHANGED;
-        break;
     }
 
     delegate_->OnRecordUpdate(update_external, record);
@@ -628,21 +629,19 @@ void MDnsListenerImpl::ScheduleNextRefresh() {
     return;
   }
 
-  next_refresh_.Reset(
-      base::BindRepeating(&MDnsListenerImpl::DoRefresh, AsWeakPtr()));
+  next_refresh_.Reset(base::BindRepeating(&MDnsListenerImpl::DoRefresh,
+                                          weak_ptr_factory_.GetWeakPtr()));
 
   // Schedule refreshes at both 85% and 95% of the original TTL. These will both
   // be canceled and rescheduled if the record's TTL is updated due to a
   // response being received.
   base::Time next_refresh1 =
-      last_update_ +
-      base::Milliseconds(static_cast<int>(base::Time::kMillisecondsPerSecond *
-                                          kListenerRefreshRatio1 * ttl_));
+      last_update_ + base::Milliseconds(base::Time::kMillisecondsPerSecond *
+                                        kListenerRefreshRatio1 * ttl_);
 
   base::Time next_refresh2 =
-      last_update_ +
-      base::Milliseconds(static_cast<int>(base::Time::kMillisecondsPerSecond *
-                                          kListenerRefreshRatio2 * ttl_));
+      last_update_ + base::Milliseconds(base::Time::kMillisecondsPerSecond *
+                                        kListenerRefreshRatio2 * ttl_);
 
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE, next_refresh_.callback(), next_refresh1 - clock_->Now());
@@ -680,7 +679,7 @@ bool MDnsTransactionImpl::Start() {
   DCHECK(!started_);
   started_ = true;
 
-  base::WeakPtr<MDnsTransactionImpl> weak_this = AsWeakPtr();
+  base::WeakPtr<MDnsTransactionImpl> weak_this = weak_ptr_factory_.GetWeakPtr();
   if (flags_ & MDnsTransaction::QUERY_CACHE) {
     ServeRecordsFromCache();
 
@@ -754,7 +753,7 @@ void MDnsTransactionImpl::SignalTransactionOver() {
 
 void MDnsTransactionImpl::ServeRecordsFromCache() {
   std::vector<const RecordParsed*> records;
-  base::WeakPtr<MDnsTransactionImpl> weak_this = AsWeakPtr();
+  base::WeakPtr<MDnsTransactionImpl> weak_this = weak_ptr_factory_.GetWeakPtr();
 
   if (client_->core()) {
     client_->core()->QueryCache(rrtype_, name_, &records);
@@ -788,8 +787,8 @@ bool MDnsTransactionImpl::QueryAndListen() {
   if (!client_->core()->SendQuery(rrtype_, name_))
     return false;
 
-  timeout_.Reset(
-      base::BindOnce(&MDnsTransactionImpl::SignalTransactionOver, AsWeakPtr()));
+  timeout_.Reset(base::BindOnce(&MDnsTransactionImpl::SignalTransactionOver,
+                                weak_ptr_factory_.GetWeakPtr()));
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE, timeout_.callback(), kTransactionTimeout);
 

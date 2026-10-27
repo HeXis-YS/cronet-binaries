@@ -5,16 +5,18 @@
 #ifndef QUICHE_QUIC_TOOLS_WEB_TRANSPORT_TEST_VISITORS_H_
 #define QUICHE_QUIC_TOOLS_WEB_TRANSPORT_TEST_VISITORS_H_
 
+#include <memory>
 #include <string>
 
 #include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "quiche/quic/core/web_transport_interface.h"
 #include "quiche/quic/platform/api/quic_logging.h"
 #include "quiche/common/platform/api/quiche_logging.h"
 #include "quiche/common/quiche_circular_deque.h"
-#include "quiche/common/quiche_stream.h"
 #include "quiche/common/simple_buffer_allocator.h"
 #include "quiche/web_transport/complete_buffer_visitor.h"
+#include "quiche/web_transport/stream_helpers.h"
 #include "quiche/web_transport/web_transport.h"
 
 namespace quic {
@@ -22,7 +24,8 @@ namespace quic {
 // Discards any incoming data.
 class WebTransportDiscardVisitor : public WebTransportStreamVisitor {
  public:
-  WebTransportDiscardVisitor(WebTransportStream* stream) : stream_(stream) {}
+  WebTransportDiscardVisitor(WebTransportStream* stream, bool bidi)
+      : stream_(stream), bidi_(bidi) {}
 
   void OnCanRead() override {
     std::string buffer;
@@ -30,6 +33,10 @@ class WebTransportDiscardVisitor : public WebTransportStreamVisitor {
     QUIC_DVLOG(2) << "Read " << result.bytes_read
                   << " bytes from WebTransport stream "
                   << stream_->GetStreamId() << ", fin: " << result.fin;
+    if (bidi_ && result.fin) {
+      absl::Status status = webtransport::SendFinOnStream(*stream_);
+      QUICHE_DCHECK(status.ok()) << status;
+    }
   }
 
   void OnCanWrite() override {}
@@ -40,6 +47,7 @@ class WebTransportDiscardVisitor : public WebTransportStreamVisitor {
 
  private:
   WebTransportStream* stream_;
+  bool bidi_;
 };
 
 class DiscardWebTransportSessionVisitor : public WebTransportVisitor {
@@ -58,7 +66,8 @@ class DiscardWebTransportSessionVisitor : public WebTransportVisitor {
       if (stream == nullptr) {
         return;
       }
-      stream->SetVisitor(std::make_unique<WebTransportDiscardVisitor>(stream));
+      stream->SetVisitor(
+          std::make_unique<WebTransportDiscardVisitor>(stream, /*bidi=*/true));
       stream->visitor()->OnCanRead();
     }
   }
@@ -70,7 +79,8 @@ class DiscardWebTransportSessionVisitor : public WebTransportVisitor {
       if (stream == nullptr) {
         return;
       }
-      stream->SetVisitor(std::make_unique<WebTransportDiscardVisitor>(stream));
+      stream->SetVisitor(
+          std::make_unique<WebTransportDiscardVisitor>(stream, /*bidi=*/false));
       stream->visitor()->OnCanRead();
     }
   }
@@ -106,7 +116,7 @@ class WebTransportBidirectionalEchoVisitor : public WebTransportStreamVisitor {
     }
 
     if (!buffer_.empty()) {
-      absl::Status status = quiche::WriteIntoStream(*stream_, buffer_);
+      absl::Status status = webtransport::WriteIntoStream(*stream_, buffer_);
       QUIC_DVLOG(1) << "Attempted writing on WebTransport bidirectional stream "
                     << stream_->GetStreamId() << ", success: " << status;
       if (!status.ok()) {
@@ -117,7 +127,7 @@ class WebTransportBidirectionalEchoVisitor : public WebTransportStreamVisitor {
     }
 
     if (send_fin_ && !fin_sent_) {
-      absl::Status status = quiche::SendFinOnStream(*stream_);
+      absl::Status status = webtransport::SendFinOnStream(*stream_);
       if (status.ok()) {
         fin_sent_ = true;
       }

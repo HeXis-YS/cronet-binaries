@@ -17,6 +17,9 @@ namespace base {
 // RefCountedDeleteOnSequence is similar to RefCountedThreadSafe, and ensures
 // that the object will be deleted on a specified sequence.
 //
+// The reference count starts from one, so the first scoped_refptr has to be
+// created by base::AdoptRef() or base::MakeRefCounted().
+//
 // Sample usage:
 // class Foo : public RefCountedDeleteOnSequence<Foo> {
 //
@@ -32,7 +35,7 @@ namespace base {
 template <class T>
 class RefCountedDeleteOnSequence : public subtle::RefCountedThreadSafeBase {
  public:
-  using RefCountPreferenceTag = subtle::StartRefCountFromZeroTag;
+  using RefCountPreferenceTag = subtle::StartRefCountFromOneTag;
 
   // A SequencedTaskRunner for the current sequence can be acquired by calling
   // SequencedTaskRunner::GetCurrentDefault().
@@ -50,8 +53,9 @@ class RefCountedDeleteOnSequence : public subtle::RefCountedThreadSafeBase {
   void AddRef() const { AddRefImpl(subtle::GetRefCountPreference<T>()); }
 
   void Release() const {
-    if (subtle::RefCountedThreadSafeBase::Release())
+    if (subtle::RefCountedThreadSafeBase::Release()) {
       DestructOnSequence();
+    }
   }
 
  protected:
@@ -68,10 +72,11 @@ class RefCountedDeleteOnSequence : public subtle::RefCountedThreadSafeBase {
  private:
   void DestructOnSequence() const {
     const T* t = static_cast<const T*>(this);
-    if (owning_task_runner_->RunsTasksInCurrentSequence())
+    if (owning_task_runner_->RunsTasksInCurrentSequence()) {
       delete t;
-    else
+    } else {
       owning_task_runner_->DeleteSoon(FROM_HERE, t);
+    }
   }
 
   void AddRefImpl(subtle::StartRefCountFromZeroTag) const {

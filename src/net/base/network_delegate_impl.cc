@@ -4,8 +4,12 @@
 
 #include "net/base/network_delegate_impl.h"
 
+#include <optional>
+
 #include "net/base/net_errors.h"
 #include "net/cookies/cookie_setting_override.h"
+#include "net/cookies/cookie_util.h"
+#include "net/ssl/ssl_info.h"
 
 namespace net {
 
@@ -28,12 +32,15 @@ int NetworkDelegateImpl::OnHeadersReceived(
     const HttpResponseHeaders* original_response_headers,
     scoped_refptr<HttpResponseHeaders>* override_response_headers,
     const IPEndPoint& endpoint,
-    absl::optional<GURL>* preserve_fragment_on_redirect_url) {
+    std::optional<GURL>* preserve_fragment_on_redirect_url,
+    const std::optional<net::SSLInfo>& ssl_info) {
   return OK;
 }
 
 void NetworkDelegateImpl::OnBeforeRedirect(URLRequest* request,
                                            const GURL& new_location) {}
+
+void NetworkDelegateImpl::OnBeforeRetry(URLRequest* request) {}
 
 void NetworkDelegateImpl::OnResponseStarted(URLRequest* request,
                                             int net_error) {}
@@ -50,7 +57,6 @@ void NetworkDelegateImpl::OnPACScriptError(int line_number,
 
 bool NetworkDelegateImpl::OnAnnotateAndMoveUserBlockedCookies(
     const URLRequest& request,
-    const net::FirstPartySetMetadata& first_party_set_metadata,
     net::CookieAccessResultList& maybe_included_cookies,
     net::CookieAccessResultList& excluded_cookies) {
   return true;
@@ -62,6 +68,18 @@ bool NetworkDelegateImpl::OnCanSetCookie(
     CookieOptions* options,
     CookieInclusionStatus* inclusion_status) {
   return true;
+}
+
+bool NetworkDelegateImpl::OnShouldForceIgnoreSiteForCookies(
+    const URLRequest& request) {
+  return false;
+}
+
+std::optional<cookie_util::StorageAccessStatus>
+NetworkDelegateImpl::OnGetStorageAccessStatus(
+    const URLRequest& request,
+    base::optional_ref<const RedirectInfo> redirect_info) const {
+  return std::nullopt;
 }
 
 NetworkDelegate::PrivacySetting NetworkDelegateImpl::OnForcePrivacyMode(

@@ -10,7 +10,6 @@
 // Copyright (c) Microsoft Corporation.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-
 // Copyright 2018 Ulf Adams
 // Copyright (c) Microsoft Corporation. All rights reserved.
 
@@ -67,24 +66,6 @@
 _LIBCPP_BEGIN_NAMESPACE_STD
 
 // https://github.com/ulfjack/ryu/tree/59661c3/ryu
-
-#if !defined(_MSC_VER)
-_LIBCPP_HIDE_FROM_ABI inline unsigned char _BitScanForward64(unsigned long* __index, unsigned long long __mask) {
-  if (__mask == 0) {
-    return false;
-  }
-  *__index = __builtin_ctzll(__mask);
-  return true;
-}
-
-_LIBCPP_HIDE_FROM_ABI inline unsigned char _BitScanForward(unsigned long* __index, unsigned int __mask) {
-  if (__mask == 0) {
-    return false;
-  }
-  *__index = __builtin_ctz(__mask);
-  return true;
-}
-#endif  // !_MSC_VER
 
 template <class _Floating>
 [[nodiscard]] to_chars_result _Floating_to_chars_ryu(

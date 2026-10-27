@@ -4,6 +4,9 @@
 
 #include "quiche/quic/core/congestion_control/bbr2_probe_rtt.h"
 
+#include <algorithm>
+#include <ostream>
+
 #include "quiche/quic/core/congestion_control/bbr2_sender.h"
 #include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/platform/api/quic_logging.h"
@@ -60,18 +63,11 @@ Bbr2Mode Bbr2ProbeRttMode::OnExitQuiescence(
   return Bbr2Mode::PROBE_RTT;
 }
 
-Bbr2ProbeRttMode::DebugState Bbr2ProbeRttMode::ExportDebugState() const {
-  DebugState s;
+Bbr2DebugState::ProbeRtt Bbr2ProbeRttMode::ExportDebugState() const {
+  Bbr2DebugState::ProbeRtt s;
   s.inflight_target = InflightTarget();
   s.exit_time = exit_time_;
   return s;
-}
-
-std::ostream& operator<<(std::ostream& os,
-                         const Bbr2ProbeRttMode::DebugState& state) {
-  os << "[PROBE_RTT] inflight_target: " << state.inflight_target << "\n";
-  os << "[PROBE_RTT] exit_time: " << state.exit_time << "\n";
-  return os;
 }
 
 const Bbr2Params& Bbr2ProbeRttMode::Params() const { return sender_->Params(); }

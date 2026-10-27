@@ -1,19 +1,37 @@
-# Additional interop for things like macros and inlined functions.
-add_library(rust_wrapper STATIC rust_wrapper.c)
-target_link_libraries(rust_wrapper crypto)
+# Copyright 2023 The BoringSSL Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Generate architecture-specific wrappers. bindgen must be called from
 # ${CMAKE_BINARY_DIR}, with the output path as a relative path. bindgen writes
 # the depfile using the same syntax as the command-line argument, and ninja
 # requires a path relative to the top-level build directory.
-set(wrapper wrapper_${RUST_BINDINGS}.rs)
-binary_dir_relative_path(${wrapper} wrapper_relative)
-binary_dir_relative_path(${wrapper}.d depfile_relative)
+set(wrapper_rs wrapper_${RUST_BINDINGS}.rs)
+set(wrapper_rs_relative "${CMAKE_CURRENT_BINARY_DIR}/${wrapper_rs}")
+set(depfile_relative "${CMAKE_CURRENT_BINARY_DIR}/${wrapper_rs}.d")
+cmake_path(RELATIVE_PATH wrapper_rs_relative BASE_DIRECTORY "${CMAKE_BINARY_DIR}")
+cmake_path(RELATIVE_PATH depfile_relative BASE_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+if(BORINGSSL_PREFIX)
+  set(BINDGEN_FLAGS "-DBORINGSSL_PREFIX=${BORINGSSL_PREFIX}")
+else()
+  set(BINDGEN_FLAGS "")
+endif(BORINGSSL_PREFIX)
 
 add_custom_command(
-  OUTPUT ${wrapper}
+  OUTPUT ${wrapper_rs} wrapper.c
   COMMAND ${BINDGEN_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/wrapper.h
-          -o ${wrapper_relative}
+          -o ${wrapper_rs_relative}
           --depfile=${depfile_relative}
           --no-derive-default
           --enable-function-attribute-detection
@@ -37,13 +55,26 @@ add_custom_command(
           # https://github.com/rust-lang/rust-bindgen/issues/2508), we can
           # switch to that.
           --allowlist-file=".*[[:punct:]]include[[:punct:]]openssl[[:punct:]].*\\.h"
-          --allowlist-file=".*[[:punct:]]rust_wrapper\\.h"
+          --experimental
+          --wrap-static-fns
+          --wrap-static-fns-path="${CMAKE_CURRENT_BINARY_DIR}/wrapper.c"
           -- # these are LLVM arg passthroughs
-          -I${PROJECT_SOURCE_DIR}/include
+          ${BINDGEN_FLAGS}
+          $<LIST:TRANSFORM,$<TARGET_PROPERTY:crypto,INCLUDE_DIRECTORIES>,PREPEND,-I>
+          $<LIST:TRANSFORM,$<TARGET_PROPERTY:ssl,INCLUDE_DIRECTORIES>,PREPEND,-I>
           # https://doc.rust-lang.org/nightly/rustc/platform-support.html
           --target=${RUST_BINDINGS}
+  COMMAND_EXPAND_LISTS
   DEPENDS wrapper.h
-  DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${wrapper}.d
+  DEPFILE ${CMAKE_CURRENT_BINARY_DIR}/${wrapper_rs}.d
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
-add_custom_target(bssl_sys ALL DEPENDS ${wrapper})
+
+add_library(rust_wrapper STATIC wrapper.c)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_COMPILER_IS_GNUCXX)
+  target_compile_options(rust_wrapper PRIVATE "-Wno-missing-prototypes")
+endif()
+target_include_directories(rust_wrapper PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(rust_wrapper ssl crypto)
+
+add_custom_target(bssl_sys ALL DEPENDS ${wrapper_rs} rust_wrapper)

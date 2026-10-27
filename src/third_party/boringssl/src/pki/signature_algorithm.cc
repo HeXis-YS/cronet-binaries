@@ -1,18 +1,35 @@
 // Copyright 2015 The Chromium Authors
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "signature_algorithm.h"
+
+#include <openssl/bytestring.h>
+#include <openssl/digest.h>
+#include <openssl/nid.h>
 
 #include "input.h"
 #include "parse_values.h"
 #include "parser.h"
-#include <openssl/bytestring.h>
-#include <openssl/digest.h>
 
-namespace bssl {
+BSSL_NAMESPACE_BEGIN
 
 namespace {
+
+// These OIDs do not reference libcrypto's OBJ table, as that table is very
+// large and includes many more OIDs than we need. However, where OIDs are
+// already in the table, we reuse the `OBJ_ENC_*` constants to avoid needing to
+// specify them a second time.
 
 // From RFC 5912:
 //
@@ -21,8 +38,7 @@ namespace {
 //      pkcs-1(1) 5 }
 //
 // In dotted notation: 1.2.840.113549.1.1.5
-const uint8_t kOidSha1WithRsaEncryption[] = {0x2a, 0x86, 0x48, 0x86, 0xf7,
-                                             0x0d, 0x01, 0x01, 0x05};
+const uint8_t kOidSha1WithRsaEncryption[] = {OBJ_ENC_sha1WithRSAEncryption};
 
 // sha1WithRSASignature is a deprecated equivalent of
 // sha1WithRSAEncryption.
@@ -36,7 +52,7 @@ const uint8_t kOidSha1WithRsaEncryption[] = {0x2a, 0x86, 0x48, 0x86, 0xf7,
 // See also: https://bugzilla.mozilla.org/show_bug.cgi?id=1042479
 //
 // In dotted notation: 1.3.14.3.2.29
-const uint8_t kOidSha1WithRsaSignature[] = {0x2b, 0x0e, 0x03, 0x02, 0x1d};
+const uint8_t kOidSha1WithRsaSignature[] = {OBJ_ENC_sha1WithRSA};
 
 // From RFC 5912:
 //
@@ -48,24 +64,21 @@ const uint8_t kOidSha1WithRsaSignature[] = {0x2b, 0x0e, 0x03, 0x02, 0x1d};
 //     sha256WithRSAEncryption  OBJECT IDENTIFIER  ::=  { pkcs-1 11 }
 //
 // In dotted notation: 1.2.840.113549.1.1.11
-const uint8_t kOidSha256WithRsaEncryption[] = {0x2a, 0x86, 0x48, 0x86, 0xf7,
-                                               0x0d, 0x01, 0x01, 0x0b};
+const uint8_t kOidSha256WithRsaEncryption[] = {OBJ_ENC_sha256WithRSAEncryption};
 
 // From RFC 5912:
 //
 //     sha384WithRSAEncryption  OBJECT IDENTIFIER  ::=  { pkcs-1 12 }
 //
 // In dotted notation: 1.2.840.113549.1.1.11
-const uint8_t kOidSha384WithRsaEncryption[] = {0x2a, 0x86, 0x48, 0x86, 0xf7,
-                                               0x0d, 0x01, 0x01, 0x0c};
+const uint8_t kOidSha384WithRsaEncryption[] = {OBJ_ENC_sha384WithRSAEncryption};
 
 // From RFC 5912:
 //
 //     sha512WithRSAEncryption  OBJECT IDENTIFIER  ::=  { pkcs-1 13 }
 //
 // In dotted notation: 1.2.840.113549.1.1.13
-const uint8_t kOidSha512WithRsaEncryption[] = {0x2a, 0x86, 0x48, 0x86, 0xf7,
-                                               0x0d, 0x01, 0x01, 0x0d};
+const uint8_t kOidSha512WithRsaEncryption[] = {OBJ_ENC_sha512WithRSAEncryption};
 
 // From RFC 5912:
 //
@@ -74,7 +87,7 @@ const uint8_t kOidSha512WithRsaEncryption[] = {0x2a, 0x86, 0x48, 0x86, 0xf7,
 //      signatures(4) 1 }
 //
 // In dotted notation: 1.2.840.10045.4.1
-const uint8_t kOidEcdsaWithSha1[] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x01};
+const uint8_t kOidEcdsaWithSha1[] = {OBJ_ENC_ecdsa_with_SHA1};
 
 // From RFC 5912:
 //
@@ -83,8 +96,7 @@ const uint8_t kOidEcdsaWithSha1[] = {0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x01};
 //      ecdsa-with-SHA2(3) 2 }
 //
 // In dotted notation: 1.2.840.10045.4.3.2
-const uint8_t kOidEcdsaWithSha256[] = {0x2a, 0x86, 0x48, 0xce,
-                                       0x3d, 0x04, 0x03, 0x02};
+const uint8_t kOidEcdsaWithSha256[] = {OBJ_ENC_ecdsa_with_SHA256};
 
 // From RFC 5912:
 //
@@ -93,8 +105,7 @@ const uint8_t kOidEcdsaWithSha256[] = {0x2a, 0x86, 0x48, 0xce,
 //      ecdsa-with-SHA2(3) 3 }
 //
 // In dotted notation: 1.2.840.10045.4.3.3
-const uint8_t kOidEcdsaWithSha384[] = {0x2a, 0x86, 0x48, 0xce,
-                                       0x3d, 0x04, 0x03, 0x03};
+const uint8_t kOidEcdsaWithSha384[] = {OBJ_ENC_ecdsa_with_SHA384};
 
 // From RFC 5912:
 //
@@ -103,47 +114,80 @@ const uint8_t kOidEcdsaWithSha384[] = {0x2a, 0x86, 0x48, 0xce,
 //      ecdsa-with-SHA2(3) 4 }
 //
 // In dotted notation: 1.2.840.10045.4.3.4
-const uint8_t kOidEcdsaWithSha512[] = {0x2a, 0x86, 0x48, 0xce,
-                                       0x3d, 0x04, 0x03, 0x04};
+const uint8_t kOidEcdsaWithSha512[] = {OBJ_ENC_ecdsa_with_SHA512};
 
 // From RFC 5912:
 //
 //     id-RSASSA-PSS  OBJECT IDENTIFIER  ::=  { pkcs-1 10 }
 //
 // In dotted notation: 1.2.840.113549.1.1.10
-const uint8_t kOidRsaSsaPss[] = {0x2a, 0x86, 0x48, 0x86, 0xf7,
-                                 0x0d, 0x01, 0x01, 0x0a};
+const uint8_t kOidRsaSsaPss[] = {OBJ_ENC_rsassaPss};
 
 // From RFC 5912:
 //
 //     id-mgf1  OBJECT IDENTIFIER  ::=  { pkcs-1 8 }
 //
 // In dotted notation: 1.2.840.113549.1.1.8
-const uint8_t kOidMgf1[] = {0x2a, 0x86, 0x48, 0x86, 0xf7,
-                            0x0d, 0x01, 0x01, 0x08};
+const uint8_t kOidMgf1[] = {OBJ_ENC_mgf1};
 
-// Returns true if |input| is empty.
-[[nodiscard]] bool IsEmpty(const der::Input& input) {
-  return input.Length() == 0;
-}
+// From RFC 9881:
+//
+//     id-ml-dsa-44 OBJECT IDENTIFIER ::= { joint-iso-itu-t(2)
+//              country(16) us(840) organization(1) gov(101) csor(3)
+//              nistAlgorithm(4) sigAlgs(3) id-ml-dsa-44(17) }
+//
+// In dotted notation: 2.16.840.1.101.3.4.3.17
+const uint8_t kOidAlgMldsa44[] = {OBJ_ENC_ML_DSA_44};
+
+// From RFC 9881:
+//
+//     id-ml-dsa-65 OBJECT IDENTIFIER ::= { joint-iso-itu-t(2)
+//              country(16) us(840) organization(1) gov(101) csor(3)
+//              nistAlgorithm(4) sigAlgs(3) id-ml-dsa-65(18) }
+//
+// In dotted notation: 2.16.840.1.101.3.4.3.18
+const uint8_t kOidAlgMldsa65[] = {OBJ_ENC_ML_DSA_65};
+
+// From RFC 9881:
+//
+//     id-ml-dsa-87 OBJECT IDENTIFIER ::= { joint-iso-itu-t(2)
+//              country(16) us(840) organization(1) gov(101) csor(3)
+//              nistAlgorithm(4) sigAlgs(3) id-ml-dsa-87(19) }
+//
+// In dotted notation: 2.16.840.1.101.3.4.3.19
+const uint8_t kOidAlgMldsa87[] = {OBJ_ENC_ML_DSA_87};
+
+// From draft-ietf-plants-merkle-tree-certs-04:
+//
+//   id-alg-mtcProof OBJECT IDENTIFIER ::= {
+//       iso(1) identified-organization(3) dod(6) internet(1) security(5)
+//       mechanisms(5) pkix(7) algorithms(6) TBD}
+//
+// Also from said draft:
+//   For initial experimentation, early implementations of this design will use
+//   the OID 1.3.6.1.4.1.44363.47.0 instead of id-alg-mtcProof.
+const uint8_t kOidAlgMtcProofDraftPlants04[] = {0x2b, 0x06, 0x01, 0x04, 0x01,
+                                                0x82, 0xda, 0x4b, 0x2f, 0x00};
 
 // Returns true if the entirety of the input is a NULL value.
-[[nodiscard]] bool IsNull(const der::Input& input) {
+[[nodiscard]] bool IsNull(der::Input input) {
   der::Parser parser(input);
   der::Input null_value;
-  if (!parser.ReadTag(der::kNull, &null_value))
+  if (!parser.ReadTag(CBS_ASN1_NULL, &null_value)) {
     return false;
+  }
 
   // NULL values are TLV encoded; the value is expected to be empty.
-  if (!IsEmpty(null_value))
+  if (!null_value.empty()) {
     return false;
+  }
 
   // By definition of this function, the entire input must be a NULL.
   return !parser.HasMore();
 }
 
-[[nodiscard]] bool IsNullOrEmpty(const der::Input& input) {
-  return IsNull(input) || IsEmpty(input);
+[[nodiscard]] bool IsNullOrEmpty(der::Input input) {
+  return IsNull(input) || input.empty();
 }
 
 // Parses a MaskGenAlgorithm as defined by RFC 5912:
@@ -172,15 +216,17 @@ const uint8_t kOidMgf1[] = {0x2a, 0x86, 0x48, 0x86, 0xf7,
 // the only function supported is MGF1, as that is the singular mask gen
 // function defined by RFC 4055 / RFC 5912.
 [[nodiscard]] bool ParseMaskGenAlgorithm(const der::Input input,
-                                         DigestAlgorithm* mgf1_hash) {
+                                         DigestAlgorithm *mgf1_hash) {
   der::Input oid;
   der::Input params;
-  if (!ParseAlgorithmIdentifier(input, &oid, &params))
+  if (!ParseAlgorithmIdentifier(input, &oid, &params)) {
     return false;
+  }
 
   // MGF1 is the only supported mask generation algorithm.
-  if (oid != der::Input(kOidMgf1))
+  if (oid != der::Input(kOidMgf1)) {
     return false;
+  }
 
   return ParseHashAlgorithm(params, mgf1_hash);
 }
@@ -211,7 +257,7 @@ const uint8_t kOidMgf1[] = {0x2a, 0x86, 0x48, 0x86, 0xf7,
 // Note also that DER encoding (ITU-T X.690 section 11.5) prohibits
 // specifying default values explicitly. The parameter should instead be
 // omitted to indicate a default value.
-std::optional<SignatureAlgorithm> ParseRsaPss(const der::Input& params) {
+std::optional<SignatureAlgorithm> ParseRsaPss(der::Input params) {
   der::Parser parser(params);
   der::Parser params_parser;
   if (!parser.ReadSequence(&params_parser)) {
@@ -238,12 +284,15 @@ std::optional<SignatureAlgorithm> ParseRsaPss(const der::Input& params) {
   DigestAlgorithm hash, mgf1_hash;
   der::Parser salt_length_parser;
   uint64_t salt_length;
-  if (!params_parser.ReadTag(der::ContextSpecificConstructed(0), &field) ||
+  if (!params_parser.ReadTag(
+          CBS_ASN1_CONTEXT_SPECIFIC | CBS_ASN1_CONSTRUCTED | 0, &field) ||
       !ParseHashAlgorithm(field, &hash) ||
-      !params_parser.ReadTag(der::ContextSpecificConstructed(1), &field) ||
+      !params_parser.ReadTag(
+          CBS_ASN1_CONTEXT_SPECIFIC | CBS_ASN1_CONSTRUCTED | 1, &field) ||
       !ParseMaskGenAlgorithm(field, &mgf1_hash) ||
-      !params_parser.ReadConstructed(der::ContextSpecificConstructed(2),
-                                     &salt_length_parser) ||
+      !params_parser.ReadConstructed(
+          CBS_ASN1_CONTEXT_SPECIFIC | CBS_ASN1_CONSTRUCTED | 2,
+          &salt_length_parser) ||
       !salt_length_parser.ReadUint64(&salt_length) ||
       salt_length_parser.HasMore() || params_parser.HasMore()) {
     return std::nullopt;
@@ -269,23 +318,26 @@ std::optional<SignatureAlgorithm> ParseRsaPss(const der::Input& params) {
 
 }  // namespace
 
-[[nodiscard]] bool ParseAlgorithmIdentifier(const der::Input& input,
-                                            der::Input* algorithm,
-                                            der::Input* parameters) {
+[[nodiscard]] bool ParseAlgorithmIdentifier(der::Input input,
+                                            der::Input *algorithm,
+                                            der::Input *parameters) {
   der::Parser parser(input);
 
   der::Parser algorithm_identifier_parser;
-  if (!parser.ReadSequence(&algorithm_identifier_parser))
+  if (!parser.ReadSequence(&algorithm_identifier_parser)) {
     return false;
+  }
 
   // There shouldn't be anything after the sequence. This is by definition,
   // as the input to this function is expected to be a single
   // AlgorithmIdentifier.
-  if (parser.HasMore())
+  if (parser.HasMore()) {
     return false;
+  }
 
-  if (!algorithm_identifier_parser.ReadTag(der::kOid, algorithm))
+  if (!algorithm_identifier_parser.ReadTag(CBS_ASN1_OBJECT, algorithm)) {
     return false;
+  }
 
   // Read the optional parameters to a der::Input. The parameters can be at
   // most one TLV (for instance NULL or a sequence).
@@ -301,11 +353,10 @@ std::optional<SignatureAlgorithm> ParseRsaPss(const der::Input& params) {
   return !algorithm_identifier_parser.HasMore();
 }
 
-[[nodiscard]] bool ParseHashAlgorithm(const der::Input& input,
-                                      DigestAlgorithm* out) {
+[[nodiscard]] bool ParseHashAlgorithm(der::Input input, DigestAlgorithm *out) {
   CBS cbs;
-  CBS_init(&cbs, input.UnsafeData(), input.Length());
-  const EVP_MD* md = EVP_parse_digest_algorithm(&cbs);
+  CBS_init(&cbs, input.data(), input.size());
+  const EVP_MD *md = EVP_parse_digest_algorithm(&cbs);
 
   if (md == EVP_sha1()) {
     *out = DigestAlgorithm::Sha1;
@@ -325,7 +376,7 @@ std::optional<SignatureAlgorithm> ParseRsaPss(const der::Input& params) {
 }
 
 std::optional<SignatureAlgorithm> ParseSignatureAlgorithm(
-    const der::Input& algorithm_identifier) {
+    der::Input algorithm_identifier) {
   der::Input oid;
   der::Input params;
   if (!ParseAlgorithmIdentifier(algorithm_identifier, &oid, &params)) {
@@ -358,21 +409,38 @@ std::optional<SignatureAlgorithm> ParseSignatureAlgorithm(
 
   // RFC 5912 requires that the parameters for ECDSA algorithms be absent
   // ("PARAMS TYPE NULL ARE absent"):
-  if (oid == der::Input(kOidEcdsaWithSha1) && IsEmpty(params)) {
+  if (oid == der::Input(kOidEcdsaWithSha1) && params.empty()) {
     return SignatureAlgorithm::kEcdsaSha1;
   }
-  if (oid == der::Input(kOidEcdsaWithSha256) && IsEmpty(params)) {
+  if (oid == der::Input(kOidEcdsaWithSha256) && params.empty()) {
     return SignatureAlgorithm::kEcdsaSha256;
   }
-  if (oid == der::Input(kOidEcdsaWithSha384) && IsEmpty(params)) {
+  if (oid == der::Input(kOidEcdsaWithSha384) && params.empty()) {
     return SignatureAlgorithm::kEcdsaSha384;
   }
-  if (oid == der::Input(kOidEcdsaWithSha512) && IsEmpty(params)) {
+  if (oid == der::Input(kOidEcdsaWithSha512) && params.empty()) {
     return SignatureAlgorithm::kEcdsaSha512;
+  }
+
+  // RFC 9881 requires that the parameters for ML-DSA algorithms be absent
+  // ("The contents of the parameters component for each algorithm MUST be
+  // absent.");
+  if (oid == der::Input(kOidAlgMldsa44) && params.empty()) {
+    return SignatureAlgorithm::kMldsa44;
+  }
+  if (oid == der::Input(kOidAlgMldsa65) && params.empty()) {
+    return SignatureAlgorithm::kMldsa65;
+  }
+  if (oid == der::Input(kOidAlgMldsa87) && params.empty()) {
+    return SignatureAlgorithm::kMldsa87;
   }
 
   if (oid == der::Input(kOidRsaSsaPss)) {
     return ParseRsaPss(params);
+  }
+
+  if (oid == der::Input(kOidAlgMtcProofDraftPlants04) && params.empty()) {
+    return SignatureAlgorithm::kMtcProofDraftPlants04;
   }
 
   // Unknown signature algorithm.
@@ -413,8 +481,16 @@ std::optional<DigestAlgorithm> GetTlsServerEndpointDigestAlgorithm(
       return DigestAlgorithm::Sha384;
     case SignatureAlgorithm::kRsaPssSha512:
       return DigestAlgorithm::Sha512;
+
+    // RFC 5929 (nor other references) does not define digests to use for these
+    // signature algorithms:
+    case SignatureAlgorithm::kMtcProofDraftPlants04:
+    case SignatureAlgorithm::kMldsa44:
+    case SignatureAlgorithm::kMldsa65:
+    case SignatureAlgorithm::kMldsa87:
+      return std::nullopt;
   }
   return std::nullopt;
 }
 
-}  // namespace net
+BSSL_NAMESPACE_END

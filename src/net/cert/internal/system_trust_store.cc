@@ -4,23 +4,9 @@
 
 #include "net/cert/internal/system_trust_store.h"
 
-#include "base/memory/ptr_util.h"
-#include "build/build_config.h"
-#include "crypto/crypto_buildflags.h"
-
-#if BUILDFLAG(USE_NSS_CERTS)
-#include "net/cert/internal/system_trust_store_nss.h"
-#endif  // BUILDFLAG(USE_NSS_CERTS)
-
-#if BUILDFLAG(USE_NSS_CERTS)
-#include <cert.h>
-#include <pk11pub.h>
-#elif BUILDFLAG(IS_MAC)
-#include <Security/Security.h>
-#endif
-
 #include <array>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "base/environment.h"
@@ -28,96 +14,218 @@
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
+#include "base/memory/ptr_util.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_split.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
+#include "base/threading/thread_restrictions.h"
 #include "build/build_config.h"
-#include "net/cert/pki/cert_errors.h"
-#include "net/cert/pki/parsed_certificate.h"
-#include "net/cert/pki/trust_store_collection.h"
-#include "net/cert/pki/trust_store_in_memory.h"
+#include "crypto/crypto_buildflags.h"
 #include "net/cert/x509_certificate.h"
 #include "net/cert/x509_util.h"
+#include "third_party/boringssl/src/pki/cert_errors.h"
+#include "third_party/boringssl/src/pki/parsed_certificate.h"
+#include "third_party/boringssl/src/pki/trust_store_collection.h"
+#include "third_party/boringssl/src/pki/trust_store_in_memory.h"
 
-#if BUILDFLAG(USE_NSS_CERTS)
-#include "crypto/nss_util.h"
+#if BUILDFLAG(USE_NSS_SERVER_CERTS)
 #include "net/cert/internal/trust_store_nss.h"
-#include "net/cert/known_roots_nss.h"
-#include "net/cert/scoped_nss_types.h"
 #elif BUILDFLAG(IS_MAC)
+#include <Security/Security.h>
+
 #include "net/base/features.h"
 #include "net/cert/internal/trust_store_mac.h"
 #include "net/cert/x509_util_apple.h"
 #elif BUILDFLAG(IS_FUCHSIA)
-#include "base/lazy_instance.h"
 #include "third_party/boringssl/src/include/openssl/pool.h"
 #elif BUILDFLAG(IS_WIN)
 #include "net/cert/internal/trust_store_win.h"
 #elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID)
 #include "base/lazy_instance.h"
 #endif
+
 #if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
 #include "net/cert/internal/trust_store_chrome.h"
 #endif  // CHROME_ROOT_STORE_SUPPORTED
 
+#if BUILDFLAG(IS_CHROMEOS)
+#include "base/system/sys_info.h"
+#endif
+
 namespace net {
+
+#if BUILDFLAG(IS_CHROMEOS)
+namespace internal {
+class PemFileCertStore {
+ public:
+  explicit PemFileCertStore(std::string_view file_name) {
+    // This will block on the cert verifier service thread, so the effect will
+    // just be to block any cert verifications (interactions with the cert
+    // verifier service are async mojo calls, so it shouldn't block the browser
+    // UI). There would be no benefit to moving this to a worker thread, since
+    // all cert verifications would still need to block on loading of the roots
+    // to complete.
+    base::ScopedAllowBlocking allow_blocking;
+    std::optional<std::vector<uint8_t>> certs_file =
+        base::ReadFileToBytes(base::FilePath(file_name));
+    if (!certs_file) {
+      return;
+    }
+
+    trust_store_ = std::make_unique<bssl::TrustStoreInMemory>();
+
+    CertificateList certs = X509Certificate::CreateCertificateListFromBytes(
+        *certs_file, X509Certificate::FORMAT_AUTO);
+
+    for (const auto& cert : certs) {
+      bssl::CertErrors errors;
+      auto parsed = bssl::ParsedCertificate::Create(
+          bssl::UpRef(cert->cert_buffer()),
+          x509_util::DefaultParseCertificateOptions(), &errors);
+      if (!parsed) {
+        LOG(ERROR) << file_name << ": " << errors.ToDebugString();
+        continue;
+      }
+      trust_store_->AddTrustAnchor(std::move(parsed));
+    }
+  }
+
+  bssl::TrustStoreInMemory* trust_store() { return trust_store_.get(); }
+
+ private:
+  std::unique_ptr<bssl::TrustStoreInMemory> trust_store_;
+};
+}  // namespace internal
 
 namespace {
 
-class DummySystemTrustStore : public SystemTrustStore {
- public:
-  TrustStore* GetTrustStore() override { return &trust_store_; }
-
-  bool UsesSystemTrustStore() const override { return false; }
-
-  bool IsKnownRoot(const ParsedCertificate* trust_anchor) const override {
-    return false;
-  }
-
-#if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
-  int64_t chrome_root_store_version() override { return 0; }
-#endif
-
- private:
-  TrustStoreCollection trust_store_;
-};
+// On ChromeOS look for a PEM file of root CA certs to trust which may be
+// present on test images.
+bssl::TrustStoreInMemory* GetChromeOSTestTrustStore() {
+  constexpr char kCrosTestRootCertsFile[] = "/etc/fake_root_ca_certs.pem";
+  static base::NoDestructor<internal::PemFileCertStore> cros_test_roots{
+      kCrosTestRootCertsFile};
+  return cros_test_roots->trust_store();
+}
 
 }  // namespace
+#endif
 
 #if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
 class SystemTrustStoreChromeWithUnOwnedSystemStore : public SystemTrustStore {
  public:
   // Creates a SystemTrustStore that gets publicly trusted roots from
-  // |trust_store_chrome| and local trust settings from |trust_store_system|.
-  // Does not take ownership of |trust_store_system|, which must outlive this
-  // object.
+  // |trust_store_chrome| and local trust settings from |trust_store_system|,
+  // if non-null. Does not take ownership of |trust_store_system|, which must
+  // outlive this object.
   explicit SystemTrustStoreChromeWithUnOwnedSystemStore(
       std::unique_ptr<TrustStoreChrome> trust_store_chrome,
-      TrustStore* trust_store_system)
-      : trust_store_chrome_(std::move(trust_store_chrome)) {
-    trust_store_collection_.AddTrustStore(trust_store_system);
+      net::PlatformTrustStore* trust_store_system)
+      : trust_store_chrome_(std::move(trust_store_chrome)),
+        platform_trust_store_(trust_store_system) {
+#if BUILDFLAG(IS_CHROMEOS)
+    if (GetChromeOSTestTrustStore()) {
+      // The fake_root_ca_certs.pem file is only intended for testing purposes,
+      // crash if it is present on a ChromeOS device in a non-test image.
+      base::SysInfo::CrashIfChromeOSNonTestImage();
+
+      trust_store_collection_.AddTrustStore(GetChromeOSTestTrustStore());
+      non_crs_trust_store_collection_.AddTrustStore(
+          GetChromeOSTestTrustStore());
+    }
+#endif
+    if (trust_store_system) {
+      trust_store_collection_.AddTrustStore(trust_store_system);
+      non_crs_trust_store_collection_.AddTrustStore(trust_store_system);
+    }
+
     trust_store_collection_.AddTrustStore(trust_store_chrome_.get());
   }
 
-  TrustStore* GetTrustStore() override { return &trust_store_collection_; }
-
-  bool UsesSystemTrustStore() const override { return true; }
+  bssl::TrustStore* GetTrustStore() override {
+    return &trust_store_collection_;
+  }
 
   // IsKnownRoot returns true if the given trust anchor is a standard one (as
   // opposed to a user-installed root)
-  bool IsKnownRoot(const ParsedCertificate* trust_anchor) const override {
+  bool IsKnownRoot(const bssl::ParsedCertificate* trust_anchor) const override {
     return trust_store_chrome_->Contains(trust_anchor);
   }
 
-  int64_t chrome_root_store_version() override {
+  bool IsKnownMtcAnchor(const bssl::MTCAnchor* anchor) const override {
+    return trust_store_chrome_->ContainsMTCAnchor(anchor);
+  }
+
+  bool IsLocallyTrustedRoot(
+      const bssl::ParsedCertificate* trust_anchor) override {
+    return non_crs_trust_store_collection_.GetTrust(trust_anchor)
+        .IsTrustAnchor();
+  }
+
+  int64_t chrome_root_store_version() const override {
     return trust_store_chrome_->version();
+  }
+
+  std::optional<base::Time> signer_set_timestamp() const override {
+    return trust_store_chrome_->signer_set_timestamp();
+  }
+
+  std::optional<base::Time> mtc_metadata_update_time() const override {
+    return trust_store_chrome_->mtc_metadata_update_time();
+  }
+
+  base::span<const ChromeRootCertConstraints> GetChromeRootConstraints(
+      const bssl::CertPathBuilderResultPath* path) const override {
+    return trust_store_chrome_->GetConstraintsForCert(path);
+  }
+
+  const TrustStoreChrome::MtcAnchorExtraData* GetMTCAnchorData(
+      base::span<const uint8_t> ca_id) const override {
+    return trust_store_chrome_->GetMTCAnchorData(ca_id);
+  }
+
+  std::optional<bssl::VerifyCertificateChainDelegate::MTCCosigner>
+  GetMtcMirrorKey(base::span<const uint8_t> cosigner_id) const override {
+    return trust_store_chrome_->GetMtcMirrorKey(cosigner_id);
+  }
+
+  bool IsMtcCosignerPolicySatisfied(
+      const bssl::ParsedCertificate& target_cert,
+      base::Time current_time,
+      const bssl::MTCAnchor* mtc_anchor,
+      base::span<const std::vector<uint8_t>> valid_additional_cosigners,
+      const NetLogWithSource& net_log) const override {
+    return trust_store_chrome_->IsMtcCosignerPolicySatisfied(
+        target_cert, current_time, mtc_anchor, valid_additional_cosigners,
+        net_log);
+  }
+
+  std::optional<int32_t> GetCrsRootIdForCert(
+      const bssl::CertPathBuilderResultPath* path) const override {
+    return trust_store_chrome_->GetCrsRootIdForCert(path);
+  }
+
+  bssl::TrustStore* eutl_trust_store() override {
+    return trust_store_chrome_->eutl_trust_store();
+  }
+
+  net::PlatformTrustStore* GetPlatformTrustStore() override {
+    return platform_trust_store_;
   }
 
  private:
   std::unique_ptr<TrustStoreChrome> trust_store_chrome_;
-  TrustStoreCollection trust_store_collection_;
+  bssl::TrustStoreCollection trust_store_collection_;
+  bssl::TrustStoreCollection non_crs_trust_store_collection_;
+  net::PlatformTrustStore* platform_trust_store_;
 };
+
+std::unique_ptr<SystemTrustStore> CreateChromeOnlySystemTrustStore(
+    std::unique_ptr<TrustStoreChrome> chrome_root) {
+  return std::make_unique<SystemTrustStoreChromeWithUnOwnedSystemStore>(
+      std::move(chrome_root), /*trust_store_system=*/nullptr);
+}
 
 class SystemTrustStoreChrome
     : public SystemTrustStoreChromeWithUnOwnedSystemStore {
@@ -126,109 +234,33 @@ class SystemTrustStoreChrome
   // |trust_store_chrome| and local trust settings from |trust_store_system|.
   explicit SystemTrustStoreChrome(
       std::unique_ptr<TrustStoreChrome> trust_store_chrome,
-      std::unique_ptr<TrustStore> trust_store_system)
+      std::unique_ptr<net::PlatformTrustStore> trust_store_system)
       : SystemTrustStoreChromeWithUnOwnedSystemStore(
             std::move(trust_store_chrome),
             trust_store_system.get()),
         trust_store_system_(std::move(trust_store_system)) {}
 
  private:
-  std::unique_ptr<TrustStore> trust_store_system_;
+  std::unique_ptr<net::PlatformTrustStore> trust_store_system_;
 };
 
 std::unique_ptr<SystemTrustStore> CreateSystemTrustStoreChromeForTesting(
     std::unique_ptr<TrustStoreChrome> trust_store_chrome,
-    std::unique_ptr<TrustStore> trust_store_system) {
+    std::unique_ptr<net::PlatformTrustStore> trust_store_system) {
   return std::make_unique<SystemTrustStoreChrome>(
       std::move(trust_store_chrome), std::move(trust_store_system));
 }
 #endif  // CHROME_ROOT_STORE_SUPPORTED
 
-#if BUILDFLAG(USE_NSS_CERTS)
-namespace {
+#if BUILDFLAG(USE_NSS_SERVER_CERTS)
 
-class SystemTrustStoreNSS : public SystemTrustStore {
- public:
-  explicit SystemTrustStoreNSS(std::unique_ptr<TrustStoreNSS> trust_store_nss)
-      : trust_store_nss_(std::move(trust_store_nss)) {}
-
-  TrustStore* GetTrustStore() override { return trust_store_nss_.get(); }
-
-  bool UsesSystemTrustStore() const override { return true; }
-
-  // IsKnownRoot returns true if the given trust anchor is a standard one (as
-  // opposed to a user-installed root)
-  bool IsKnownRoot(const ParsedCertificate* trust_anchor) const override {
-    // TODO(eroman): The overall approach of IsKnownRoot() is inefficient -- it
-    // requires searching for the trust anchor by DER in NSS, however path
-    // building already had a handle to it.
-    SECItem der_cert;
-    der_cert.data = const_cast<uint8_t*>(trust_anchor->der_cert().UnsafeData());
-    der_cert.len = trust_anchor->der_cert().Length();
-    der_cert.type = siDERCertBuffer;
-    ScopedCERTCertificate nss_cert(
-        CERT_FindCertByDERCert(CERT_GetDefaultCertDB(), &der_cert));
-    if (!nss_cert)
-      return false;
-
-    if (!net::IsKnownRoot(nss_cert.get()))
-      return false;
-
-    return trust_anchor->der_cert() ==
-           der::Input(nss_cert->derCert.data, nss_cert->derCert.len);
-  }
-
-#if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
-  int64_t chrome_root_store_version() override { return 0; }
-#endif
-
- private:
-  std::unique_ptr<TrustStoreNSS> trust_store_nss_;
-};
-
-}  // namespace
-
-std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStore() {
-  return std::make_unique<SystemTrustStoreNSS>(std::make_unique<TrustStoreNSS>(
-      TrustStoreNSS::kUseSystemTrust,
-      TrustStoreNSS::UseTrustFromAllUserSlots()));
-}
-
-#if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
 std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStoreChromeRoot(
     std::unique_ptr<TrustStoreChrome> chrome_root) {
   return std::make_unique<SystemTrustStoreChrome>(
-      std::move(chrome_root), std::make_unique<TrustStoreNSS>(
-                                  TrustStoreNSS::kIgnoreSystemTrust,
-                                  TrustStoreNSS::UseTrustFromAllUserSlots()));
-}
-
-std::unique_ptr<SystemTrustStore>
-CreateSslSystemTrustStoreChromeRootWithUserSlotRestriction(
-    std::unique_ptr<TrustStoreChrome> chrome_root,
-    crypto::ScopedPK11Slot user_slot_restriction) {
-  return std::make_unique<SystemTrustStoreChrome>(
-      std::move(chrome_root),
-      std::make_unique<TrustStoreNSS>(TrustStoreNSS::kIgnoreSystemTrust,
-                                      std::move(user_slot_restriction)));
-}
-
-#endif  // CHROME_ROOT_STORE_SUPPORTED
-
-std::unique_ptr<SystemTrustStore>
-CreateSslSystemTrustStoreNSSWithUserSlotRestriction(
-    crypto::ScopedPK11Slot user_slot_restriction) {
-  return std::make_unique<SystemTrustStoreNSS>(std::make_unique<TrustStoreNSS>(
-      TrustStoreNSS::kUseSystemTrust, std::move(user_slot_restriction)));
+      std::move(chrome_root), std::make_unique<TrustStoreNSS>());
 }
 
 #elif BUILDFLAG(IS_MAC)
-
-// Using the Builtin Verifier w/o the Chrome Root Store is unsupported on
-// Mac.
-std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStore() {
-  return std::make_unique<DummySystemTrustStore>();
-}
 
 namespace {
 
@@ -276,12 +308,11 @@ class FuchsiaSystemCerts {
     }
 
     CertificateList certs = X509Certificate::CreateCertificateListFromBytes(
-        base::as_bytes(base::make_span(certs_file)),
-        X509Certificate::FORMAT_AUTO);
+        base::as_byte_span(certs_file), X509Certificate::FORMAT_AUTO);
 
     for (const auto& cert : certs) {
-      CertErrors errors;
-      auto parsed = ParsedCertificate::Create(
+      bssl::CertErrors errors;
+      auto parsed = bssl::ParsedCertificate::Create(
           bssl::UpRef(cert->cert_buffer()),
           x509_util::DefaultParseCertificateOptions(), &errors);
       CHECK(parsed) << errors.ToDebugString();
@@ -289,14 +320,18 @@ class FuchsiaSystemCerts {
     }
   }
 
-  TrustStoreInMemory* system_trust_store() { return &system_trust_store_; }
+  bssl::TrustStoreInMemory* system_trust_store() {
+    return &system_trust_store_;
+  }
 
  private:
-  TrustStoreInMemory system_trust_store_;
+  bssl::TrustStoreInMemory system_trust_store_;
 };
 
-base::LazyInstance<FuchsiaSystemCerts>::Leaky g_root_certs_fuchsia =
-    LAZY_INSTANCE_INITIALIZER;
+FuchsiaSystemCerts& GetFuchsiaRootCerts() {
+  static base::NoDestructor<FuchsiaSystemCerts> certs;
+  return *certs;
+}
 
 }  // namespace
 
@@ -304,15 +339,16 @@ class SystemTrustStoreFuchsia : public SystemTrustStore {
  public:
   SystemTrustStoreFuchsia() = default;
 
-  TrustStore* GetTrustStore() override {
-    return g_root_certs_fuchsia.Get().system_trust_store();
+  bssl::TrustStore* GetTrustStore() override {
+    return GetFuchsiaRootCerts().system_trust_store();
   }
 
-  bool UsesSystemTrustStore() const override { return true; }
+  bool IsKnownRoot(const bssl::ParsedCertificate* trust_anchor) const override {
+    return GetFuchsiaRootCerts().system_trust_store()->Contains(trust_anchor);
+  }
 
-  bool IsKnownRoot(const ParsedCertificate* trust_anchor) const override {
-    return g_root_certs_fuchsia.Get().system_trust_store()->Contains(
-        trust_anchor);
+  bool IsKnownMtcAnchor(const bssl::MTCAnchor* anchor) const override {
+    return false;
   }
 };
 
@@ -353,21 +389,16 @@ constexpr char kStaticCertFileEnv[] = "SSL_CERT_FILE";
 // See https://www.openssl.org/docs/man1.0.2/man1/c_rehash.html.
 constexpr char kStaticCertDirsEnv[] = "SSL_CERT_DIR";
 
-class StaticUnixSystemCerts {
+class TrustStoreUnix : public PlatformTrustStore {
  public:
-  StaticUnixSystemCerts() : system_trust_store_(Create()) {}
-
-  TrustStoreInMemory* system_trust_store() { return system_trust_store_.get(); }
-
-  static std::unique_ptr<TrustStoreInMemory> Create() {
-    auto ptr = std::make_unique<TrustStoreInMemory>();
+  TrustStoreUnix() {
     auto env = base::Environment::Create();
-    std::string env_value;
-
+    std::optional<std::string> env_value;
     std::vector<std::string> cert_filenames(kStaticRootCertFiles.begin(),
                                             kStaticRootCertFiles.end());
-    if (env->GetVar(kStaticCertFileEnv, &env_value) && !env_value.empty()) {
-      cert_filenames = {env_value};
+    env_value = env->GetVar(kStaticCertFileEnv);
+    if (env_value.has_value() && !env_value->empty()) {
+      cert_filenames = {*env_value};
     }
 
     bool cert_file_ok = false;
@@ -375,7 +406,7 @@ class StaticUnixSystemCerts {
       std::string file;
       if (!base::ReadFileToString(base::FilePath(filename), &file))
         continue;
-      if (AddCertificatesFromBytes(file.data(), file.size(), ptr.get())) {
+      if (AddCertificatesFromBytes(file, trust_store_)) {
         cert_file_ok = true;
         break;
       }
@@ -383,8 +414,9 @@ class StaticUnixSystemCerts {
 
     std::vector<std::string> cert_dirnames(kStaticRootCertDirs.begin(),
                                            kStaticRootCertDirs.end());
-    if (env->GetVar(kStaticCertDirsEnv, &env_value) && !env_value.empty()) {
-      cert_dirnames = base::SplitString(env_value, ":", base::TRIM_WHITESPACE,
+    env_value = env->GetVar(kStaticCertDirsEnv);
+    if (env_value.has_value() && !env_value->empty()) {
+      cert_dirnames = base::SplitString(*env_value, ":", base::TRIM_WHITESPACE,
                                         base::SPLIT_WANT_NONEMPTY);
     }
 
@@ -397,7 +429,7 @@ class StaticUnixSystemCerts {
         if (!base::ReadFileToString(filename, &file)) {
           continue;
         }
-        if (AddCertificatesFromBytes(file.data(), file.size(), ptr.get())) {
+        if (AddCertificatesFromBytes(file, trust_store_)) {
           cert_dir_ok = true;
         }
       }
@@ -409,26 +441,43 @@ class StaticUnixSystemCerts {
       LOG(ERROR) << "No CA certificates were found. Try using environment "
                     "variable SSL_CERT_FILE or SSL_CERT_DIR";
     }
+  }
 
-    return ptr;
+  TrustStoreUnix(const TrustStoreUnix&) = delete;
+  TrustStoreUnix& operator=(const TrustStoreUnix&) = delete;
+
+  // bssl::CertIssuerSource implementation:
+  void SyncGetIssuersOf(const bssl::ParsedCertificate* cert,
+                        bssl::ParsedCertificateList* issuers) override {
+    trust_store_.SyncGetIssuersOf(cert, issuers);
+  }
+
+  // bssl::TrustStore implementation:
+  bssl::CertificateTrust GetTrust(
+      const bssl::ParsedCertificate* cert) override {
+    return trust_store_.GetTrust(cert);
+  }
+
+  // net::PlatformTrustStore implementation:
+  std::vector<net::PlatformTrustStore::CertWithTrust> GetAllUserAddedCerts()
+      override {
+    return {};
   }
 
  private:
-  static bool AddCertificatesFromBytes(const char* data,
-                                       size_t length,
-                                       TrustStoreInMemory* store) {
+  static bool AddCertificatesFromBytes(std::string_view data,
+                                       bssl::TrustStoreInMemory& store) {
     auto certs = X509Certificate::CreateCertificateListFromBytes(
-        {reinterpret_cast<const uint8_t*>(data), length},
-        X509Certificate::FORMAT_AUTO);
+        base::as_bytes(base::span(data)), X509Certificate::FORMAT_AUTO);
     bool certs_ok = false;
     for (const auto& cert : certs) {
-      CertErrors errors;
-      auto parsed = ParsedCertificate::Create(
+      bssl::CertErrors errors;
+      auto parsed = bssl::ParsedCertificate::Create(
           bssl::UpRef(cert->cert_buffer()),
           x509_util::DefaultParseCertificateOptions(), &errors);
       if (parsed) {
-        if (!store->Contains(parsed.get())) {
-          store->AddTrustAnchor(parsed);
+        if (!store.Contains(parsed.get())) {
+          store.AddTrustAnchor(parsed);
         }
         certs_ok = true;
       } else {
@@ -438,61 +487,18 @@ class StaticUnixSystemCerts {
     return certs_ok;
   }
 
-  std::unique_ptr<TrustStoreInMemory> system_trust_store_;
+  bssl::TrustStoreInMemory trust_store_;
 };
-
-base::LazyInstance<StaticUnixSystemCerts>::Leaky g_root_certs_static_unix =
-    LAZY_INSTANCE_INITIALIZER;
 
 }  // namespace
-
-class SystemTrustStoreStaticUnix : public SystemTrustStore {
- public:
-  SystemTrustStoreStaticUnix() = default;
-
-  TrustStore* GetTrustStore() override {
-    return g_root_certs_static_unix.Get().system_trust_store();
-  }
-
-  bool UsesSystemTrustStore() const override { return true; }
-
-  bool IsKnownRoot(const ParsedCertificate* trust_anchor) const override {
-    return g_root_certs_static_unix.Get().system_trust_store()->Contains(
-        trust_anchor);
-  }
-
-#if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
-  int64_t chrome_root_store_version() override { return 0; }
-#endif
-};
-
-std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStore() {
-  return std::make_unique<SystemTrustStoreStaticUnix>();
-}
-
-#if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
 
 std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStoreChromeRoot(
     std::unique_ptr<TrustStoreChrome> chrome_root) {
   return std::make_unique<SystemTrustStoreChrome>(
-      std::move(chrome_root), StaticUnixSystemCerts::Create());
+      std::move(chrome_root), std::make_unique<TrustStoreUnix>());
 }
-
-#else
-
-std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStoreChromeRoot() {
-  return std::make_unique<DummySystemTrustStore>();
-}
-
-#endif  // CHROME_ROOT_STORE_SUPPORTED
 
 #elif BUILDFLAG(IS_WIN)
-
-// Using the Builtin Verifier w/o the Chrome Root Store is unsupported on
-// Windows.
-std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStore() {
-  return std::make_unique<DummySystemTrustStore>();
-}
 
 namespace {
 TrustStoreWin* GetGlobalTrustStoreWinForCRS() {
@@ -522,12 +528,6 @@ void InitializeTrustStoreWinSystem() {
 
 #elif BUILDFLAG(IS_ANDROID)
 
-// Using the Builtin Verifier w/o the Chrome Root Store is unsupported on
-// Android.
-std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStore() {
-  return std::make_unique<DummySystemTrustStore>();
-}
-
 #if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
 
 namespace {
@@ -555,6 +555,12 @@ void InitializeTrustStoreAndroid() {
   // ObserveCertDBChanges on the singleton TrustStoreAndroid.
   GetGlobalTrustStoreAndroidForCRS()->ObserveCertDBChanges();
 
+  static bool initialized = false;
+  if (initialized) {
+    return;
+  }
+
+  initialized = true;
   base::ThreadPool::PostTask(
       FROM_HERE,
       {base::MayBlock(), base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
@@ -567,16 +573,6 @@ void InitializeTrustStoreAndroid() {}
 
 #endif  // CHROME_ROOT_STORE_SUPPORTED
 
-#else
-
-std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStore() {
-  return std::make_unique<DummySystemTrustStore>();
-}
-
 #endif
-
-std::unique_ptr<SystemTrustStore> CreateEmptySystemTrustStore() {
-  return std::make_unique<DummySystemTrustStore>();
-}
 
 }  // namespace net

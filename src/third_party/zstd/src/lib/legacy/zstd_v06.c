@@ -14,6 +14,7 @@
 #include <stddef.h>    /* size_t, ptrdiff_t */
 #include <string.h>    /* memcpy */
 #include <stdlib.h>    /* malloc, free, qsort */
+#include "../common/compiler.h"
 #include "../common/error_private.h"
 
 
@@ -551,9 +552,9 @@ typedef struct {
     U32  cachedLitLength;
     const BYTE* cachedLiterals;
     ZSTDv06_stats_t stats;
-} seqStore_t;
+} SeqStore_t;
 
-void ZSTDv06_seqToCodes(const seqStore_t* seqStorePtr, size_t const nbSeq);
+void ZSTDv06_seqToCodes(const SeqStore_t* seqStorePtr, size_t const nbSeq);
 
 
 #endif   /* ZSTDv06_CCOMMON_H_MODULE */
@@ -1201,7 +1202,7 @@ static unsigned HUFv06_isError(size_t code) { return ERR_isError(code); }
 /*-**************************************************************
 *  FSE NCount encoding-decoding
 ****************************************************************/
-static short FSEv06_abs(short a) { return a<0 ? -a : a; }
+static short FSEv06_abs(short a) { return a<0 ? (short)-a : a; }
 
 size_t FSEv06_readNCount (short* normalizedCounter, unsigned* maxSVPtr, unsigned* tableLogPtr,
                  const void* headerBuffer, size_t hbSize)
@@ -3736,6 +3737,7 @@ size_t ZSTDv06_decompressContinue(ZSTDv06_DCtx* dctx, void* dst, size_t dstCapac
             }
             dctx->stage = ZSTDds_decodeBlockHeader;
             dctx->expected = ZSTDv06_blockHeaderSize;
+            if (ZSTDv06_isError(rSize)) return rSize;
             dctx->previousDstEnd = (char*)dst + rSize;
             return rSize;
         }
@@ -3917,6 +3919,10 @@ ZBUFFv06_DCtx* ZBUFFv06_createDCtx(void)
     if (zbd==NULL) return NULL;
     memset(zbd, 0, sizeof(*zbd));
     zbd->zd = ZSTDv06_createDCtx();
+    if (zbd->zd==NULL) {
+        ZBUFFv06_freeDCtx(zbd); /* avoid leaking the context */
+        return NULL;
+    }
     zbd->stage = ZBUFFds_init;
     return zbd;
 }

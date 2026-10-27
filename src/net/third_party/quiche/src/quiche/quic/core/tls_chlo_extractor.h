@@ -7,17 +7,19 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "absl/types/span.h"
 #include "openssl/ssl.h"
 #include "quiche/quic/core/frames/quic_ack_frequency_frame.h"
+#include "quiche/quic/core/frames/quic_immediate_ack_frame.h"
+#include "quiche/quic/core/frames/quic_reset_stream_at_frame.h"
 #include "quiche/quic/core/quic_framer.h"
 #include "quiche/quic/core/quic_packets.h"
 #include "quiche/quic/core/quic_stream_sequencer.h"
 #include "quiche/quic/core/quic_types.h"
-#include "quiche/quic/platform/api/quic_export.h"
 
 namespace quic {
 
@@ -53,6 +55,12 @@ class QUICHE_EXPORT TlsChloExtractor
   const std::vector<uint16_t>& supported_groups() const {
     return supported_groups_;
   }
+  const std::vector<uint16_t>& cert_compression_algos() const {
+    return cert_compression_algos_;
+  }
+  absl::Span<const uint8_t> transport_params() const {
+    return transport_params_;
+  }
   absl::Span<const uint8_t> client_hello_bytes() const {
     return client_hello_bytes_;
   }
@@ -62,7 +70,18 @@ class QUICHE_EXPORT TlsChloExtractor
 
   // Ingests |packet| and attempts to parse out the CHLO.
   void IngestPacket(const ParsedQuicVersion& version,
-                    const QuicReceivedPacket& packet);
+                    const QuicReceivedPacket& packet) {
+    IngestPacket(version, packet, QuicPacketNumber());
+  }
+
+  // Ingests |packet| and attempts to parse out the CHLO.
+  // |dispatcher_largest_packet_number_sent| is the largest packet number the
+  // dispatcher has sent. It is used to validate ACKs in the client's initial
+  // packet. If the client acks a packet that has an invalid ack, then
+  // has_invalid_ack_ will be set to true.
+  void IngestPacket(const ParsedQuicVersion& version,
+                    const QuicReceivedPacket& packet,
+                    QuicPacketNumber dispatcher_largest_packet_number_sent);
 
   // Returns whether the ingested packets have allowed parsing a complete CHLO.
   bool HasParsedFullChlo() const {
@@ -71,14 +90,14 @@ class QUICHE_EXPORT TlsChloExtractor
   }
 
   // Returns the TLS alert that caused the unrecoverable error, if any.
-  absl::optional<uint8_t> tls_alert() const {
+  std::optional<uint8_t> tls_alert() const {
     QUICHE_DCHECK(!tls_alert_.has_value() ||
                   state_ == State::kUnrecoverableFailure);
     return tls_alert_;
   }
 
   // Methods from QuicFramerVisitorInterface.
-  void OnError(QuicFramer* /*framer*/) override {}
+  void OnError(QuicFramer* framer) override;
   bool OnProtocolVersionMismatch(ParsedQuicVersion version) override;
   void OnPacket() override {}
   void OnVersionNegotiationPacket(
@@ -103,10 +122,8 @@ class QUICHE_EXPORT TlsChloExtractor
                              bool /*has_decryption_key*/) override {}
   bool OnStreamFrame(const QuicStreamFrame& /*frame*/) override { return true; }
   bool OnCryptoFrame(const QuicCryptoFrame& frame) override;
-  bool OnAckFrameStart(QuicPacketNumber /*largest_acked*/,
-                       QuicTime::Delta /*ack_delay_time*/) override {
-    return true;
-  }
+  bool OnAckFrameStart(QuicPacketNumber largest_acked,
+                       QuicTime::Delta /*ack_delay_time*/) override;
   bool OnAckRange(QuicPacketNumber /*start*/,
                   QuicPacketNumber /*end*/) override {
     return true;
@@ -117,7 +134,7 @@ class QUICHE_EXPORT TlsChloExtractor
   }
   bool OnAckFrameEnd(
       QuicPacketNumber /*start*/,
-      const absl::optional<QuicEcnCounts>& /*ecn_counts*/) override {
+      const std::optional<QuicEcnCounts>& /*ecn_counts*/) override {
     return true;
   }
   bool OnStopWaitingFrame(const QuicStopWaitingFrame& /*frame*/) override {
@@ -168,7 +185,7 @@ class QUICHE_EXPORT TlsChloExtractor
   bool OnPaddingFrame(const QuicPaddingFrame& /*frame*/) override {
     return true;
   }
-  bool OnMessageFrame(const QuicMessageFrame& /*frame*/) override {
+  bool OnDatagramFrame(const QuicDatagramFrame& /*frame*/) override {
     return true;
   }
   bool OnHandshakeDoneFrame(const QuicHandshakeDoneFrame& /*frame*/) override {
@@ -177,15 +194,21 @@ class QUICHE_EXPORT TlsChloExtractor
   bool OnAckFrequencyFrame(const QuicAckFrequencyFrame& /*frame*/) override {
     return true;
   }
+  bool OnImmediateAckFrame(const QuicImmediateAckFrame& /*frame*/) override {
+    return true;
+  }
+  bool OnResetStreamAtFrame(const QuicResetStreamAtFrame& /*frame*/) override {
+    return true;
+  }
   void OnPacketComplete() override {}
   bool IsValidStatelessResetToken(
       const StatelessResetToken& /*token*/) const override {
     return true;
   }
-  void OnAuthenticatedIetfStatelessResetPacket(
-      const QuicIetfStatelessResetPacket& /*packet*/) override {}
+  void OnAuthenticatedIetfStatelessResetPacket() override {}
   void OnKeyUpdate(KeyUpdateReason /*reason*/) override {}
   void OnDecryptedFirstPacketInKeyPhase() override {}
+  void OnSconePacket(uint8_t /*signal*/) override {}
   std::unique_ptr<QuicDecrypter> AdvanceKeysAndCreateCurrentOneRttDecrypter()
       override {
     return nullptr;
@@ -206,6 +229,7 @@ class QUICHE_EXPORT TlsChloExtractor
                             const std::string& details) override;
   QuicStreamId id() const override { return 0; }
   ParsedQuicVersion version() const override { return framer_->version(); }
+  bool has_invalid_ack() const { return has_invalid_ack_; }
 
  private:
   // Parses the length of the CHLO message by looking at the first four bytes.
@@ -259,6 +283,9 @@ class QUICHE_EXPORT TlsChloExtractor
   bool parsed_crypto_frame_in_this_packet_;
   // Array of NamedGroups parsed from the CHLO's supported_groups extension.
   std::vector<uint16_t> supported_groups_;
+  // Array of cert compression algos parsed from the CHLO's
+  // compress_certificate extension.
+  std::vector<uint16_t> cert_compression_algos_;
   // Array of ALPNs parsed from the CHLO.
   std::vector<std::string> alpns_;
   // SNI parsed from the CHLO.
@@ -271,9 +298,15 @@ class QUICHE_EXPORT TlsChloExtractor
   bool early_data_attempted_ = false;
   // If set, contains the TLS alert that caused an unrecoverable error, which is
   // an AlertDescription value defined in go/rfc/8446#appendix-B.2.
-  absl::optional<uint8_t> tls_alert_;
+  std::optional<uint8_t> tls_alert_;
+  // QUIC Transport Parameters, if present in the CHLO.
+  // Not populated for draft29.
+  std::vector<uint8_t> transport_params_;
   // Exact TLS message bytes.
   std::vector<uint8_t> client_hello_bytes_;
+  QuicPacketNumber dispatcher_largest_packet_number_sent_;
+  // Whether the packet has an invalid ack.
+  bool has_invalid_ack_ = false;
 };
 
 // Convenience method to facilitate logging TlsChloExtractor::State.

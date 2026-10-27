@@ -41,7 +41,7 @@ namespace base {
 // `observer.h`:
 //   class Observer {
 //    public:
-//     virtual ~Observer() {}
+//     virtual ~Observer() = default;
 //
 //     virtual void OnEvent() {}
 //   };
@@ -92,9 +92,18 @@ namespace base {
 // see `base/scoped_observation_traits.h` for details.
 //
 
-template <class Source, class Observer>
+// TODO(crbug.com/493572976): the source_ptr_trait default will be removed once
+// all dangling instances have been fixed.
+template <class Source,
+          class Observer,
+          RawPtrTraits source_ptr_trait = RawPtrTraits::kEmpty>
 class ScopedObservation {
  public:
+  // Used to mark the observation as dangling untriaged.
+  // TODO(crbug.com/493572976): remove once no observation is dangling.
+  using LeakedDanglingUntriaged =
+      ScopedObservation<Source, Observer, LeakedDanglingUntriaged>;
+
   explicit ScopedObservation(Observer* observer) : observer_(observer) {}
   ScopedObservation(const ScopedObservation&) = delete;
   ScopedObservation& operator=(const ScopedObservation&) = delete;
@@ -125,6 +134,10 @@ class ScopedObservation {
     return source_ == source;
   }
 
+  // Gets a pointer to the observer that observes the source.
+  Observer* GetObserver() { return observer_; }
+  const Observer* GetObserver() const { return observer_; }
+
   // Gets a pointer to the observed source, or nullptr if no source is being
   // observed.
   Source* GetSource() { return source_; }
@@ -133,10 +146,10 @@ class ScopedObservation {
  private:
   using Traits = ScopedObservationTraits<Source, Observer>;
 
-  const raw_ptr<Observer, DanglingUntriaged> observer_;
+  const raw_ptr<Observer> observer_;
 
   // The observed source, if any.
-  raw_ptr<Source, LeakedDanglingUntriaged> source_ = nullptr;
+  raw_ptr<Source, source_ptr_trait> source_ = nullptr;
 };
 
 }  // namespace base

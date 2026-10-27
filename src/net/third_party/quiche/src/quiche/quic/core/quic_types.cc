@@ -5,6 +5,9 @@
 #include "quiche/quic/core/quic_types.h"
 
 #include <cstdint>
+#include <ostream>
+#include <string>
+#include <type_traits>
 
 #include "absl/strings/str_cat.h"
 #include "quiche/quic/core/quic_error_codes.h"
@@ -125,8 +128,9 @@ std::ostream& operator<<(std::ostream& os, const WriteResult& s) {
   return os;
 }
 
-MessageResult::MessageResult(MessageStatus status, QuicMessageId message_id)
-    : status(status), message_id(message_id) {}
+DatagramResult::DatagramResult(DatagramStatus status,
+                               QuicDatagramId datagram_id)
+    : status(status), datagram_id(datagram_id) {}
 
 #define RETURN_STRING_LITERAL(x) \
   case x:                        \
@@ -153,10 +157,12 @@ std::string QuicFrameTypeToString(QuicFrameType t) {
     RETURN_STRING_LITERAL(PATH_RESPONSE_FRAME)
     RETURN_STRING_LITERAL(PATH_CHALLENGE_FRAME)
     RETURN_STRING_LITERAL(STOP_SENDING_FRAME)
-    RETURN_STRING_LITERAL(MESSAGE_FRAME)
+    RETURN_STRING_LITERAL(DATAGRAM_FRAME)
     RETURN_STRING_LITERAL(NEW_TOKEN_FRAME)
     RETURN_STRING_LITERAL(RETIRE_CONNECTION_ID_FRAME)
     RETURN_STRING_LITERAL(ACK_FREQUENCY_FRAME)
+    RETURN_STRING_LITERAL(IMMEDIATE_ACK_FRAME)
+    RETURN_STRING_LITERAL(RESET_STREAM_AT_FRAME)
     RETURN_STRING_LITERAL(NUM_FRAME_TYPES)
   }
   return absl::StrCat("Unknown(", static_cast<int>(t), ")");
@@ -195,10 +201,10 @@ std::string QuicIetfFrameTypeString(QuicIetfFrameType t) {
     RETURN_STRING_LITERAL(IETF_PATH_RESPONSE);
     RETURN_STRING_LITERAL(IETF_CONNECTION_CLOSE);
     RETURN_STRING_LITERAL(IETF_APPLICATION_CLOSE);
-    RETURN_STRING_LITERAL(IETF_EXTENSION_MESSAGE_NO_LENGTH);
-    RETURN_STRING_LITERAL(IETF_EXTENSION_MESSAGE);
-    RETURN_STRING_LITERAL(IETF_EXTENSION_MESSAGE_NO_LENGTH_V99);
-    RETURN_STRING_LITERAL(IETF_EXTENSION_MESSAGE_V99);
+    RETURN_STRING_LITERAL(IETF_EXTENSION_DATAGRAM_NO_LENGTH);
+    RETURN_STRING_LITERAL(IETF_EXTENSION_DATAGRAM);
+    RETURN_STRING_LITERAL(IETF_EXTENSION_DATAGRAM_NO_LENGTH_V99);
+    RETURN_STRING_LITERAL(IETF_EXTENSION_DATAGRAM_V99);
     default:
       return absl::StrCat("Private value (", t, ")");
   }
@@ -235,7 +241,7 @@ std::string PacketHeaderFormatToString(PacketHeaderFormat format) {
   switch (format) {
     RETURN_STRING_LITERAL(IETF_QUIC_LONG_HEADER_PACKET);
     RETURN_STRING_LITERAL(IETF_QUIC_SHORT_HEADER_PACKET);
-    RETURN_STRING_LITERAL(GOOGLE_QUIC_PACKET);
+    RETURN_STRING_LITERAL(GOOGLE_QUIC_Q043_PACKET);
     default:
       return absl::StrCat("Unknown (", static_cast<int>(format), ")");
   }
@@ -254,29 +260,31 @@ std::string QuicLongHeaderTypeToString(QuicLongHeaderType type) {
   }
 }
 
-std::string MessageStatusToString(MessageStatus message_status) {
+std::string DatagramStatusToString(DatagramStatus message_status) {
   switch (message_status) {
-    RETURN_STRING_LITERAL(MESSAGE_STATUS_SUCCESS);
-    RETURN_STRING_LITERAL(MESSAGE_STATUS_ENCRYPTION_NOT_ESTABLISHED);
-    RETURN_STRING_LITERAL(MESSAGE_STATUS_UNSUPPORTED);
-    RETURN_STRING_LITERAL(MESSAGE_STATUS_BLOCKED);
-    RETURN_STRING_LITERAL(MESSAGE_STATUS_TOO_LARGE);
-    RETURN_STRING_LITERAL(MESSAGE_STATUS_INTERNAL_ERROR);
+    RETURN_STRING_LITERAL(DATAGRAM_STATUS_SUCCESS);
+    RETURN_STRING_LITERAL(DATAGRAM_STATUS_ENCRYPTION_NOT_ESTABLISHED);
+    RETURN_STRING_LITERAL(DATAGRAM_STATUS_UNSUPPORTED);
+    RETURN_STRING_LITERAL(DATAGRAM_STATUS_BLOCKED);
+    RETURN_STRING_LITERAL(DATAGRAM_STATUS_TOO_LARGE);
+    RETURN_STRING_LITERAL(DATAGRAM_STATUS_SETTINGS_NOT_RECEIVED);
+    RETURN_STRING_LITERAL(DATAGRAM_STATUS_INTERNAL_ERROR);
     default:
       return absl::StrCat("Unknown(", static_cast<int>(message_status), ")");
   }
 }
 
-std::string MessageResultToString(MessageResult message_result) {
-  if (message_result.status != MESSAGE_STATUS_SUCCESS) {
-    return absl::StrCat("{", MessageStatusToString(message_result.status), "}");
+std::string DatagramResultToString(DatagramResult datagram_result) {
+  if (datagram_result.status != DATAGRAM_STATUS_SUCCESS) {
+    return absl::StrCat("{", DatagramStatusToString(datagram_result.status),
+                        "}");
   }
-  return absl::StrCat("{MESSAGE_STATUS_SUCCESS,id=", message_result.message_id,
-                      "}");
+  return absl::StrCat(
+      "{DATAGRAM_STATUS_SUCCESS,id=", datagram_result.datagram_id, "}");
 }
 
-std::ostream& operator<<(std::ostream& os, const MessageResult& mr) {
-  os << MessageResultToString(mr);
+std::ostream& operator<<(std::ostream& os, const DatagramResult& mr) {
+  os << DatagramResultToString(mr);
   return os;
 }
 
@@ -316,10 +324,14 @@ std::string CongestionControlTypeToString(CongestionControlType cc_type) {
       return "BBR";
     case kBBRv2:
       return "BBRv2";
+    case kBBRv3:
+      return "BBRv3";
     case kPCC:
       return "PCC";
     case kGoogCC:
       return "GoogCC";
+    case kPragueCubic:
+      return "PRAGUE_CUBIC";
   }
   return absl::StrCat("Unknown(", static_cast<int>(cc_type), ")");
 }
@@ -416,10 +428,17 @@ std::ostream& operator<<(std::ostream& os, const KeyUpdateReason reason) {
   return os;
 }
 
+std::string ParsedClientHello::ToString() const {
+  std::ostringstream oss;
+  oss << *this;
+  return oss.str();
+}
+
 bool operator==(const ParsedClientHello& a, const ParsedClientHello& b) {
   return a.sni == b.sni && a.uaid == b.uaid &&
-         a.supported_groups == b.supported_groups && a.alpns == b.alpns &&
-         a.retry_token == b.retry_token &&
+         a.supported_groups == b.supported_groups &&
+         a.cert_compression_algos == b.cert_compression_algos &&
+         a.alpns == b.alpns && a.retry_token == b.retry_token &&
          a.resumption_attempted == b.resumption_attempted &&
          a.early_data_attempted == b.early_data_attempted;
 }
@@ -430,6 +449,8 @@ std::ostream& operator<<(std::ostream& os,
      << ", alpns:" << quiche::PrintElements(parsed_chlo.alpns)
      << ", supported_groups:"
      << quiche::PrintElements(parsed_chlo.supported_groups)
+     << ", cert_compression_algos:"
+     << quiche::PrintElements(parsed_chlo.cert_compression_algos)
      << ", resumption_attempted:" << parsed_chlo.resumption_attempted
      << ", early_data_attempted:" << parsed_chlo.early_data_attempted
      << ", len(retry_token):" << parsed_chlo.retry_token.size() << " }";
@@ -463,6 +484,16 @@ std::string EcnCodepointToString(QuicEcnCodepoint ecn) {
       return "CE";
   }
   return "";  // Handle compilation on windows for invalid enums
+}
+
+bool operator==(const QuicSSLConfig& lhs, const QuicSSLConfig& rhs) {
+  return lhs.early_data_enabled == rhs.early_data_enabled &&
+         lhs.disable_ticket_support == rhs.disable_ticket_support &&
+         lhs.signing_algorithm_prefs == rhs.signing_algorithm_prefs &&
+         lhs.client_cert_mode == rhs.client_cert_mode &&
+         lhs.ech_config_list == rhs.ech_config_list &&
+         lhs.ech_grease_enabled == rhs.ech_grease_enabled &&
+         lhs.reject_unusable_ech_config == rhs.reject_unusable_ech_config;
 }
 
 #undef RETURN_STRING_LITERAL  // undef for jumbo builds

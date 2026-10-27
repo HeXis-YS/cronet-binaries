@@ -5,12 +5,16 @@
 #ifndef QUICHE_QUIC_QBONE_QBONE_CLIENT_H_
 #define QUICHE_QUIC_QBONE_QBONE_CLIENT_H_
 
+#include <memory>
+
+#include "absl/base/attributes.h"
+#include "absl/base/nullability.h"
 #include "absl/strings/string_view.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/core/quic_bandwidth.h"
+#include "quiche/quic/qbone/bonnet/qbone_client_packet_exchanger.h"
 #include "quiche/quic/qbone/qbone_client_interface.h"
 #include "quiche/quic/qbone/qbone_client_session.h"
-#include "quiche/quic/qbone/qbone_packet_writer.h"
 #include "quiche/quic/tools/quic_client_base.h"
 
 namespace quic {
@@ -26,7 +30,8 @@ class QboneClient : public QuicClientBase, public QboneClientInterface {
               QuicSession::Visitor* session_owner, const QuicConfig& config,
               QuicEventLoop* event_loop,
               std::unique_ptr<ProofVerifier> proof_verifier,
-              QbonePacketWriter* qbone_writer,
+              QboneClientPacketExchanger* absl_nonnull
+                  local_network_packet_exchanger ABSL_ATTRIBUTE_LIFETIME_BOUND,
               QboneClientControlStream::Handler* qbone_handler);
   ~QboneClient() override;
   QboneClientSession* qbone_session();
@@ -51,18 +56,14 @@ class QboneClient : public QuicClientBase, public QboneClientInterface {
   int GetNumSentClientHellosFromSession() override;
   int GetNumReceivedServerConfigUpdatesFromSession() override;
 
-  // This client does not resend saved data. This will be a no-op.
-  void ResendSavedData() override;
-
-  // This client does not resend saved data. This will be a no-op.
-  void ClearDataToResend() override;
-
   // Takes ownership of |connection|.
   std::unique_ptr<QuicSession> CreateQuicClientSession(
       const ParsedQuicVersionVector& supported_versions,
       QuicConnection* connection) override;
 
-  QbonePacketWriter* qbone_writer() { return qbone_writer_; }
+  QboneClientPacketExchanger& local_network_packet_exchanger() {
+    return local_network_packet_exchanger_;
+  }
 
   QboneClientControlStream::Handler* qbone_control_handler() {
     return qbone_handler_;
@@ -73,7 +74,7 @@ class QboneClient : public QuicClientBase, public QboneClientInterface {
   bool HasActiveRequests() override;
 
  private:
-  QbonePacketWriter* qbone_writer_;
+  QboneClientPacketExchanger& local_network_packet_exchanger_;
   QboneClientControlStream::Handler* qbone_handler_;
 
   QuicSession::Visitor* session_owner_;

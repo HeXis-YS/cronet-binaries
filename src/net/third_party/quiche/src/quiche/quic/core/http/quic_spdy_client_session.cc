@@ -4,6 +4,7 @@
 
 #include "quiche/quic/core/http/quic_spdy_client_session.h"
 
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -24,27 +25,49 @@ namespace quic {
 QuicSpdyClientSession::QuicSpdyClientSession(
     const QuicConfig& config, const ParsedQuicVersionVector& supported_versions,
     QuicConnection* connection, const QuicServerId& server_id,
-    QuicCryptoClientConfig* crypto_config,
-    QuicClientPushPromiseIndex* push_promise_index)
+    QuicCryptoClientConfig* crypto_config, QuicPriorityType priority_type)
     : QuicSpdyClientSession(config, supported_versions, connection, nullptr,
-                            server_id, crypto_config, push_promise_index) {}
+                            server_id, crypto_config, priority_type) {}
 
 QuicSpdyClientSession::QuicSpdyClientSession(
     const QuicConfig& config, const ParsedQuicVersionVector& supported_versions,
     QuicConnection* connection, QuicSession::Visitor* visitor,
     const QuicServerId& server_id, QuicCryptoClientConfig* crypto_config,
-    QuicClientPushPromiseIndex* push_promise_index)
-    : QuicSpdyClientSessionBase(connection, visitor, push_promise_index, config,
-                                supported_versions),
+    QuicPriorityType priority_type)
+    : QuicSpdyClientSession(config, supported_versions, connection, visitor,
+                            /*writer=*/nullptr, /*migration_helper=*/nullptr,
+                            QuicConnectionMigrationConfig{
+                                .allow_server_preferred_address = false},
+                            server_id, crypto_config, priority_type) {}
+
+QuicSpdyClientSession::QuicSpdyClientSession(
+    const QuicConfig& config, const ParsedQuicVersionVector& supported_versions,
+    QuicConnection* connection, QuicSession::Visitor* visitor,
+    QuicForceBlockablePacketWriter* absl_nullable writer,
+    QuicMigrationHelper* absl_nullable migration_helper,
+    const QuicConnectionMigrationConfig& migration_config,
+    const QuicServerId& server_id, QuicCryptoClientConfig* crypto_config,
+    QuicPriorityType priority_type)
+    : QuicSpdyClientSessionWithMigration(
+          connection, writer, visitor, config, supported_versions,
+          (migration_helper == nullptr ? kInvalidNetworkHandle
+                                       : migration_helper->GetDefaultNetwork()),
+          (migration_helper == nullptr ? kInvalidNetworkHandle
+                                       : migration_helper->GetCurrentNetwork()),
+          (migration_helper == nullptr
+               ? nullptr
+               : migration_helper->CreateQuicPathContextFactory()),
+          migration_config, priority_type),
       server_id_(server_id),
       crypto_config_(crypto_config),
+      migration_helper_(migration_helper),
       respect_goaway_(true) {}
 
 QuicSpdyClientSession::~QuicSpdyClientSession() = default;
 
 void QuicSpdyClientSession::Initialize() {
   crypto_stream_ = CreateQuicCryptoStream();
-  QuicSpdyClientSessionBase::Initialize();
+  QuicSpdyClientSessionWithMigration::Initialize();
 }
 
 void QuicSpdyClientSession::OnProofValid(
@@ -52,6 +75,11 @@ void QuicSpdyClientSession::OnProofValid(
 
 void QuicSpdyClientSession::OnProofVerifyDetailsAvailable(
     const ProofVerifyDetails& /*verify_details*/) {}
+
+bool QuicSpdyClientSession::OnCertificateRequested(
+    const std::vector<std::string>& /*cert_authorities*/) {
+  return false;
+}
 
 bool QuicSpdyClientSession::ShouldCreateOutgoingBidirectionalStream() {
   if (!crypto_stream_->encryption_established()) {
@@ -69,12 +97,6 @@ bool QuicSpdyClientSession::ShouldCreateOutgoingBidirectionalStream() {
   return CanOpenNextOutgoingBidirectionalStream();
 }
 
-bool QuicSpdyClientSession::ShouldCreateOutgoingUnidirectionalStream() {
-  QUIC_BUG(quic_bug_10396_1)
-      << "Try to create outgoing unidirectional client data streams";
-  return false;
-}
-
 QuicSpdyClientStream*
 QuicSpdyClientSession::CreateOutgoingBidirectionalStream() {
   if (!ShouldCreateOutgoingBidirectionalStream()) {
@@ -84,13 +106,6 @@ QuicSpdyClientSession::CreateOutgoingBidirectionalStream() {
   QuicSpdyClientStream* stream_ptr = stream.get();
   ActivateStream(std::move(stream));
   return stream_ptr;
-}
-
-QuicSpdyClientStream*
-QuicSpdyClientSession::CreateOutgoingUnidirectionalStream() {
-  QUIC_BUG(quic_bug_10396_2)
-      << "Try to create outgoing unidirectional client data streams";
-  return nullptr;
 }
 
 std::unique_ptr<QuicSpdyClientStream>
@@ -165,7 +180,7 @@ bool QuicSpdyClientSession::ShouldCreateIncomingStream(QuicStreamId id) {
     return false;
   }
 
-  if (VersionHasIetfQuicFrames(transport_version()) &&
+  if (VersionIsIetfQuic(transport_version()) &&
       QuicUtils::IsBidirectionalStreamId(id, version()) &&
       !WillNegotiateWebTransport()) {
     connection()->CloseConnection(
@@ -178,19 +193,12 @@ bool QuicSpdyClientSession::ShouldCreateIncomingStream(QuicStreamId id) {
   return true;
 }
 
-QuicSpdyStream* QuicSpdyClientSession::CreateIncomingStream(
-    PendingStream* pending) {
-  QuicSpdyStream* stream = new QuicSpdyClientStream(pending, this);
-  ActivateStream(absl::WrapUnique(stream));
-  return stream;
-}
-
 QuicSpdyStream* QuicSpdyClientSession::CreateIncomingStream(QuicStreamId id) {
   if (!ShouldCreateIncomingStream(id)) {
     return nullptr;
   }
   QuicSpdyStream* stream;
-  if (version().UsesHttp3() &&
+  if (version().IsIetfQuic() &&
       QuicUtils::IsBidirectionalStreamId(id, version())) {
     QUIC_BUG_IF(QuicServerInitiatedSpdyStream but no WebTransport support,
                 !WillNegotiateWebTransport())
@@ -208,11 +216,32 @@ QuicSpdyClientSession::CreateQuicCryptoStream() {
   return std::make_unique<QuicCryptoClientStream>(
       server_id_, this,
       crypto_config_->proof_verifier()->CreateDefaultContext(), crypto_config_,
-      this, /*has_application_state = */ version().UsesHttp3());
+      this, /*has_application_state = */ version().IsIetfQuic());
 }
 
-bool QuicSpdyClientSession::IsAuthorized(const std::string& /*authority*/) {
+QuicNetworkHandle QuicSpdyClientSession::FindAlternateNetwork(
+    QuicNetworkHandle network) {
+  QUICHE_BUG_IF(migration_helper_not_initialized1,
+                migration_helper_ == nullptr);
+  return migration_helper_->FindAlternateNetwork(network);
+}
+
+void QuicSpdyClientSession::PrepareForProbingOnPath(
+    QuicPathValidationContext& context) {
+  QUIC_DVLOG(1) << "About to probe path " << context;
+}
+
+bool QuicSpdyClientSession::PrepareForMigrationToPath(
+    QuicClientPathValidationContext& context) {
+  QUIC_DVLOG(1) << "About to migrate to path " << context;
   return true;
+}
+
+void QuicSpdyClientSession::OnMigrationToPathDone(
+    std::unique_ptr<QuicClientPathValidationContext> context, bool success) {
+  QUICHE_BUG_IF(migration_helper_not_initialized2,
+                migration_helper_ == nullptr);
+  migration_helper_->OnMigrationToPathDone(std::move(context), success);
 }
 
 }  // namespace quic

@@ -9,12 +9,13 @@
 
 #include <memory>
 #include <set>
+#include <string_view>
 
+#include "base/byte_size.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ptr_exclusion.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string_piece.h"
 #include "base/timer/timer.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/load_timing_info.h"
@@ -24,6 +25,7 @@
 #include "net/spdy/spdy_read_queue.h"
 #include "net/spdy/spdy_session.h"
 #include "net/spdy/spdy_stream.h"
+#include "net/third_party/quiche/src/quiche/common/http/http_header_block.h"
 
 namespace net {
 
@@ -77,29 +79,32 @@ class NET_EXPORT_PRIVATE SpdyHttpStream : public SpdyStream::Delegate,
   // Total number of bytes received over the network of SPDY data, headers, and
   // push_promise frames associated with this stream, including the size of
   // frame headers, after SSL decryption and not including proxy overhead.
-  int64_t GetTotalReceivedBytes() const override;
+  base::ByteSize GetTotalReceivedBytes() const override;
   // Total number of bytes sent over the network of SPDY frames associated with
   // this stream, including the size of frame headers, before SSL encryption and
   // not including proxy overhead. Note that some SPDY frames such as pings are
   // not associated with any stream, and are not included in this value.
-  int64_t GetTotalSentBytes() const override;
+  base::ByteSize GetTotalSentBytes() const override;
   bool GetAlternativeService(
       AlternativeService* alternative_service) const override;
   bool GetLoadTimingInfo(LoadTimingInfo* load_timing_info) const override;
+  void PopulateLoadTimingInternalInfo(
+      LoadTimingInternalInfo* load_timing_internal_info) const override;
   int GetRemoteEndpoint(IPEndPoint* endpoint) override;
   void PopulateNetErrorDetails(NetErrorDetails* details) override;
   void SetPriority(RequestPriority priority) override;
   const std::set<std::string>& GetDnsAliases() const override;
-  base::StringPiece GetAcceptChViaAlps() const override;
+  std::string_view GetAcceptChViaAlps() const override;
+  void SetHTTP11Required() override;
 
   // SpdyStream::Delegate implementation.
   void OnHeadersSent() override;
-  void OnEarlyHintsReceived(const spdy::Http2HeaderBlock& headers) override;
+  void OnEarlyHintsReceived(const quiche::HttpHeaderBlock& headers) override;
   void OnHeadersReceived(
-      const spdy::Http2HeaderBlock& response_headers) override;
+      const quiche::HttpHeaderBlock& response_headers) override;
   void OnDataReceived(std::unique_ptr<SpdyBuffer> buffer) override;
   void OnDataSent() override;
-  void OnTrailers(const spdy::Http2HeaderBlock& trailers) override;
+  void OnTrailers(const quiche::HttpHeaderBlock& trailers) override;
   void OnClose(int status) override;
   bool CanGreaseFrameType() const override;
   NetLogSource source_dependency() const override;
@@ -173,10 +178,10 @@ class NET_EXPORT_PRIVATE SpdyHttpStream : public SpdyStream::Delegate,
   LoadTimingInfo closed_stream_load_timing_info_;
   // After |stream_| has been closed, this keeps track of the total number of
   // bytes received over the network for |stream_| while it was open.
-  int64_t closed_stream_received_bytes_ = 0;
+  base::ByteSize closed_stream_received_bytes_;
   // After |stream_| has been closed, this keeps track of the total number of
   // bytes sent over the network for |stream_| while it was open.
-  int64_t closed_stream_sent_bytes_ = 0;
+  base::ByteSize closed_stream_sent_bytes_;
 
   // The request to send.
   // Set to null before response body is starting to be read. This is to allow
@@ -210,8 +215,6 @@ class NET_EXPORT_PRIVATE SpdyHttpStream : public SpdyStream::Delegate,
 
   // Timer to execute DoBufferedReadCallback() with a delay.
   base::OneShotTimer buffered_read_timer_;
-
-  bool was_alpn_negotiated_ = false;
 
   // Stores any DNS aliases for the remote endpoint. Includes all known aliases,
   // e.g. from A, AAAA, or HTTPS, not just from the address used for the

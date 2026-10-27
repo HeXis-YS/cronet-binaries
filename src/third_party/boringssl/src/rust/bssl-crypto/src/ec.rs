@@ -1,424 +1,805 @@
-/* Copyright (c) 2023, Google Inc.
- *
- * Permission to use, copy, modify, and/or distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
- * SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
- * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- */
+// Copyright 2023 The BoringSSL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-//! `EcKey` and `EcGroup` structs for working with elliptic curve cryptography. This module is
-//! intended for internal use within this crate only, to create higher-level abstractions suitable
-//! to be exposed externally.
+//! Definitions of NIST elliptic curves.
+//!
+//! If you're looking for curve25519, see the `x25519` and `ed25519` modules.
 
-use alloc::borrow::ToOwned;
-use alloc::vec;
-use alloc::vec::Vec;
-use core::panic;
-use core::{borrow::Borrow, fmt::Debug, ops::Deref};
+// This module is substantially internal-only and is only public for the
+// [`Curve`] trait, which is shared by ECDH and ECDSA.
 
-use crate::{bn::BigNum, CSlice, CSliceMut, ForeignType, ForeignTypeRef};
+use crate::{cbb_to_buffer, parse_with_cbs, scoped, sealed, Buffer, FfiSlice};
+use alloc::{fmt::Debug, vec::Vec};
+use core::ptr::{null, null_mut};
 
-#[derive(Debug)]
-pub(crate) struct EcKey {
-    ptr: *mut bssl_sys::EC_KEY,
+/// An elliptic curve.
+///
+/// ## Safety
+/// The current EC implementation are thread-safe.
+/// Implementers should make sure that further additions to the curve family
+/// should respect thread-safety, too.
+pub trait Curve: Debug + Sync + Send + sealed::Sealed {
+    /// Return the underlying [`Group`] of the curve
+    fn group() -> Group;
+
+    /// Hash `data` using a hash function suitable for the curve. (I.e.
+    /// SHA-256 for P-256 and SHA-384 for P-384.)
+    #[doc(hidden)]
+    fn hash(data: &[u8]) -> Vec<u8>;
 }
 
-// Safety: Implementation ensures `from_ptr(x).as_ptr() == x`
-unsafe impl ForeignType for EcKey {
-    type CType = bssl_sys::EC_KEY;
+/// The NIST P-256 curve, also called secp256r1.
+#[derive(Debug)]
+pub struct P256;
 
-    unsafe fn from_ptr(ptr: *mut Self::CType) -> Self {
-        Self { ptr }
+impl sealed::Sealed for P256 {}
+
+impl Curve for P256 {
+    fn group() -> Group {
+        Group::P256
     }
 
-    fn as_ptr(&self) -> *mut Self::CType {
-        self.ptr
+    fn hash(data: &[u8]) -> Vec<u8> {
+        crate::digest::Sha256::hash(data).to_vec()
+    }
+}
+
+/// The NIST P-384 curve, also called secp384r1.
+#[derive(Debug)]
+pub struct P384;
+
+impl sealed::Sealed for P384 {}
+
+impl Curve for P384 {
+    fn group() -> Group {
+        Group::P384
+    }
+
+    fn hash(data: &[u8]) -> Vec<u8> {
+        crate::digest::Sha384::hash(data).to_vec()
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[doc(hidden)]
+pub enum Group {
+    P256,
+    P384,
+}
+
+impl Group {
+    fn as_ffi_ptr(self) -> *const bssl_sys::EC_GROUP {
+        // Safety: These functions cannot fail and no resources need to be
+        // released in the future.
+        match self {
+            Group::P256 => unsafe { bssl_sys::EC_group_p256() },
+            Group::P384 => unsafe { bssl_sys::EC_group_p384() },
+        }
+    }
+
+    fn as_evp_pkey_alg(self) -> *const bssl_sys::EVP_PKEY_ALG {
+        // Safety: These functions cannot fail and no resources need to be
+        // released in the future.
+        match self {
+            Group::P256 => unsafe { bssl_sys::EVP_pkey_ec_p256() },
+            Group::P384 => unsafe { bssl_sys::EVP_pkey_ec_p384() },
+        }
+    }
+}
+
+/// Point is a valid, finite point on some curve.
+pub(crate) struct Point {
+    group: *const bssl_sys::EC_GROUP,
+    point: *mut bssl_sys::EC_POINT,
+}
+
+impl Point {
+    /// Construct an uninitialized curve point. This is not public and all
+    /// callers must ensure that the point is initialized before being returned.
+    fn new(group: Group) -> Self {
+        let group = group.as_ffi_ptr();
+        // Safety: `group` is valid because it was constructed just above.
+        let point = unsafe { bssl_sys::EC_POINT_new(group) };
+        // `EC_POINT_new` only fails if out of memory, which is not a case that
+        // is handled short of panicking.
+        assert!(!point.is_null());
+        Self { group, point }
+    }
+
+    /// Construct a point by multiplying the curve's base point by the given
+    /// scalar.
+    ///
+    /// Safety: `scalar` must be a valid pointer.
+    unsafe fn from_scalar(group: Group, scalar: *const bssl_sys::BIGNUM) -> Option<Self> {
+        let point = Self::new(group);
+        // Safety: the members of `point` are valid by construction. `scalar`
+        // is assumed to be valid.
+        let result = unsafe {
+            bssl_sys::EC_POINT_mul(
+                point.group,
+                point.point,
+                scalar,
+                /*q=*/ null(),
+                /*m=*/ null(),
+                /*ctx=*/ null_mut(),
+            )
+        };
+        if result != 1 {
+            return None;
+        }
+        if 1 == unsafe { bssl_sys::EC_POINT_is_at_infinity(point.group, point.point) } {
+            return None;
+        }
+        Some(point)
+    }
+
+    /// Duplicate the given finite point.
+    unsafe fn clone_from_ptr(
+        group: *const bssl_sys::EC_GROUP,
+        point: *const bssl_sys::EC_POINT,
+    ) -> Point {
+        assert_eq!(0, unsafe {
+            bssl_sys::EC_POINT_is_at_infinity(group, point)
+        });
+
+        // Safety: we assume that the caller is passing valid pointers
+        let new_point = unsafe { bssl_sys::EC_POINT_dup(point, group) };
+        // `EC_POINT_dup` only fails if out of memory, which is not a case that
+        // is handled short of panicking.
+        assert!(!new_point.is_null());
+
+        Self {
+            group,
+            point: new_point,
+        }
+    }
+
+    pub fn as_ffi_ptr(&self) -> *const bssl_sys::EC_POINT {
+        self.point
+    }
+
+    fn from_x962(group: Group, x962: &[u8]) -> Option<Self> {
+        let point = Self::new(group);
+        // Safety: `point` is valid by construction. `x962` is a valid memory
+        // buffer.
+        let result = unsafe {
+            bssl_sys::EC_POINT_oct2point(
+                point.group,
+                point.point,
+                x962.as_ffi_ptr(),
+                x962.len(),
+                /*bn_ctx=*/ null_mut(),
+            )
+        };
+        if result == 1 {
+            // The X9.62 encoding of the point at infinity is 0x00, but
+            // BoringSSL will never parse it. So this should be moot,
+            // but `Point` must never contain infinity.
+            assert_eq!(0, unsafe {
+                bssl_sys::EC_POINT_is_at_infinity(point.group, point.point)
+            });
+            Some(point)
+        } else {
+            None
+        }
+    }
+
+    /// Create a new point from an uncompressed X9.62 representation.
+    ///
+    /// (X9.62 is the standard representation of an elliptic-curve point that
+    /// starts with an 0x04 byte.)
+    pub fn from_x962_uncompressed(group: Group, x962: &[u8]) -> Option<Self> {
+        const UNCOMPRESSED: u8 =
+            bssl_sys::point_conversion_form_t::POINT_CONVERSION_UNCOMPRESSED as u8;
+        if x962.first()? != &UNCOMPRESSED {
+            return None;
+        }
+
+        Self::from_x962(group, x962)
+    }
+
+    pub fn to_x962_uncompressed(&self) -> Buffer {
+        // Safety: arguments are valid, `EC_KEY` ensures that the group is
+        // correct for the point, and a `Point` is always finite.
+        unsafe {
+            to_x962(
+                self.group,
+                self.point,
+                bssl_sys::point_conversion_form_t::POINT_CONVERSION_UNCOMPRESSED,
+            )
+        }
+    }
+
+    pub fn from_x962_compressed(group: Group, x962: &[u8]) -> Option<Self> {
+        // The first byte of the compressed format can be either 0x02 or 0x03,
+        // to indicate whether the y coordinate of the point is even or odd.
+        let first_byte = *x962.first()?;
+        if first_byte != 2 && first_byte != 3 {
+            return None;
+        }
+
+        Self::from_x962(group, x962)
+    }
+
+    /// WARNING: compressed form is rarely used and is not as well supported as
+    /// the uncompressed form.
+    pub fn to_x962_compressed(&self) -> Buffer {
+        // Safety: arguments are valid, `EC_KEY` ensures that the group is
+        // correct for the point, and a `Point` is always finite.
+        unsafe {
+            to_x962(
+                self.group,
+                self.point,
+                bssl_sys::point_conversion_form_t::POINT_CONVERSION_COMPRESSED,
+            )
+        }
+    }
+
+    pub fn from_der_subject_public_key_info(group: Group, spki: &[u8]) -> Option<Self> {
+        let alg = group.as_evp_pkey_alg();
+        let mut pkey =
+            scoped::EvpPkey::from_der_subject_public_key_info(spki, core::slice::from_ref(&alg))?;
+        let ec_key = unsafe { bssl_sys::EVP_PKEY_get0_EC_KEY(pkey.as_ffi_ptr()) };
+        // We only passed in one allowed algorithm, an EC algorithm.
+        assert!(!ec_key.is_null());
+        let parsed_group = unsafe { bssl_sys::EC_KEY_get0_group(ec_key) };
+        // We only passed in one allowed algorithm, this EC group.
+        assert!(parsed_group == group.as_ffi_ptr());
+        let point = unsafe { bssl_sys::EC_KEY_get0_public_key(ec_key) };
+        // A valid EC SPKI cannot be missing the public key.
+        assert!(!point.is_null());
+        // Safety: `ec_key` is still owned by `pkey` and doesn't need to be freed.
+        Some(unsafe { Self::clone_from_ptr(parsed_group, point) })
+    }
+
+    /// Calls `func` with an `EC_KEY` that contains a copy of this point.
+    pub fn with_point_as_ec_key<F, T>(&self, func: F) -> T
+    where
+        F: FnOnce(*mut bssl_sys::EC_KEY) -> T,
+    {
+        let mut ec_key = scoped::EcKey::new();
+        // Safety: `self.group` is always valid by construction and this doesn't
+        // pass ownership.
+        assert_eq!(1, unsafe {
+            bssl_sys::EC_KEY_set_group(ec_key.as_ffi_ptr(), self.group)
+        });
+        // Safety: `self.point` is always valid by construction and this doesn't
+        // pass ownership.
+        assert_eq!(1, unsafe {
+            bssl_sys::EC_KEY_set_public_key(ec_key.as_ffi_ptr(), self.point)
+        });
+        func(ec_key.as_ffi_ptr())
+    }
+
+    pub fn to_der_subject_public_key_info(&self) -> Buffer {
+        // Safety: `ec_key` is a valid pointer in this context.
+        self.with_point_as_ec_key(|ec_key| unsafe { to_der_subject_public_key_info(ec_key) })
     }
 }
 
 // Safety:
-// - `EC_KEY`'s documentation says "A given object may be used concurrently on multiple threads by
-//   non-mutating functions, provided no other thread is concurrently calling a mutating function.",
-//   which matches Rust's aliasing rules.
-// - `ptr(&self)` and `ptr_mut(&mut self)` ensures that only a mutable reference can get a mutable
-//   `EC_KEY` pointer outside of this module.
-unsafe impl Send for EcKey {}
+//
+// An `EC_POINT` can be used concurrently from multiple threads so long as no
+// mutating operations are performed. The mutating operations used here are
+// `EC_POINT_mul` and `EC_POINT_oct2point`, which can be observed by setting
+// `point` to be `*const` in the struct and seeing what errors trigger.
+//
+// Both those operations are done internally, however, before a `Point` is
+// returned. So, after construction, callers cannot mutate the `EC_POINT`.
+unsafe impl Sync for Point {}
+unsafe impl Send for Point {}
 
-impl Clone for EcKey {
-    fn clone(&self) -> Self {
-        // Safety:
-        // - EcKey makes sure self.ptr is a valid pointer.
-        let ptr = unsafe { bssl_sys::EC_KEY_dup(self.ptr) };
-        Self { ptr }
+impl Drop for Point {
+    fn drop(&mut self) {
+        // Safety: `self.point` must be valid because only valid `Point`s can
+        // be constructed. `self.group` does not need to be freed.
+        unsafe { bssl_sys::EC_POINT_free(self.point) }
     }
 }
 
-/// Error type returned when conversion to or from an `EcKey` failed.
-pub(crate) struct ConversionFailed;
+/// Key holds both a public and private key. While BoringSSL allows an `EC_KEY`
+/// to also be a) empty, b) holding only a private scalar, or c) holding only
+// a public key, those cases are never exposed as a `Key`.
+pub(crate) struct Key(*mut bssl_sys::EC_KEY);
 
-impl EcKey {
-    pub fn new_by_ec_group(ec_group: &EcGroupRef) -> Self {
-        // Safety: `EC_KEY_new` does not have preconditions
-        let eckey = unsafe { bssl_sys::EC_KEY_new() };
-        assert!(!eckey.is_null());
-        // Safety:
-        // - `eckey` is just allocated and doesn't have its group set yet
-        // - `EcGroup` ensures the `ptr` it contains is valid
-        unsafe {
-            assert_eq!(
-                bssl_sys::EC_KEY_set_group(eckey, ec_group.as_ptr()),
-                1,
-                "EC_KEY_set_group failed"
-            );
-        }
-        // Safety: `eckey` is allocated and null-checked
-        unsafe { Self::from_ptr(eckey) }
+impl Key {
+    /// Construct an uninitialized key. This is not public and all
+    /// callers must ensure that the key is initialized before being returned.
+    fn new(group: Group) -> Self {
+        let key = unsafe { bssl_sys::EC_KEY_new() };
+        // `EC_KEY_new` only fails if out of memory, which is not a case that
+        // is handled short of panicking.
+        assert!(!key.is_null());
+
+        // Setting the group on a fresh `EC_KEY` never fails.
+        assert_eq!(1, unsafe {
+            bssl_sys::EC_KEY_set_group(key, group.as_ffi_ptr())
+        });
+
+        Self(key)
     }
 
-    /// Try to create a public-key version of `EcKey` from the given `value`. Returns error if the
-    /// slice is not a valid representation of a public key for the given curve.
-    ///
-    /// `curve_nid` should be a value defined in `bssl_sys::NID_*`.
-    #[allow(clippy::panic)]
-    pub(crate) fn try_new_public_key_from_bytes(
-        ec_group: &EcGroupRef,
-        value: &[u8],
-    ) -> Result<Self, ConversionFailed> {
-        let eckey = Self::new_by_ec_group(ec_group);
-        let value_ffi = CSlice(value);
-
-        // Safety: The input slice `value_ffi` is a CSlice from safe Rust.
-        let result = unsafe {
-            bssl_sys::EC_KEY_oct2key(
-                eckey.ptr,
-                value_ffi.as_ptr(),
-                value_ffi.len(),
-                core::ptr::null_mut(),
-            )
-        };
-        match result {
-            0 => Err(ConversionFailed),
-            1 => Ok(eckey),
-            _ => panic!("Unexpected return value {result} from EC_KEY_oct2key"),
-        }
+    pub fn as_ffi_ptr(&self) -> *const bssl_sys::EC_KEY {
+        self.0
     }
 
-    pub(crate) fn to_affine_coordinates(&self) -> (BigNum, BigNum) {
-        let ecpoint = unsafe { bssl_sys::EC_KEY_get0_public_key(self.ptr) };
-        let bn_x = BigNum::new();
-        let bn_y = BigNum::new();
-
-        // Safety:
-        // - `EcKey` and `BigNum` structs ensures validity of their pointers.
-        let result = unsafe {
-            bssl_sys::EC_POINT_get_affine_coordinates(
-                bssl_sys::EC_KEY_get0_group(self.ptr),
-                ecpoint,
-                bn_x.as_ptr(),
-                bn_y.as_ptr(),
-                core::ptr::null_mut(),
-            )
-        };
-        assert_eq!(
-            result, 1,
-            "bssl_sys::EC_POINT_get_affine_coordinates failed"
-        );
-        (bn_x, bn_y)
+    /// Generate a random private key.
+    pub fn generate(group: Group) -> Self {
+        let key = Self::new(group);
+        // Generation only fails if out of memory, which is only handled by
+        // panicking.
+        assert_eq!(1, unsafe { bssl_sys::EC_KEY_generate_key(key.0) });
+        // `EC_KEY_generate_key` is documented as also setting the public key.
+        key
     }
 
-    pub(crate) fn generate(ec_group: &EcGroupRef) -> Self {
-        let eckey = EcKey::new_by_ec_group(ec_group);
-        // Safety: `EcKey` ensures eckey.ptr is valid.
-        let result = unsafe { bssl_sys::EC_KEY_generate_key(eckey.as_ptr()) };
-        assert_eq!(result, 1, "bssl_sys::EC_KEY_generate_key failed");
-        eckey
-    }
-
-    pub(crate) fn try_new_public_key_from_affine_coordinates(
-        ec_group: &EcGroupRef,
-        x: &[u8],
-        y: &[u8],
-    ) -> Result<Self, ConversionFailed> {
-        let bn_x = BigNum::from(x);
-        let bn_y = BigNum::from(y);
-
-        let eckey = EcKey::new_by_ec_group(ec_group);
-        // Safety:
-        // - Wrapper classes `EcKey` and `BigNum` ensures validity of the pointers
-        let result = unsafe {
-            bssl_sys::EC_KEY_set_public_key_affine_coordinates(
-                eckey.as_ptr(),
-                bn_x.as_ptr(),
-                bn_y.as_ptr(),
-            )
-        };
-        if result == 1 {
-            Ok(eckey)
-        } else {
-            Err(ConversionFailed)
-        }
-    }
-
-    /// Tries to convert the given bytes into a private key contained within `EcKey`.
-    ///
-    /// `private_key_bytes` must be padded to the size of `curve_nid`'s group order, otherwise the
-    /// conversion will fail.
-    pub(crate) fn try_from_raw_bytes(
-        ec_group: &EcGroupRef,
-        private_key_bytes: &[u8],
-    ) -> Result<Self, ConversionFailed> {
-        let eckey = EcKey::new_by_ec_group(ec_group);
-        let private_key_bytes_ffi = CSlice(private_key_bytes);
-        // Safety:
-        // - `EcKey` ensures `eckey.ptr` is valid.
-        // - `private_key_bytes` is a CSlice from safe-rust.
-        let result = unsafe {
-            bssl_sys::EC_KEY_oct2priv(
-                eckey.as_ptr(),
-                private_key_bytes_ffi.as_ptr(),
-                private_key_bytes_ffi.len(),
-            )
-        };
+    /// Construct a private key from a big-endian representation of the private
+    /// scalar. The scalar must be zero padded to the correct length for the
+    /// curve.
+    pub fn from_big_endian(group: Group, scalar: &[u8]) -> Option<Self> {
+        let key = Self::new(group);
+        // Safety: `key.0` is always valid by construction.
+        let result = unsafe { bssl_sys::EC_KEY_oct2priv(key.0, scalar.as_ffi_ptr(), scalar.len()) };
         if result != 1 {
-            return Err(ConversionFailed);
+            return None;
         }
 
-        Ok(eckey)
+        // BoringSSL allows an `EC_KEY` to have a private scalar without a
+        // public point, but `Key` is never exposed in that state.
+        //
+        // TODO(crbug.com/42290404): `EC_KEY_oct2priv` should fill in the public
+        // key.
+
+        // Safety: `key.0` is valid by construction. The returned value is
+        // still owned the `EC_KEY`.
+        let scalar = unsafe { bssl_sys::EC_KEY_get0_private_key(key.0) };
+        assert!(!scalar.is_null());
+
+        // Safety: `scalar` is a valid pointer.
+        let point = unsafe { Point::from_scalar(group, scalar)? };
+        // Safety: `key.0` is valid by construction, as is `point.point`. The
+        // point is copied into the `EC_KEY` so ownership isn't being moved.
+        let result = unsafe { bssl_sys::EC_KEY_set_public_key(key.0, point.point) };
+        // Setting the public key should only fail if out of memory, which this
+        // crate doesn't handle, or if the groups don't match, which is
+        // impossible.
+        assert_eq!(result, 1);
+
+        Some(key)
     }
 
-    /// Converts between the private key component of `eckey` and octet form. The octet form
-    /// consists of the content octets of the `privateKey` `OCTET STRING` in an `ECPrivateKey` ASN.1
-    /// structure
-    pub(crate) fn to_raw_bytes(&self) -> Vec<u8> {
-        let mut output = vec![0_u8; 66];
-        let mut private_key_bytes_ffi = CSliceMut::from(&mut output[..]);
-        // Safety:
-        // - `EcKey` ensures `self.ptr` is valid.
-        // - `private_key_bytes_ffi` is a CSliceMut we just allocated.
-        // - 66 bytes is guaranteed to be sufficient to store an EC private key
-        let num_octets_stored = unsafe {
-            bssl_sys::EC_KEY_priv2oct(
-                self.as_ptr(),
-                private_key_bytes_ffi.as_mut_ptr(),
-                private_key_bytes_ffi.len(),
-            )
-        };
-        // Safety: `EC_KEY_priv2oct` just wrote `num_octets_stored` into the buffer.
-        unsafe { output.set_len(num_octets_stored) }
-        output
-    }
-
-    pub(crate) fn public_key_eq(&self, other: &Self) -> bool {
-        let result = unsafe {
-            bssl_sys::EC_POINT_cmp(
-                bssl_sys::EC_KEY_get0_group(self.ptr),
-                bssl_sys::EC_KEY_get0_public_key(self.ptr),
-                bssl_sys::EC_KEY_get0_public_key(other.ptr),
-                core::ptr::null_mut(),
-            )
-        };
-        assert_ne!(result, -1, "bssl_sys::EC_POINT_cmp failed");
-        result == 0
-    }
-
-    pub(crate) fn to_vec(&self) -> Vec<u8> {
-        // Safety: `self.ptr` is owned by `self`
-        let ecgroup = unsafe { bssl_sys::EC_KEY_get0_group(self.ptr) };
-        let ecpoint = unsafe { bssl_sys::EC_KEY_get0_public_key(self.ptr) };
-        let conv_form = unsafe { bssl_sys::EC_KEY_get_conv_form(self.ptr) };
-        // Safety:
-        // - When passing null to EC_POINT_point2oct's `buf` argument, it returns the size of the
-        //   resulting buffer.
-        let output_size = unsafe {
-            bssl_sys::EC_POINT_point2oct(
-                ecgroup,
-                ecpoint,
-                conv_form,
-                core::ptr::null_mut(),
-                0,
-                core::ptr::null_mut(),
-            )
-        };
-        assert_ne!(output_size, 0, "bssl_sys::EC_POINT_point2oct failed");
-        let mut result_vec = Vec::<u8>::with_capacity(output_size);
-        let buf_len = unsafe {
-            bssl_sys::EC_POINT_point2oct(
-                ecgroup,
-                ecpoint,
-                conv_form,
-                result_vec.as_mut_ptr(),
-                output_size,
-                core::ptr::null_mut(),
-            )
-        };
-        assert_ne!(buf_len, 0, "bssl_sys::EC_POINT_point2oct failed");
-        // Safety: The length is what EC_POINT_point2oct just told us it filled into the buffer.
-        unsafe { result_vec.set_len(buf_len) }
-        result_vec
-    }
-}
-
-impl Drop for EcKey {
-    fn drop(&mut self) {
-        // Safety: `self.ptr` is owned by this struct
-        unsafe { bssl_sys::EC_KEY_free(self.ptr) }
-    }
-}
-
-/// Describes an elliptic curve.
-#[non_exhaustive]
-pub struct EcGroupRef;
-
-// Safety: Default implementation in ForeignTypeRef ensures the preconditions
-//   required by that trait holds.
-unsafe impl ForeignTypeRef for EcGroupRef {
-    type CType = bssl_sys::EC_GROUP;
-}
-
-impl Borrow<EcGroupRef> for EcGroup {
-    fn borrow(&self) -> &EcGroupRef {
-        unsafe { EcGroupRef::from_ptr(self.ptr) }
-    }
-}
-
-impl ToOwned for EcGroupRef {
-    type Owned = EcGroup;
-
-    fn to_owned(&self) -> Self::Owned {
-        // Safety: `EcGroupRef` is a valid pointer
-        let new_ec_group = unsafe { bssl_sys::EC_GROUP_dup(self.as_ptr()) };
-        assert!(!new_ec_group.is_null(), "EC_GROUP_dup failed");
-        EcGroup { ptr: new_ec_group }
-    }
-}
-
-impl AsRef<EcGroupRef> for EcGroup {
-    fn as_ref(&self) -> &EcGroupRef {
-        self.deref()
-    }
-}
-
-impl PartialEq for EcGroupRef {
-    fn eq(&self, other: &Self) -> bool {
-        // Safety:
-        // - Self and other are valid pointers since they come from `EcGroupRef`
-        // - Third argument is ignored
+    pub fn to_big_endian(&self) -> Buffer {
+        let mut ptr: *mut u8 = null_mut();
+        // Safety: `self.0` is valid by construction. If this returns non-zero
+        // then ptr holds ownership of a buffer.
         unsafe {
-            bssl_sys::EC_GROUP_cmp(
-                self.as_ptr(),
-                other.as_ptr(),
-                /* ignored */ core::ptr::null_mut(),
-            ) == 0
+            let len = bssl_sys::EC_KEY_priv2buf(self.0, &mut ptr);
+            assert!(len != 0);
+            Buffer::new(ptr, len)
         }
     }
-}
 
-impl Eq for EcGroupRef {}
+    /// Parses an ECPrivateKey structure from [RFC 5915].
+    ///
+    /// [RFC 5915]: <https://datatracker.ietf.org/doc/html/rfc5915>
+    pub fn from_der_ec_private_key(group: Group, der: &[u8]) -> Option<Self> {
+        let key = parse_with_cbs(
+            der,
+            // Safety: in this context, `key` is the non-null result of
+            // `EC_KEY_parse_private_key`.
+            |key| unsafe { bssl_sys::EC_KEY_free(key) },
+            // Safety: `cbs` is valid per `parse_with_cbs` and `group` always
+            // returns a valid pointer.
+            |cbs| unsafe { bssl_sys::EC_KEY_parse_private_key(cbs, group.as_ffi_ptr()) },
+        )?;
+        Some(Self(key))
+    }
 
-pub struct EcGroup {
-    ptr: *mut bssl_sys::EC_GROUP,
-}
+    /// Parses an ECPrivateKey structure from [RFC 5915], whose curve is specified by
+    /// the `ECParameters`.
+    ///
+    /// Unless the curve group is one of the variants of [`Group`], this method returns [`None`].
+    ///
+    /// [RFC 5915]: <https://datatracker.ietf.org/doc/html/rfc5915>
+    pub fn from_der_ec_private_key_with_curve_names(der: &[u8]) -> Option<Self> {
+        let key = parse_with_cbs(
+            der,
+            // Safety: in this context, `key` is the non-null result of
+            // `EC_KEY_parse_private_key`.
+            |key| unsafe { bssl_sys::EC_KEY_free(key) },
+            // Safety: `cbs` is valid per `parse_with_cbs`.
+            |cbs| unsafe { bssl_sys::EC_KEY_parse_private_key(cbs, null()) },
+        )?;
+        let key = Self(key);
+        if key.get_group().is_none() {
+            None
+        } else {
+            Some(key)
+        }
+    }
 
-impl Deref for EcGroup {
-    type Target = EcGroupRef;
+    /// Serializes this private key as an ECPrivateKey structure from [RFC 5915].
+    ///
+    /// This method also **serialise** known curve names as `ECParameters`.
+    ///
+    /// [RFC 5915]: <https://datatracker.ietf.org/doc/html/rfc5915>
+    pub fn to_der_ec_private_key(&self) -> Buffer {
+        cbb_to_buffer(64, |cbb| unsafe {
+            // Safety: the `EC_KEY` is always valid so `EC_KEY_marshal_private_key`
+            // should only fail if out of memory, which this crate doesn't handle.
+            assert_eq!(1, bssl_sys::EC_KEY_marshal_private_key(cbb, self.0, 0));
+        })
+    }
 
-    fn deref(&self) -> &Self::Target {
-        unsafe { EcGroupRef::from_ptr(self.ptr) }
+    /// Parses a PrivateKeyInfo structure (from RFC 5208).
+    pub fn from_der_private_key_info(group: Group, der: &[u8]) -> Option<Self> {
+        let alg = group.as_evp_pkey_alg();
+        let pkey = scoped::EvpPkey::from_der_private_key_info(der, core::slice::from_ref(&alg))?;
+        // Safety: the pkey is not aliased
+        let ec_key = Self::from_evp_pkey(pkey)?;
+        // We only passed in one allowed algorithm, this EC group.
+        (ec_key.get_group()? == group).then_some(ec_key)
+    }
+
+    // Safety: the pkey must not be aliased via `as_ffi_ptr`
+    pub(crate) fn from_evp_pkey(mut pkey: scoped::EvpPkey) -> Option<Self> {
+        let ec_key = unsafe { bssl_sys::EVP_PKEY_get1_EC_KEY(pkey.as_ffi_ptr()) };
+        if ec_key.is_null() {
+            return None;
+        }
+        // Safety: `EVP_PKEY_get1_EC_KEY` returned owned key, which we can move
+        // into the returned object and whose lifetime is independent of the EVP pkey.
+        Some(Self(ec_key))
+    }
+
+    pub(crate) fn get_group(&self) -> Option<Group> {
+        // Safety: we own the `EC_KEY`
+        let id = unsafe { bssl_sys::EC_KEY_get0_group(self.0) };
+        if id == Group::P256.as_ffi_ptr() {
+            Some(Group::P256)
+        } else if id == Group::P384.as_ffi_ptr() {
+            Some(Group::P384)
+        } else {
+            None
+        }
+    }
+
+    /// Serializes this private key as a PrivateKeyInfo structure from RFC 5208.
+    pub fn to_der_private_key_info(&self) -> Buffer {
+        let mut pkey = scoped::EvpPkey::new();
+        // Safety: `pkey` was just allocated above; the `EC_KEY` is valid by
+        // construction. This call takes a reference to the `EC_KEY` and so
+        // hasn't stolen ownership from `self`.
+        assert_eq!(1, unsafe {
+            bssl_sys::EVP_PKEY_set1_EC_KEY(pkey.as_ffi_ptr(), self.0)
+        });
+        cbb_to_buffer(64, |cbb| unsafe {
+            // `EVP_marshal_private_key` should always return one because this
+            // key is valid by construction.
+            assert_eq!(1, bssl_sys::EVP_marshal_private_key(cbb, pkey.as_ffi_ptr()));
+        })
+    }
+
+    pub fn to_point(&self) -> Point {
+        // Safety: `self.0` is valid by construction.
+        let group = unsafe { bssl_sys::EC_KEY_get0_group(self.0) };
+        let point = unsafe { bssl_sys::EC_KEY_get0_public_key(self.0) };
+        // A `Key` is never constructed without a public key.
+        assert!(!point.is_null());
+        // Safety: pointers are valid and `clone_from_ptr` doesn't take
+        // ownership.
+        unsafe { Point::clone_from_ptr(group, point) }
+    }
+
+    pub fn to_x962_uncompressed(&self) -> Buffer {
+        // Safety: `self.0` is valid by construction.
+        let group = unsafe { bssl_sys::EC_KEY_get0_group(self.0) };
+        let point = unsafe { bssl_sys::EC_KEY_get0_public_key(self.0) };
+        // Safety: arguments are valid, `EC_KEY` ensures that the group is
+        // correct for the point, and a `Key` always holds a finite public point.
+        unsafe {
+            to_x962(
+                group,
+                point,
+                bssl_sys::point_conversion_form_t::POINT_CONVERSION_UNCOMPRESSED,
+            )
+        }
+    }
+
+    /// WARNING: compressed form is rarely used and is not as well supported as
+    /// the uncompressed form.
+    pub fn to_x962_compressed(&self) -> Buffer {
+        // Safety: `self.0` is valid by construction.
+        let group = unsafe { bssl_sys::EC_KEY_get0_group(self.0) };
+        let point = unsafe { bssl_sys::EC_KEY_get0_public_key(self.0) };
+        // Safety: arguments are valid, `EC_KEY` ensures that the group is
+        // correct for the point, and a `Key` always holds a finite public point.
+        unsafe {
+            to_x962(
+                group,
+                point,
+                bssl_sys::point_conversion_form_t::POINT_CONVERSION_COMPRESSED,
+            )
+        }
+    }
+
+    pub fn to_der_subject_public_key_info(&self) -> Buffer {
+        // Safety: `self.0` is always valid by construction.
+        unsafe { to_der_subject_public_key_info(self.0) }
     }
 }
 
-impl Drop for EcGroup {
+// Safety:
+//
+// An `EC_KEY` is safe to use from multiple threads so long as no mutating
+// operations are performed. (Reference count changes don't count as mutating.)
+// The mutating operations used here are:
+//   * EC_KEY_generate_key
+//   * EC_KEY_oct2priv
+//   * EC_KEY_set_public_key
+// But those are all done internally, before a `Key` is returned. So, once
+// constructed, callers cannot mutate the `EC_KEY`.
+unsafe impl Sync for Key {}
+unsafe impl Send for Key {}
+
+impl Drop for Key {
     fn drop(&mut self) {
-        unsafe { bssl_sys::EC_GROUP_free(self.ptr) }
+        // Safety: `self.0` must be valid because only valid `Key`s can
+        // be constructed.
+        unsafe { bssl_sys::EC_KEY_free(self.0) }
     }
 }
 
-/// An elliptic curve, used as the type parameter for [`PublicKey`] and [`PrivateKey`].
-pub trait Curve: Debug {
-    /// The size of the affine coordinates for this curve.
-    const AFFINE_COORDINATE_SIZE: usize;
-
-    /// Create a new [`EcGroup`] for this curve.
-    fn ec_group() -> &'static EcGroupRef;
-}
-
-/// The P-224 curve, corresponding to `NID_secp224r1`.
-#[derive(Debug)]
-pub struct P224;
-
-impl Curve for P224 {
-    const AFFINE_COORDINATE_SIZE: usize = 28;
-
-    fn ec_group() -> &'static EcGroupRef {
-        // Safety: EC_group_p224 does not have any preconditions
-        unsafe { EcGroupRef::from_ptr(bssl_sys::EC_group_p224() as *mut _) }
+impl Clone for Key {
+    fn clone(&self) -> Self {
+        unsafe {
+            bssl_sys::EC_KEY_up_ref(self.0);
+        }
+        Self(self.0)
     }
 }
 
-/// The P-256 curve, corresponding to `NID_X9_62_prime256v1`.
-#[derive(Debug)]
-pub struct P256;
-
-impl Curve for P256 {
-    const AFFINE_COORDINATE_SIZE: usize = 32;
-
-    fn ec_group() -> &'static EcGroupRef {
-        // Safety: EC_group_p256 does not have any preconditions
-        unsafe { EcGroupRef::from_ptr(bssl_sys::EC_group_p256() as *mut _) }
-    }
+/// Serialize a finite point to X9.62 format.
+///
+/// Callers must ensure that the arguments are valid, that the point has the
+/// specified group, and that the point is finite.
+unsafe fn to_x962(
+    group: *const bssl_sys::EC_GROUP,
+    point: *const bssl_sys::EC_POINT,
+    form: bssl_sys::point_conversion_form_t,
+) -> Buffer {
+    cbb_to_buffer(
+        // This length is just a hint and is tuned for P-256's output length.
+        if form == bssl_sys::point_conversion_form_t::POINT_CONVERSION_UNCOMPRESSED {
+            1 + 32 + 32
+        } else {
+            1 + 32
+        },
+        |cbb| unsafe {
+            // Safety: the caller must ensure that the arguments are valid.
+            let result =
+                bssl_sys::EC_POINT_point2cbb(cbb, group, point, form, /*bn_ctx=*/ null_mut());
+            // The public key is always finite, so `EC_POINT_point2cbb` only fails
+            // if out of memory, which isn't handled by this crate.
+            assert_eq!(result, 1);
+        },
+    )
 }
 
-/// The P-384 curve, corresponding to `NID_secp384r1`.
-#[derive(Debug)]
-pub struct P384;
-
-impl Curve for P384 {
-    const AFFINE_COORDINATE_SIZE: usize = 48;
-
-    fn ec_group() -> &'static EcGroupRef {
-        // Safety: EC_group_p384 does not have any preconditions
-        unsafe { EcGroupRef::from_ptr(bssl_sys::EC_group_p384() as *mut _) }
-    }
-}
-
-/// The P-521 curve, corresponding to `NID_secp521r1`.
-#[derive(Debug)]
-pub struct P521;
-
-impl Curve for P521 {
-    const AFFINE_COORDINATE_SIZE: usize = 66;
-
-    fn ec_group() -> &'static EcGroupRef {
-        // Safety: EC_group_p521 does not have any preconditions
-        unsafe { EcGroupRef::from_ptr(bssl_sys::EC_group_p521() as *mut _) }
-    }
+unsafe fn to_der_subject_public_key_info(ec_key: *mut bssl_sys::EC_KEY) -> Buffer {
+    let mut pkey = scoped::EvpPkey::new();
+    // Safety: this takes a reference to `ec_key` and so doesn't steal ownership.
+    assert_eq!(1, unsafe {
+        bssl_sys::EVP_PKEY_set1_EC_KEY(pkey.as_ffi_ptr(), ec_key)
+    });
+    cbb_to_buffer(
+        // This length is just a hint and is tuned for P-256's output length.
+        65,
+        |cbb| unsafe {
+            // The arguments are valid so this will only fail if out of memory,
+            // which this crate doesn't handle.
+            assert_eq!(1, bssl_sys::EVP_marshal_public_key(cbb, pkey.as_ffi_ptr()));
+        },
+    )
 }
 
 #[cfg(test)]
 mod test {
-    use crate::ec::P521;
+    use super::*;
 
-    use super::{Curve, EcGroupRef, P256};
+    #[derive(PartialEq)]
+    enum Corruption {
+        ShouldBeDetected,
+        DontTest,
+    }
 
-    #[test]
-    fn test_ec_group_clone_and_eq() {
-        let group = P256::ec_group();
-        let group_clone = group.to_owned();
-        let group2: &EcGroupRef = &group_clone;
-        assert!(group == group2);
+    fn test_point_format<Serialize, Parse>(
+        group: Group,
+        serialize_func: Serialize,
+        parse_func: Parse,
+        corruption: Corruption,
+    ) where
+        Serialize: FnOnce(&Point) -> Buffer,
+        Parse: Fn(&[u8]) -> Option<Point>,
+    {
+        let key = Key::generate(group);
+        let point = key.to_point();
+
+        let mut vec = serialize_func(&point).as_ref().to_vec();
+        let point2 = parse_func(vec.as_slice()).unwrap();
+        assert_eq!(
+            point.to_x962_uncompressed().as_ref(),
+            point2.to_x962_uncompressed().as_ref()
+        );
+
+        assert!(parse_func(&vec.as_slice()[0..16]).is_none());
+
+        // Messing with the first byte should always cause an error.
+        vec[0] ^= 64;
+        assert!(parse_func(vec.as_slice()).is_none());
+        vec[0] ^= 64;
+
+        if corruption == Corruption::ShouldBeDetected {
+            vec[11] ^= 1;
+            assert!(parse_func(vec.as_slice()).is_none());
+            vec[11] ^= 1;
+        }
+
+        assert!(parse_func(b"").is_none());
     }
 
     #[test]
-    fn test_ec_group_not_equal() {
-        let group = P256::ec_group();
-        let group2 = P521::ec_group();
-        assert!(group != group2)
+    fn x962() {
+        let x962 = b"\x04\x74\xcf\x69\xcb\xd1\x2b\x75\x07\x42\x85\xcf\x69\x6f\xc2\x56\x4b\x90\xe7\xeb\xbc\xd0\xe7\x20\x36\x86\x66\xbe\xcc\x94\x75\xa2\xa4\x4c\x2a\xf8\xa2\x56\xb8\x92\xb7\x7d\x17\xba\x97\x93\xbb\xf2\x9f\x52\x26\x7d\x90\xf9\x2c\x37\x26\x02\xbb\x4e\xd1\x89\x7c\xad\x54";
+        assert!(Point::from_x962_uncompressed(Group::P256, x962).is_some());
+
+        test_point_format(
+            Group::P256,
+            |point| point.to_x962_uncompressed(),
+            |buf| Point::from_x962_uncompressed(Group::P256, buf),
+            Corruption::ShouldBeDetected,
+        );
+
+        test_point_format(
+            Group::P384,
+            |point| point.to_x962_uncompressed(),
+            |buf| Point::from_x962_uncompressed(Group::P384, buf),
+            Corruption::ShouldBeDetected,
+        );
+
+        test_point_format(
+            Group::P256,
+            |point| point.to_x962_compressed(),
+            |buf| Point::from_x962_compressed(Group::P256, buf),
+            // Flipping a bit in a compressed point has a reasonable chance of
+            // producing another valid point, so we can't run a bit-flip test
+            // in this case.
+            Corruption::DontTest,
+        );
+
+        test_point_format(
+            Group::P384,
+            |point| point.to_x962_compressed(),
+            |buf| Point::from_x962_compressed(Group::P384, buf),
+            // Flipping a bit in a compressed point has a reasonable chance of
+            // producing another valid point, so we can't run a bit-flip test
+            // in this case.
+            Corruption::DontTest,
+        );
+    }
+
+    #[test]
+    fn x962_crossing_formats() {
+        let point = Key::generate(Group::P256).to_point();
+        let uncompressed = point.to_x962_uncompressed();
+        let compressed = point.to_x962_compressed();
+
+        // Compressed points won't be accepted by the uncompressed function and
+        // vice-versa.
+        assert!(Point::from_x962_uncompressed(Group::P256, compressed.as_ref()).is_none());
+        assert!(Point::from_x962_compressed(Group::P256, uncompressed.as_ref()).is_none());
+    }
+
+    #[test]
+    fn x962_infinity_not_accepted() {
+        // 0x00 is the X9.62 encoding of the point at infinity.
+        let infinity = &[0];
+        assert!(Point::from_x962_uncompressed(Group::P256, infinity).is_none());
+        assert!(Point::from_x962_compressed(Group::P256, infinity).is_none());
+    }
+
+    #[test]
+    fn x962_empty() {
+        // The X9.62 functions look at the first byte to check the type. They
+        // must handle the case of an empty input correctly.
+        let empty = b"";
+        assert!(Point::from_x962_uncompressed(Group::P256, empty).is_none());
+        assert!(Point::from_x962_compressed(Group::P256, empty).is_none());
+    }
+
+    #[test]
+    fn spki() {
+        test_point_format(
+            Group::P256,
+            |point| point.to_der_subject_public_key_info(),
+            |buf| Point::from_der_subject_public_key_info(Group::P256, buf),
+            Corruption::ShouldBeDetected,
+        );
+
+        test_point_format(
+            Group::P384,
+            |point| point.to_der_subject_public_key_info(),
+            |buf| Point::from_der_subject_public_key_info(Group::P384, buf),
+            Corruption::ShouldBeDetected,
+        );
+    }
+
+    fn test_key_format<Serialize, Parse>(group: Group, serialize_func: Serialize, parse_func: Parse)
+    where
+        Serialize: FnOnce(&Key) -> Buffer,
+        Parse: Fn(&[u8]) -> Option<Key>,
+    {
+        let key = Key::generate(group);
+        assert_eq!(key.get_group().unwrap(), group);
+
+        let vec = serialize_func(&key).as_ref().to_vec();
+        let key2 = parse_func(vec.as_slice()).unwrap();
+        assert_eq!(
+            key.to_x962_uncompressed().as_ref(),
+            key2.to_x962_uncompressed().as_ref()
+        );
+        assert_eq!(key.get_group(), key2.get_group());
+
+        assert!(parse_func(&vec.as_slice()[0..16]).is_none());
+        assert!(parse_func(b"").is_none());
+    }
+
+    #[test]
+    fn der_ec_private_key() {
+        for group in [Group::P256, Group::P384] {
+            test_key_format(
+                group,
+                |key| key.to_der_ec_private_key(),
+                |buf| Key::from_der_ec_private_key(group, buf),
+            );
+            test_key_format(
+                group,
+                |key| key.to_der_ec_private_key(),
+                |buf| Key::from_der_ec_private_key_with_curve_names(buf),
+            );
+        }
+    }
+
+    #[test]
+    fn der_private_key_info() {
+        for group in [Group::P256, Group::P384] {
+            test_key_format(
+                group,
+                |key| key.to_der_private_key_info(),
+                |buf| Key::from_der_private_key_info(group, buf),
+            );
+        }
+    }
+
+    #[test]
+    fn big_endian() {
+        for group in [Group::P256, Group::P384] {
+            test_key_format(
+                group,
+                |key| key.to_big_endian(),
+                |buf| Key::from_big_endian(group, buf),
+            );
+        }
     }
 }

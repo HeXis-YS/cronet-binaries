@@ -1,5 +1,55 @@
 # cronet-binaries ![build workflow](https://github.com/sleeyax/cronet-binaries/actions/workflows/build.yml/badge.svg)
 
+## Xray native transport branch
+
+This branch builds a shared library for Xray's HTTP/2 and HTTP/3 bidirectional
+streams on Linux, Windows, and Android. Its C ABI is
+`src/components/grpc_support/include/xray_engine.h` plus
+`bidirectional_stream_c.h`; it does not provide the full Cronet engine C API.
+The engine requires both ordinary CA/hostname validation and a leaf SPKI SHA-256
+pin. Xray supplies fixed isolation groups; Chromium manages their connections.
+
+### Upgrade Chromium
+
+Requires Python 3.12+, Git, network access, and enough disk space for both the
+staged and installed sources. From the repository root, choose a release and a
+new staging directory outside `src`:
+
+```sh
+python3 tools/stage-upstream.py VERSION STAGE_DIRECTORY
+python3 tools/apply-upstream-patches.py STAGE_DIRECTORY
+python3 tools/install-upstream.py STAGE_DIRECTORY
+```
+
+Wait for staging to finish before applying patches. A patch conflict stops the
+upgrade and must be resolved for that release before installation. The ordered
+patches in `tools/patches/series` retain NaiveProxy authorship and include the
+Xray isolation/authority adapters. Installation updates `CHROMIUM_VERSION`,
+preserves local build scripts and the stream adapter, and does not rewrite Git
+history. The old `import-upstream.sh` rewrites history and is not this workflow.
+
+### Build
+
+Install Ninja, pkg-config (Linux), Python, curl, xz, and unzip. Windows also needs
+Visual Studio with its C++ toolchain and Windows SDK; Android is built on Linux.
+From `src`, run:
+
+```sh
+./get-clang.sh
+./build.sh
+```
+
+Set `EXTRA_FLAGS='target_cpu="arm64" target_os="android"'` for Android or choose
+`linux`/`win` and a supported CPU from `.github/workflows/build.yml`. Run both
+commands with the same flags. `JOBS` controls Ninja parallelism (default 2).
+Artifacts and matching headers are placed in `src/out/Release/cronet/`.
+Set Xray's `XRAY_CRONET_LIBRARY` to the absolute library path.
+For an interface build failure, `./build.sh release NINJA_TARGET` builds only
+that target and its prerequisites without packaging a library.
+
+The upstream project description below describes the original v119 distribution;
+its full Cronet API and release automation do not describe this branch's output.
+
 > :warning: This project is still under construction. Changes may be force pushed so use at your own risk.
 
 Pre-built, cross-platform binaries for [cronet](https://chromium.googlesource.com/chromium/src/+/master/components/cronet/README.md) (Chromium's networking stack). New cronet binaries will be published to [releases](https://github.com/sleeyax/cronet-binaries/releases) as soon as new stable versions of Chromium are released.

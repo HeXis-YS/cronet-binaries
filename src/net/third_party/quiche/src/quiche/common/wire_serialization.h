@@ -56,7 +56,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -64,7 +63,8 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
-#include "absl/types/optional.h"
+#include "quiche/common/moq_varint.h"
+#include "quiche/common/platform/api/quiche_export.h"
 #include "quiche/common/platform/api/quiche_logging.h"
 #include "quiche/common/quiche_buffer_allocator.h"
 #include "quiche/common/quiche_data_writer.h"
@@ -77,7 +77,7 @@ namespace quiche {
 //   1. Most QuicheDataWriter methods return a bool.
 //   2. While cheap, absl::Status has a non-trivial destructor and thus is not
 //      as free as a bool is.
-// To accomodate this, SerializeIntoWriterStatus<T> provides a way to deduce
+// To accommodate this, SerializeIntoWriterStatus<T> provides a way to deduce
 // what is the status type returned by the SerializeIntoWriter method.
 template <typename T>
 class QUICHE_NO_EXPORT SerializeIntoWriterStatus {
@@ -188,6 +188,31 @@ class QUICHE_EXPORT WireVarInt62 {
   uint64_t value_;
 };
 
+// Represents a 64-bit variable-length non-negative integer.  Those are
+// described in the Section 1.4.1 of draft-ietf-moq-transport-18, and are
+// denoted as (vi64) in type descriptions.
+class QUICHE_EXPORT WireMoqVarInt {
+ public:
+  using DataType = uint64_t;
+
+  explicit WireMoqVarInt(uint64_t value) { value_ = value; }
+  // Convenience wrapper. This is safe, since it is clear from the context that
+  // the enum is being treated as an integer.
+  template <typename T>
+  explicit WireMoqVarInt(T value) {
+    static_assert(std::is_enum_v<T> || std::is_convertible_v<T, uint64_t>);
+    value_ = static_cast<uint64_t>(value);
+  }
+
+  size_t GetLengthOnWire() const { return GetMoqVarintLengthForValue(value_); }
+  bool SerializeIntoWriter(QuicheDataWriter& writer) const {
+    return WriteMoqVarint(writer, value_);
+  }
+
+ private:
+  uint64_t value_;
+};
+
 // Represents unframed raw string.
 class QUICHE_EXPORT WireBytes {
  public:
@@ -231,18 +256,20 @@ class QUICHE_EXPORT WireStringWithLengthPrefix {
 
 // Represents varint62-prefixed strings.
 using WireStringWithVarInt62Length = WireStringWithLengthPrefix<WireVarInt62>;
+// Represents strings prefixed with an MOQT varint length.
+using WireStringWithMoqVarIntLength = WireStringWithLengthPrefix<WireMoqVarInt>;
 
-// Allows absl::optional to be used with this API. For instance, if the spec
+// Allows std::optional to be used with this API. For instance, if the spec
 // defines
 //   [Context ID (i)]
-// and the value is stored as absl::optional<uint64> context_id, this can be
+// and the value is stored as std::optional<uint64> context_id, this can be
 // recorded as
 //   WireOptional<WireVarInt62>(context_id)
 // When optional is absent, nothing is written onto the wire.
 template <typename WireType, typename InnerType = typename WireType::DataType>
 class QUICHE_EXPORT WireOptional {
  public:
-  using DataType = absl::optional<InnerType>;
+  using DataType = std::optional<InnerType>;
   using Status = SerializeIntoWriterStatus<WireType>;
 
   explicit WireOptional(DataType value) { value_ = value; }

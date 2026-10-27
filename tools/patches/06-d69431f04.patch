@@ -1,0 +1,25 @@
+From d69431f04cb96f21fcc1fa3f3053ea0e39f738a3 Mon Sep 17 00:00:00 2001
+From: klzgrad <kizdiv@gmail.com>
+Date: Sun, 10 Dec 2023 19:05:40 +0800
+Subject: [PATCH] android: url: Remove Android
+
+---
+ src/url/BUILD.gn | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/url/BUILD.gn b/src/url/BUILD.gn
+index c1f4a88ea..5c69d7666 100644
+--- a/src/url/BUILD.gn
++++ b/src/url/BUILD.gn
+@@ -74,7 +74,7 @@ component("url") {
+   configs += [ "//build/config/compiler:wexit_time_destructors" ]
+ 
+   if (is_android || is_robolectric) {
+-    public_deps += [ ":url_jni_headers" ]
++    public_deps += [  ]
+     if (!is_cronet_build) {
+       sources += [
+         "android/gurl_android.cc",
+-- 
+2.53.0
+

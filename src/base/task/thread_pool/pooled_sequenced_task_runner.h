@@ -25,10 +25,13 @@ class BASE_EXPORT PooledSequencedTaskRunner
   // Constructs a PooledSequencedTaskRunner which can be used to post tasks.
   PooledSequencedTaskRunner(
       const TaskTraits& traits,
-      PooledTaskRunnerDelegate* pooled_task_runner_delegate);
+      PooledTaskRunnerDelegate* pooled_task_runner_delegate,
+      bool inherit_task_importance_by_default);
   PooledSequencedTaskRunner(const PooledSequencedTaskRunner&) = delete;
   PooledSequencedTaskRunner& operator=(const PooledSequencedTaskRunner&) =
       delete;
+
+  scoped_refptr<Sequence> sequence() { return sequence_; }
 
   // UpdateableSequencedTaskRunner:
   bool PostDelayedTask(const Location& from_here,

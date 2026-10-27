@@ -16,6 +16,7 @@
 #include <string.h>    /* memcpy */
 
 #include "zstd_v04.h"
+#include "../common/compiler.h"
 #include "../common/error_private.h"
 
 
@@ -1093,7 +1094,7 @@ static unsigned FSE_isError(size_t code) { return ERR_isError(code); }
 ****************************************************************/
 static short FSE_abs(short a)
 {
-    return a<0 ? -a : a;
+    return a<0 ? (short)-a : a;
 }
 
 static size_t FSE_readNCount (short* normalizedCounter, unsigned* maxSVPtr, unsigned* tableLogPtr,
@@ -3209,6 +3210,7 @@ static size_t ZSTD_decompressContinue(ZSTD_DCtx* ctx, void* dst, size_t maxDstSi
             }
             ctx->stage = ZSTDds_decodeBlockHeader;
             ctx->expected = ZSTD_blockHeaderSize;
+            if (ZSTD_isError(rSize)) return rSize;
             ctx->previousDstEnd = (char*)dst + rSize;
             return rSize;
         }
@@ -3536,8 +3538,8 @@ static size_t ZBUFF_decompressContinue(ZBUFF_DCtx* zbc, void* dst, size_t* maxDs
 unsigned ZBUFFv04_isError(size_t errorCode) { return ERR_isError(errorCode); }
 const char* ZBUFFv04_getErrorName(size_t errorCode) { return ERR_getErrorName(errorCode); }
 
-size_t ZBUFFv04_recommendedDInSize()  { return BLOCKSIZE + 3; }
-size_t ZBUFFv04_recommendedDOutSize() { return BLOCKSIZE; }
+size_t ZBUFFv04_recommendedDInSize(void)  { return BLOCKSIZE + 3; }
+size_t ZBUFFv04_recommendedDOutSize(void) { return BLOCKSIZE; }
 
 
 

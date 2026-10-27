@@ -8,13 +8,14 @@
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 #include "base/memory/raw_ref.h"
-#include "base/strings/string_piece.h"
 #include "base/time/clock.h"
 #include "base/time/default_clock.h"
 #include "base/time/default_tick_clock.h"
@@ -22,9 +23,9 @@
 #include "base/values.h"
 #include "net/base/net_export.h"
 #include "net/base/network_anonymization_key.h"
+#include "net/base/network_handle.h"
 #include "net/dns/public/dns_query_type.h"
 #include "net/dns/public/host_resolver_source.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace net {
 
@@ -35,14 +36,14 @@ class NET_EXPORT HostResolverCache final {
  public:
   struct StaleLookupResult {
     StaleLookupResult(const HostResolverInternalResult& result,
-                      absl::optional<base::TimeDelta> expired_by,
+                      std::optional<base::TimeDelta> expired_by,
                       bool stale_by_generation);
     ~StaleLookupResult() = default;
 
     const raw_ref<const HostResolverInternalResult> result;
 
     // Time since the result's TTL has expired. nullopt if not expired.
-    const absl::optional<base::TimeDelta> expired_by;
+    const std::optional<base::TimeDelta> expired_by;
 
     // True if result is stale due to a call to
     // HostResolverCache::MakeAllResultsStale().
@@ -66,7 +67,7 @@ class NET_EXPORT HostResolverCache final {
 
   // Lookup an active (non-stale) cached result matching the given criteria. If
   // `query_type` is `DnsQueryType::UNSPECIFIED`, `source` is
-  // `HostResolverSource::ANY`, or `secure` is `absl::nullopt`, it is a wildcard
+  // `HostResolverSource::ANY`, or `secure` is `std::nullopt`, it is a wildcard
   // that can match for any cached parameter of that type. In cases where a
   // wildcard lookup leads to multiple matching results, only one result will be
   // returned, preferring first the most secure result and then the most
@@ -77,11 +78,12 @@ class NET_EXPORT HostResolverCache final {
   // Returns nullptr on cache miss (no active result matches the given
   // criteria).
   const HostResolverInternalResult* Lookup(
-      base::StringPiece domain_name,
+      std::string_view domain_name,
       const NetworkAnonymizationKey& network_anonymization_key,
+      handles::NetworkHandle target_network,
       DnsQueryType query_type = DnsQueryType::UNSPECIFIED,
       HostResolverSource source = HostResolverSource::ANY,
-      absl::optional<bool> secure = absl::nullopt) const;
+      std::optional<bool> secure = std::nullopt) const;
 
   // Lookup a cached result matching the given criteria. Unlike Lookup(), may
   // return stale results. In cases where a wildcard lookup leads to multiple
@@ -96,12 +98,13 @@ class NET_EXPORT HostResolverCache final {
   //
   // Returns nullopt on cache miss (no active or stale result matches the given
   // criteria).
-  absl::optional<StaleLookupResult> LookupStale(
-      base::StringPiece domain_name,
+  std::optional<StaleLookupResult> LookupStale(
+      std::string_view domain_name,
       const NetworkAnonymizationKey& network_anonymization_key,
+      handles::NetworkHandle target_network,
       DnsQueryType query_type = DnsQueryType::UNSPECIFIED,
       HostResolverSource source = HostResolverSource::ANY,
-      absl::optional<bool> secure = absl::nullopt) const;
+      std::optional<bool> secure = std::nullopt) const;
 
   // Sets the result into the cache, replacing any previous result entries that
   // would match the same criteria, even if a previous entry would have matched
@@ -109,6 +112,7 @@ class NET_EXPORT HostResolverCache final {
   // `DnsQueryType::UNSPECIFIED`.
   void Set(std::unique_ptr<HostResolverInternalResult> result,
            const NetworkAnonymizationKey& network_anonymization_key,
+           handles::NetworkHandle target_network,
            HostResolverSource source,
            bool secure);
 
@@ -151,13 +155,15 @@ class NET_EXPORT HostResolverCache final {
 
     std::string domain_name;
     NetworkAnonymizationKey network_anonymization_key;
+    handles::NetworkHandle target_network = handles::kInvalidNetworkHandle;
   };
 
   struct KeyRef {
     ~KeyRef() = default;
 
-    base::StringPiece domain_name;
+    std::string_view domain_name;
     const raw_ref<const NetworkAnonymizationKey> network_anonymization_key;
+    handles::NetworkHandle target_network = handles::kInvalidNetworkHandle;
   };
 
   // Allow comparing Key to KeyRef to allow refs for entry lookup.
@@ -167,18 +173,24 @@ class NET_EXPORT HostResolverCache final {
     ~KeyComparator() = default;
 
     bool operator()(const Key& lhs, const Key& rhs) const {
-      return std::tie(lhs.domain_name, lhs.network_anonymization_key) <
-             std::tie(rhs.domain_name, rhs.network_anonymization_key);
+      return std::tie(lhs.domain_name, lhs.network_anonymization_key,
+                      lhs.target_network) <
+             std::tie(rhs.domain_name, rhs.network_anonymization_key,
+                      rhs.target_network);
     }
 
     bool operator()(const Key& lhs, const KeyRef& rhs) const {
-      return std::tie(lhs.domain_name, lhs.network_anonymization_key) <
-             std::tie(rhs.domain_name, *rhs.network_anonymization_key);
+      return std::tie(lhs.domain_name, lhs.network_anonymization_key,
+                      lhs.target_network) <
+             std::tie(rhs.domain_name, *rhs.network_anonymization_key,
+                      rhs.target_network);
     }
 
     bool operator()(const KeyRef& lhs, const Key& rhs) const {
-      return std::tie(lhs.domain_name, *lhs.network_anonymization_key) <
-             std::tie(rhs.domain_name, rhs.network_anonymization_key);
+      return std::tie(lhs.domain_name, *lhs.network_anonymization_key,
+                      lhs.target_network) <
+             std::tie(rhs.domain_name, rhs.network_anonymization_key,
+                      rhs.target_network);
     }
   };
 
@@ -212,14 +224,16 @@ class NET_EXPORT HostResolverCache final {
 
   // Get all matching results, from most to least recently added.
   std::vector<EntryMap::const_iterator> LookupInternal(
-      base::StringPiece domain_name,
+      std::string_view domain_name,
       const NetworkAnonymizationKey& network_anonymization_key,
+      handles::NetworkHandle target_network,
       DnsQueryType query_type,
       HostResolverSource source,
-      absl::optional<bool> secure) const;
+      std::optional<bool> secure) const;
 
   void Set(std::unique_ptr<HostResolverInternalResult> result,
            const NetworkAnonymizationKey& network_anonymization_key,
+           handles::NetworkHandle target_network,
            HostResolverSource source,
            bool secure,
            bool replace_existing,
@@ -227,14 +241,15 @@ class NET_EXPORT HostResolverCache final {
 
   void EvictEntries();
 
-  // If `require_persistable_anonymization_key` is true, will not serialize
-  // any entries that do not have an anonymization key that supports
-  // serialization and restoration. If false, will serialize all entries, but
-  // the result may contain anonymization keys that are malformed for
-  // restoration.
-  base::Value SerializeEntries(
-      bool serialize_staleness_generation,
-      bool require_persistable_anonymization_key) const;
+  // If `serialize_non_persistable_parameters` is false this will:
+  // - Only serialize entries that have persistable parameters (e.g.,
+  //     non-transient network anonymization keys, default target networks).
+  // - Don't include the staleness generation value.
+  // This is useful to make sure that serialized data can later be restored and
+  // utilized.
+  // If `serialize_non_persistable_parameters` is true, all entries will be
+  // included. This is useful for debugging.
+  base::Value SerializeEntries(bool serialize_non_persistable_parameters) const;
 
   EntryMap entries_;
   size_t max_entries_;

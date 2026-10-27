@@ -7,30 +7,32 @@
 #include <limits.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <set>
 #include <string>
-#include <unordered_set>
+#include <string_view>
 #include <vector>
 
 #include "base/check.h"
-#include "base/containers/contains.h"
+#include "base/containers/to_vector.h"
 #include "base/dcheck_is_on.h"
+#include "base/feature_list.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/notreached.h"
 #include "base/numerics/checked_math.h"
 #include "base/numerics/ostream_operators.h"
 #include "base/rand_util.h"
-#include "base/ranges/algorithm.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/time/clock.h"
 #include "base/time/time.h"
 #include "net/base/address_list.h"
 #include "net/base/connection_endpoint_metadata.h"
+#include "net/base/features.h"
 #include "net/base/host_port_pair.h"
 #include "net/base/ip_address.h"
 #include "net/base/ip_endpoint.h"
@@ -46,7 +48,7 @@
 #include "net/dns/public/dns_query_type.h"
 #include "net/dns/record_parsed.h"
 #include "net/dns/record_rdata.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 namespace net {
 
@@ -62,14 +64,13 @@ using RecordsOrError =
 using ResultsOrError = DnsResponseResultExtractor::ResultsOrError;
 using Source = HostResolverInternalResult::Source;
 
-void SaveMetricsForAdditionalHttpsRecord(const RecordParsed& record,
-                                         bool is_unsolicited) {
+void SaveMetricsForRequestedAdditionalHttpsRecord(const RecordParsed& record) {
   const HttpsRecordRdata* rdata = record.rdata<HttpsRecordRdata>();
   DCHECK(rdata);
 
   // These values are persisted to logs. Entries should not be renumbered and
   // numeric values should never be reused.
-  enum class UnsolicitedHttpsRecordStatus {
+  enum class AdditionalHttpsRecordStatus {
     kMalformed = 0,  // No longer recorded.
     kAlias = 1,
     kService = 2,
@@ -77,18 +78,13 @@ void SaveMetricsForAdditionalHttpsRecord(const RecordParsed& record,
   } status;
 
   if (rdata->IsAlias()) {
-    status = UnsolicitedHttpsRecordStatus::kAlias;
+    status = AdditionalHttpsRecordStatus::kAlias;
   } else {
-    status = UnsolicitedHttpsRecordStatus::kService;
+    status = AdditionalHttpsRecordStatus::kService;
   }
 
-  if (is_unsolicited) {
-    UMA_HISTOGRAM_ENUMERATION("Net.DNS.DnsTask.AdditionalHttps.Unsolicited",
-                              status);
-  } else {
-    UMA_HISTOGRAM_ENUMERATION("Net.DNS.DnsTask.AdditionalHttps.Requested",
-                              status);
-  }
+  UMA_HISTOGRAM_ENUMERATION("Net.DNS.DnsTask.AdditionalHttps.Requested",
+                            status);
 }
 
 // Sort service targets per RFC2782.  In summary, sort first by `priority`,
@@ -96,7 +92,7 @@ void SaveMetricsForAdditionalHttpsRecord(const RecordParsed& record,
 // using `weight` with higher weighted objects more likely to go first.
 std::vector<HostPortPair> SortServiceTargets(
     const std::vector<const SrvRecordRdata*>& rdatas) {
-  std::map<uint16_t, std::unordered_set<const SrvRecordRdata*>>
+  std::map<uint16_t, absl::flat_hash_set<const SrvRecordRdata*>>
       ordered_by_priority;
   for (const SrvRecordRdata* rdata : rdatas) {
     ordered_by_priority[rdata->priority()].insert(rdata);
@@ -107,7 +103,7 @@ std::vector<HostPortPair> SortServiceTargets(
     // With (num results) <= UINT16_MAX (and in practice, much less) and
     // (weight per result) <= UINT16_MAX, then it should be the case that
     // (total weight) <= UINT32_MAX, but use CheckedNumeric for extra safety.
-    auto total_weight = base::MakeCheckedNum<uint32_t>(0);
+    auto total_weight = base::CheckedNumeric<uint32_t>(0);
     for (const SrvRecordRdata* rdata : priority.second) {
       total_weight += rdata->weight();
     }
@@ -153,10 +149,10 @@ std::vector<HostPortPair> SortServiceTargets(
 // Validates that all `aliases` form a single non-looping chain, starting from
 // `query_name` and that all alias records are valid. Also validates that all
 // `data_records` are at the final name at the end of the alias chain.
-// TODO(crbug.com/1381506): Consider altering chain TTLs so that each TTL is
+// TODO(crbug.com/40245250): Consider altering chain TTLs so that each TTL is
 // less than or equal to all previous links in the chain.
 ExtractionError ValidateNamesAndAliases(
-    base::StringPiece query_name,
+    std::string_view query_name,
     const AliasMap& aliases,
     const std::vector<std::unique_ptr<const RecordParsed>>& data_records,
     std::string& out_final_chain_name) {
@@ -213,7 +209,7 @@ RecordsOrError ExtractResponseRecords(
   DCHECK_EQ(response.question_count(), 1u);
 
   std::vector<std::unique_ptr<const RecordParsed>> data_records;
-  absl::optional<base::TimeDelta> response_ttl;
+  std::optional<base::TimeDelta> response_ttl;
 
   DnsRecordParser parser = response.Parser();
 
@@ -254,6 +250,7 @@ RecordsOrError ExtractResponseRecords(
   std::string final_chain_name;
   ExtractionError name_and_alias_validation_error = ValidateNamesAndAliases(
       response.GetSingleDottedName(), aliases, data_records, final_chain_name);
+
   if (name_and_alias_validation_error != ExtractionError::kOk) {
     return base::unexpected(name_and_alias_validation_error);
   }
@@ -267,7 +264,7 @@ RecordsOrError ExtractResponseRecords(
         alias.second->rdata<CnameRecordRdata>()->cname()));
   }
 
-  absl::optional<base::TimeDelta> error_ttl;
+  std::optional<base::TimeDelta> error_ttl;
   for (unsigned i = 0; i < response.authority_count(); ++i) {
     DnsResourceRecord record;
     if (!parser.ReadRecord(&record)) {
@@ -306,8 +303,10 @@ RecordsOrError ExtractResponseRecords(
         RecordParsed::CreateFrom(&parser, base::Time::Now());
     if (record && record->klass() == dns_protocol::kClassIN &&
         record->type() == dns_protocol::kTypeHttps) {
-      bool is_unsolicited = query_type != DnsQueryType::HTTPS;
-      SaveMetricsForAdditionalHttpsRecord(*record, is_unsolicited);
+      bool was_requested = query_type == DnsQueryType::HTTPS;
+      if (was_requested) {
+        SaveMetricsForRequestedAdditionalHttpsRecord(*record);
+      }
     }
   }
 
@@ -376,6 +375,9 @@ ResultsOrError ExtractTxtResults(const DnsResponse& response,
   for (const auto& record : txt_records.value()) {
     const TxtRecordRdata* rdata = record->rdata<net::TxtRecordRdata>();
     DCHECK(rdata);
+    // TXT invalid without at least one string. If none, should be rejected by
+    // parser.
+    CHECK(!rdata->texts().empty());
     strings.insert(strings.end(), rdata->texts().begin(), rdata->texts().end());
 
     base::TimeDelta ttl = base::Seconds(record->ttl());
@@ -477,7 +479,7 @@ bool RecordIsAlias(const RecordParsed* record) {
 }
 
 ResultsOrError ExtractHttpsResults(const DnsResponse& response,
-                                   base::StringPiece original_domain_name,
+                                   std::string_view original_domain_name,
                                    uint16_t request_port,
                                    base::Time now,
                                    base::TimeTicks now_ticks) {
@@ -490,25 +492,41 @@ ResultsOrError ExtractHttpsResults(const DnsResponse& response,
     return base::unexpected(https_records.error());
   }
 
+  // Min TTL among records of full use to Chrome.
+  std::optional<base::TimeDelta> min_ttl;
+
+  // Min TTL among all records considered compatible with Chrome, per
+  // RFC9460#section-8.
+  std::optional<base::TimeDelta> min_compatible_ttl;
+
   std::multimap<HttpsRecordPriority, ConnectionEndpointMetadata> metadatas;
-  auto min_ttl = base::TimeDelta::Max();
+  HostResolverInternalMetadataResult::AddressHintsMap address_hints;
+  const bool collect_address_hints =
+      base::FeatureList::IsEnabled(features::kUseDnsHttpsSvcbAddressHints);
   bool compatible_record_found = false;
   bool default_alpn_found = false;
   for (const auto& record : https_records.value()) {
     const HttpsRecordRdata* rdata = record->rdata<HttpsRecordRdata>();
     DCHECK(rdata);
 
+    base::TimeDelta ttl = base::Seconds(record->ttl());
+
     // Chrome does not yet support alias records.
     if (rdata->IsAlias()) {
       // Alias records are always considered compatible because they do not
       // support "mandatory" params.
       compatible_record_found = true;
+      min_compatible_ttl =
+          std::min(ttl, min_compatible_ttl.value_or(base::TimeDelta::Max()));
+
       continue;
     }
 
     const ServiceFormHttpsRecordRdata* service = rdata->AsServiceForm();
     if (service->IsCompatible()) {
       compatible_record_found = true;
+      min_compatible_ttl =
+          std::min(ttl, min_compatible_ttl.value_or(base::TimeDelta::Max()));
     } else {
       // Ignore services incompatible with Chrome's HTTPS record parser.
       // draft-ietf-dnsop-svcb-https-12#section-8
@@ -546,8 +564,8 @@ ResultsOrError ExtractHttpsResults(const DnsResponse& response,
 
     metadata.supported_protocol_alpns = service->alpn_ids();
     if (service->default_alpn() &&
-        !base::Contains(metadata.supported_protocol_alpns,
-                        dns_protocol::kHttpsServiceDefaultAlpn)) {
+        !std::ranges::contains(metadata.supported_protocol_alpns,
+                               dns_protocol::kHttpsServiceDefaultAlpn)) {
       metadata.supported_protocol_alpns.push_back(
           dns_protocol::kHttpsServiceDefaultAlpn);
     }
@@ -563,12 +581,23 @@ ResultsOrError ExtractHttpsResults(const DnsResponse& response,
     metadata.ech_config_list = ConnectionEndpointMetadata::EchConfigList(
         service->ech_config().cbegin(), service->ech_config().cend());
 
+    if (collect_address_hints &&
+        (!service->ipv4_hint().empty() || !service->ipv6_hint().empty())) {
+      HostResolverInternalMetadataResult::AddressHints& hints =
+          address_hints[target_name];
+      hints.ipv4_hints.insert(service->ipv4_hint().begin(),
+                              service->ipv4_hint().end());
+      hints.ipv6_hints.insert(service->ipv6_hint().begin(),
+                              service->ipv6_hint().end());
+    }
+
     metadata.target_name = std::move(target_name);
+
+    metadata.trust_anchor_ids = base::ToVector(service->trust_anchor_ids());
 
     metadatas.emplace(service->priority(), std::move(metadata));
 
-    base::TimeDelta ttl = base::Seconds(record->ttl());
-    min_ttl = std::min(ttl, min_ttl);
+    min_ttl = std::min(ttl, min_ttl.value_or(base::TimeDelta::Max()));
 
     if (service->default_alpn()) {
       default_alpn_found = true;
@@ -577,9 +606,10 @@ ResultsOrError ExtractHttpsResults(const DnsResponse& response,
 
   // Ignore all records if any are an alias record. Chrome does not yet support
   // alias records, but aliases take precedence over any other records.
-  if (base::ranges::any_of(https_records.value(), &RecordIsAlias,
-                           &UnwrapRecordPtr)) {
+  if (std::ranges::any_of(https_records.value(), &RecordIsAlias,
+                          &UnwrapRecordPtr)) {
     metadatas.clear();
+    address_hints.clear();
   }
 
   // Ignore all records if they all mark "no-default-alpn". Domains should
@@ -588,15 +618,30 @@ ResultsOrError ExtractHttpsResults(const DnsResponse& response,
   // draft-ietf-dnsop-svcb-https-12#section-7.1.2
   if (!default_alpn_found) {
     metadatas.clear();
+    address_hints.clear();
   }
 
-  // Empty metadata result signifies that compatible HTTPS records were
-  // received but with no contained metadata of use to Chrome.
-  if (!metadatas.empty() || compatible_record_found) {
+  if (metadatas.empty() && compatible_record_found) {
+    CHECK(address_hints.empty());
+    // Empty metadata result signifies that compatible HTTPS records were
+    // received but with no contained metadata of use to Chrome. Use the min TTL
+    // of all compatible records.
+    CHECK(min_compatible_ttl.has_value());
     results.insert(std::make_unique<HostResolverInternalMetadataResult>(
         https_records->front()->name(), DnsQueryType::HTTPS,
-        now_ticks + min_ttl, now + min_ttl, Source::kDns,
-        std::move(metadatas)));
+        now_ticks + min_compatible_ttl.value(),
+        now + min_compatible_ttl.value(), Source::kDns,
+        /*metadatas=*/
+        std::multimap<HttpsRecordPriority, ConnectionEndpointMetadata>{},
+        /*address_hints=*/
+        HostResolverInternalMetadataResult::AddressHintsMap()));
+  } else if (!metadatas.empty()) {
+    // Use min TTL only of those records contributing useful metadata.
+    CHECK(min_ttl.has_value());
+    results.insert(std::make_unique<HostResolverInternalMetadataResult>(
+        https_records->front()->name(), DnsQueryType::HTTPS,
+        now_ticks + min_ttl.value(), now + min_ttl.value(), Source::kDns,
+        std::move(metadatas), std::move(address_hints)));
   }
 
   return results;
@@ -614,7 +659,7 @@ DnsResponseResultExtractor::~DnsResponseResultExtractor() = default;
 
 ResultsOrError DnsResponseResultExtractor::ExtractDnsResults(
     DnsQueryType query_type,
-    base::StringPiece original_domain_name,
+    std::string_view original_domain_name,
     uint16_t request_port) const {
   DCHECK(!original_domain_name.empty());
 
@@ -622,7 +667,6 @@ ResultsOrError DnsResponseResultExtractor::ExtractDnsResults(
     case DnsQueryType::UNSPECIFIED:
       // Should create multiple transactions with specified types.
       NOTREACHED();
-      return base::unexpected(ExtractionError::kUnexpected);
     case DnsQueryType::A:
     case DnsQueryType::AAAA:
       return ExtractAddressResults(*response_, query_type, clock_->Now(),

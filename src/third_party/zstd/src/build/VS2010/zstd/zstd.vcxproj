@@ -35,6 +35,7 @@
     <ClCompile Include="..\..\..\lib\compress\zstd_compress_literals.c" />
     <ClCompile Include="..\..\..\lib\compress\zstd_compress_sequences.c" />
     <ClCompile Include="..\..\..\lib\compress\zstd_compress_superblock.c" />
+    <ClCompile Include="..\..\..\lib\compress\zstd_preSplit.c" />
     <ClCompile Include="..\..\..\lib\compress\zstd_fast.c" />
     <ClCompile Include="..\..\..\lib\compress\zstd_double_fast.c" />
     <ClCompile Include="..\..\..\lib\compress\zstd_lazy.c" />
@@ -63,6 +64,7 @@
     <ClCompile Include="..\..\..\programs\dibio.c" />
     <ClCompile Include="..\..\..\programs\fileio.c" />
     <ClCompile Include="..\..\..\programs\fileio_asyncio.c" />
+    <ClCompile Include="..\..\..\programs\lorem.c" />
     <ClCompile Include="..\..\..\programs\zstdcli.c" />
     <ClCompile Include="..\..\..\programs\zstdcli_trace.c" />
   </ItemGroup>
@@ -185,7 +187,7 @@
       </PrecompiledHeader>
       <WarningLevel>Level4</WarningLevel>
       <Optimization>Disabled</Optimization>
-      <PreprocessorDefinitions>ZSTD_MULTITHREAD=1;ZSTD_LEGACY_SUPPORT=5;WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ZSTD_MULTITHREAD=1;ZSTD_LEGACY_SUPPORT=0;WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <TreatWarningAsError>true</TreatWarningAsError>
       <EnablePREfast>false</EnablePREfast>
       <EnableEnhancedInstructionSet>$(InstructionSet)</EnableEnhancedInstructionSet>
@@ -202,7 +204,7 @@
       </PrecompiledHeader>
       <WarningLevel>Level4</WarningLevel>
       <Optimization>Disabled</Optimization>
-      <PreprocessorDefinitions>ZSTD_MULTITHREAD=1;ZSTD_LEGACY_SUPPORT=5;WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ZSTD_MULTITHREAD=1;ZSTD_LEGACY_SUPPORT=0;WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <TreatWarningAsError>true</TreatWarningAsError>
       <EnablePREfast>false</EnablePREfast>
       <EnableEnhancedInstructionSet>$(InstructionSet)</EnableEnhancedInstructionSet>
@@ -221,7 +223,7 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>ZSTD_MULTITHREAD=1;ZSTD_LEGACY_SUPPORT=5;WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ZSTD_MULTITHREAD=1;ZSTD_LEGACY_SUPPORT=0;WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <EnablePREfast>false</EnablePREfast>
       <TreatWarningAsError>false</TreatWarningAsError>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
@@ -243,7 +245,7 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>ZSTD_MULTITHREAD=1;ZSTD_LEGACY_SUPPORT=5;WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>ZSTD_MULTITHREAD=1;ZSTD_LEGACY_SUPPORT=0;WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <TreatWarningAsError>false</TreatWarningAsError>
       <EnablePREfast>false</EnablePREfast>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>

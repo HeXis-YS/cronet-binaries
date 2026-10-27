@@ -7,31 +7,17 @@
 #include <mach/mach.h>
 #include <stddef.h>
 #include <sys/resource.h>
-#include <sys/sysctl.h>
-#include <sys/time.h>
-#include <unistd.h>
 
-#include <iterator>
-#include <memory>
-#include <utility>
+#include <optional>
 
 #include "base/apple/mach_logging.h"
-#include "base/feature_list.h"
-#include "base/memory/free_deleter.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 
 namespace {
 
-// Enables setting the task role of every child process to
-// TASK_DEFAULT_APPLICATION.
-BASE_FEATURE(kMacSetDefaultTaskRole,
-             "MacSetDefaultTaskRole",
-             FEATURE_DISABLED_BY_DEFAULT);
-
 // Returns the `task_role_t` of the process whose task port is `task_port`.
-absl::optional<task_role_t> GetTaskCategoryPolicyRole(mach_port_t task_port) {
+std::optional<task_role_t> GetTaskCategoryPolicyRole(mach_port_t task_port) {
   task_category_policy_data_t category_policy;
   mach_msg_type_number_t task_info_count = TASK_CATEGORY_POLICY_COUNT;
   boolean_t get_default = FALSE;
@@ -42,7 +28,7 @@ absl::optional<task_role_t> GetTaskCategoryPolicyRole(mach_port_t task_port) {
                       &task_info_count, &get_default);
   if (result != KERN_SUCCESS) {
     MACH_LOG(ERROR, result) << "task_policy_get TASK_CATEGORY_POLICY";
-    return absl::nullopt;
+    return std::nullopt;
   }
   CHECK(!get_default);
   return category_policy.role;
@@ -143,19 +129,6 @@ bool SetPriorityImpl(mach_port_t task_port,
 
 }  // namespace
 
-Time Process::CreationTime() const {
-  int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, Pid()};
-  size_t len = 0;
-  if (sysctl(mib, std::size(mib), NULL, &len, NULL, 0) < 0)
-    return Time();
-
-  std::unique_ptr<struct kinfo_proc, base::FreeDeleter> proc(
-      static_cast<struct kinfo_proc*>(malloc(len)));
-  if (sysctl(mib, std::size(mib), proc.get(), &len, NULL, 0) < 0)
-    return Time();
-  return Time::FromTimeVal(proc->kp_proc.p_un.__p_starttime);
-}
-
 bool Process::CanSetPriority() {
   return true;
 }
@@ -164,13 +137,13 @@ Process::Priority Process::GetPriority(PortProvider* port_provider) const {
   CHECK(IsValid());
   CHECK(port_provider);
 
-  mach_port_t task_port = port_provider->TaskForPid(Pid());
+  mach_port_t task_port = port_provider->TaskForHandle(Handle());
   if (task_port == TASK_NULL) {
     // Upon failure, return the default value.
     return Priority::kUserBlocking;
   }
 
-  absl::optional<task_role_t> task_role = GetTaskCategoryPolicyRole(task_port);
+  std::optional<task_role_t> task_role = GetTaskCategoryPolicyRole(task_port);
   if (!task_role) {
     // Upon failure, return the default value.
     return Priority::kUserBlocking;
@@ -201,7 +174,7 @@ bool Process::SetPriority(PortProvider* port_provider, Priority priority) {
     return false;
   }
 
-  mach_port_t task_port = port_provider->TaskForPid(Pid());
+  mach_port_t task_port = port_provider->TaskForHandle(Handle());
   if (task_port == TASK_NULL) {
     return false;
   }
@@ -229,10 +202,6 @@ bool Process::SetPriority(PortProvider* port_provider, Priority priority) {
 
 // static
 void Process::SetCurrentTaskDefaultRole() {
-  if (!base::FeatureList::IsEnabled(kMacSetDefaultTaskRole)) {
-    return;
-  }
-
   SetTaskCategoryPolicy(mach_task_self(), TASK_FOREGROUND_APPLICATION);
 
   // Set the QoS settings to tier 0, to match the default value given to App Nap

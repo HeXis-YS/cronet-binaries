@@ -1,0 +1,24 @@
+From 3435ba30494dc4cd256ac436e8fd436f061078e7 Mon Sep 17 00:00:00 2001
+From: klzgrad <kizdiv@gmail.com>
+Date: Sun, 14 Jun 2026 09:09:44 +0800
+Subject: [PATCH] base: Fix build for CPU yield
+
+---
+ src/base/synchronization/lock_subtle.h | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/src/base/synchronization/lock_subtle.h b/src/base/synchronization/lock_subtle.h
+index 1c72e70aa..33ea92a3e 100644
+--- a/src/base/synchronization/lock_subtle.h
++++ b/src/base/synchronization/lock_subtle.h
+@@ -74,7 +74,6 @@ static inline void YieldProcessor() {
+   // require additional software implementation.
+   NOTREACHED();
+ #else
+-#error "Unsupported architecture for YieldProcessor()"
+ #endif  // ARCH
+ }
+ 
+-- 
+2.53.0
+

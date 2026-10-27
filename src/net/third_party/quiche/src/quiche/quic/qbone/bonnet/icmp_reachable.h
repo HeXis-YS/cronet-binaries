@@ -7,16 +7,19 @@
 
 #include <netinet/icmp6.h>
 
+#include <cstdint>
 #include <memory>
+#include <string>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "quiche/quic/core/io/quic_event_loop.h"
 #include "quiche/quic/core/quic_alarm.h"
 #include "quiche/quic/core/quic_alarm_factory.h"
 #include "quiche/quic/core/quic_clock.h"
 #include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/platform/api/quic_ip_address.h"
-#include "quiche/quic/platform/api/quic_mutex.h"
 #include "quiche/quic/qbone/bonnet/icmp_reachable_interface.h"
 #include "quiche/quic/qbone/platform/kernel_interface.h"
 
@@ -59,6 +62,7 @@ class IcmpReachable : public IcmpReachableInterface {
     virtual void OnWriteError(int error) = 0;
   };
 
+  // |interface_name| is the name of the TUN/TAP device bound in the kernel.
   // |source| is the IPv6 address bound to the interface that IcmpReachable will
   //          send Echo Requests on.
   // |destination| is the IPv6 address of the destination of the Echo Requests.
@@ -71,17 +75,20 @@ class IcmpReachable : public IcmpReachableInterface {
   //                Server's thread.
   // |stats| is not owned, but should outlive this instance. It will be called
   //         back on Echo Replies, timeouts, and I/O errors.
-  IcmpReachable(QuicIpAddress source, QuicIpAddress destination,
-                QuicTime::Delta timeout, KernelInterface* kernel,
-                QuicEventLoop* event_loop, StatsInterface* stats);
+  // |socket_mark| is the SO_MARK value to apply to the ICMP socket (for
+  //               multiqueue queue steering). Defaults to 0 (no mark).
+  IcmpReachable(absl::string_view interface_name, QuicIpAddress source,
+                QuicIpAddress destination, QuicTime::Delta timeout,
+                KernelInterface* kernel, QuicEventLoop* event_loop,
+                StatsInterface* stats, uint32_t socket_mark = 0);
 
   ~IcmpReachable() override;
 
   // Initializes this reachability probe. Must be called from within the
   // |epoll_server|'s thread.
-  bool Init() QUIC_LOCKS_EXCLUDED(header_lock_) override;
+  bool Init() ABSL_LOCKS_EXCLUDED(header_lock_) override;
 
-  void OnAlarm() QUIC_LOCKS_EXCLUDED(header_lock_);
+  void OnAlarm() ABSL_LOCKS_EXCLUDED(header_lock_);
 
   static absl::string_view StatusName(Status status);
 
@@ -113,7 +120,7 @@ class IcmpReachable : public IcmpReachableInterface {
     IcmpReachable* reachable_;
   };
 
-  bool OnEvent(int fd) QUIC_LOCKS_EXCLUDED(header_lock_);
+  bool OnEvent(int fd) ABSL_LOCKS_EXCLUDED(header_lock_);
 
   const QuicTime::Delta timeout_;
 
@@ -131,14 +138,16 @@ class IcmpReachable : public IcmpReachableInterface {
 
   StatsInterface* stats_;
 
-  int send_fd_;
-  int recv_fd_;
+  int sock_fd_;
+  bool polling_registered_ = false;
 
-  QuicMutex header_lock_;
-  icmp6_hdr icmp_header_ QUIC_GUARDED_BY(header_lock_){};
+  absl::Mutex header_lock_;
+  icmp6_hdr icmp_header_ ABSL_GUARDED_BY(header_lock_){};
 
   QuicTime start_ = QuicTime::Zero();
   QuicTime end_ = QuicTime::Zero();
+
+  uint32_t socket_mark_ = 0;
 };
 
 }  // namespace quic

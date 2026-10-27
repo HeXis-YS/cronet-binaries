@@ -7,6 +7,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/strings/string_view.h"
@@ -33,7 +36,7 @@ namespace quic {
 class QuicGenericStream;
 
 // Returns QUIC versions to be used with QuicGenericSessionBase.
-ParsedQuicVersionVector GetQuicVersionsForGenericSession();
+QUICHE_EXPORT ParsedQuicVersionVector GetQuicVersionsForGenericSession();
 
 using CreateWebTransportSessionVisitorCallback =
     quiche::UnretainedCallback<std::unique_ptr<webtransport::SessionVisitor>(
@@ -52,6 +55,7 @@ class QUICHE_EXPORT QuicGenericSessionBase : public QuicSession,
   ~QuicGenericSessionBase();
 
   // QuicSession implementation.
+  void Initialize() override;
   std::vector<std::string> GetAlpnsToOffer() const override {
     return std::vector<std::string>({alpn_});
   }
@@ -62,19 +66,15 @@ class QUICHE_EXPORT QuicGenericSessionBase : public QuicSession,
   void OnAlpnSelected(absl::string_view alpn) override {
     QUICHE_DCHECK_EQ(alpn, alpn_);
   }
+  void OnConnectionClosed(const QuicConnectionCloseFrame& frame,
+                          ConnectionCloseSource source) override;
 
   bool ShouldKeepConnectionAlive() const override { return true; }
 
   QuicStream* CreateIncomingStream(QuicStreamId id) override;
-  QuicStream* CreateIncomingStream(PendingStream* /*pending*/) override {
-    QUIC_BUG(QuicGenericSessionBase_PendingStream)
-        << "QuicGenericSessionBase::CreateIncomingStream(PendingStream) not "
-           "implemented";
-    return nullptr;
-  }
 
   void OnTlsHandshakeComplete() override;
-  void OnMessageReceived(absl::string_view message) override;
+  void OnDatagramReceived(absl::string_view datagram) override;
 
   // webtransport::Session implementation.
   webtransport::Stream* AcceptIncomingBidirectionalStream() override;
@@ -102,8 +102,19 @@ class QUICHE_EXPORT QuicGenericSessionBase : public QuicSession,
   webtransport::SessionStats GetSessionStats() override {
     return WebTransportStatsForQuicSession(*this);
   }
+  webtransport::Perspective GetPerspective() const override {
+    return perspective() == quic::Perspective::IS_CLIENT
+               ? webtransport::Perspective::kClient
+               : webtransport::Perspective::kServer;
+  }
+  webtransport::UnderlyingProtocol GetUnderlyingProtocol() const override {
+    return webtransport::UnderlyingProtocol::kRawQuic;
+  }
   void NotifySessionDraining() override {}
   void SetOnDraining(quiche::SingleUseCallback<void()>) override {}
+  std::optional<std::string> GetNegotiatedSubprotocol() const override {
+    return alpn_;
+  }
 
   void CloseSession(webtransport::SessionErrorCode error_code,
                     absl::string_view error_message) override {
@@ -114,7 +125,7 @@ class QUICHE_EXPORT QuicGenericSessionBase : public QuicSession,
   }
 
   QuicByteCount GetMaxDatagramSize() const override {
-    return GetGuaranteedLargestMessagePayload();
+    return GetGuaranteedLargestDatagramPayload();
   }
 
  private:

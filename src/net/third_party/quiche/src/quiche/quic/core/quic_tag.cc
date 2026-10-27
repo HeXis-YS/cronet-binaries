@@ -5,14 +5,17 @@
 #include "quiche/quic/core/quic_tag.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
 #include <string>
+#include <vector>
 
 #include "absl/base/macros.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/str_split.h"
-#include "quiche/quic/platform/api/quic_flag_utils.h"
-#include "quiche/quic/platform/api/quic_flags.h"
+#include "absl/strings/string_view.h"
 #include "quiche/common/quiche_text_utils.h"
 
 namespace quic {
@@ -45,10 +48,9 @@ std::string QuicTagToString(QuicTag tag) {
   bool ascii = true;
   const QuicTag orig_tag = tag;
 
-  for (size_t i = 0; i < ABSL_ARRAYSIZE(chars); i++) {
+  for (size_t i = 0; i < std::size(chars); i++) {
     chars[i] = static_cast<char>(tag);
-    if ((chars[i] == 0 || chars[i] == '\xff') &&
-        i == ABSL_ARRAYSIZE(chars) - 1) {
+    if ((chars[i] == 0 || chars[i] == '\xff') && i == std::size(chars) - 1) {
       chars[i] = ' ';
     }
     if (!absl::ascii_isprint(static_cast<unsigned char>(chars[i]))) {
@@ -79,8 +81,8 @@ bool ContainsQuicTag(const QuicTagVector& tag_vector, QuicTag tag) {
 QuicTag ParseQuicTag(absl::string_view tag_string) {
   quiche::QuicheTextUtils::RemoveLeadingAndTrailingWhitespace(&tag_string);
   std::string tag_bytes;
-  if (tag_string.length() == 8) {
-    tag_bytes = absl::HexStringToBytes(tag_string);
+  if (tag_string.length() == 8 &&
+      absl::HexStringToBytes(tag_string, &tag_bytes)) {
     tag_string = tag_bytes;
   }
   QuicTag tag = 0;

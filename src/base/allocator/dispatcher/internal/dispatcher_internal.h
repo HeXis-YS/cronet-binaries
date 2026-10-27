@@ -8,22 +8,26 @@
 #include "base/allocator/dispatcher/configuration.h"
 #include "base/allocator/dispatcher/internal/dispatch_data.h"
 #include "base/allocator/dispatcher/internal/tools.h"
+#include "base/allocator/dispatcher/memory_tagging.h"
+#include "base/allocator/dispatcher/notification_data.h"
 #include "base/allocator/dispatcher/subsystem.h"
-#include "base/allocator/partition_allocator/partition_alloc_allocation_data.h"
-#include "base/allocator/partition_allocator/partition_alloc_buildflags.h"
 #include "base/check.h"
 #include "base/compiler_specific.h"
-#include "build/build_config.h"
+#include "partition_alloc/buildflags.h"
 
-#if BUILDFLAG(USE_ALLOCATOR_SHIM)
-#include "base/allocator/partition_allocator/shim/allocator_shim.h"
+#if PA_BUILDFLAG(USE_PARTITION_ALLOC)
+#include "partition_alloc/partition_alloc_allocation_data.h"  // nogncheck
+#endif
+
+#if PA_BUILDFLAG(USE_ALLOCATOR_SHIM)
+#include "partition_alloc/shim/allocator_shim.h"
 #endif
 
 #include <tuple>
 
 namespace base::allocator::dispatcher::internal {
 
-#if BUILDFLAG(USE_ALLOCATOR_SHIM)
+#if PA_BUILDFLAG(USE_ALLOCATOR_SHIM)
 using allocator_shim::AllocatorDispatch;
 #endif
 
@@ -41,20 +45,16 @@ template <typename... ObserverTypes, size_t... Indices>
 ALWAYS_INLINE void PerformAllocationNotification(
     const std::tuple<ObserverTypes...>& observers,
     std::index_sequence<Indices...>,
-    const partition_alloc::AllocationNotificationData& notification_data,
-    AllocationSubsystem sub_system) {
-  ((std::get<Indices>(observers)->OnAllocation(
-       notification_data.address(), notification_data.size(), sub_system,
-       notification_data.type_name())),
-   ...);
+    const AllocationNotificationData& notification_data) {
+  ((std::get<Indices>(observers)->OnAllocation(notification_data)), ...);
 }
 
 template <typename... ObserverTypes, size_t... Indices>
 ALWAYS_INLINE void PerformFreeNotification(
     const std::tuple<ObserverTypes...>& observers,
     std::index_sequence<Indices...>,
-    const partition_alloc::FreeNotificationData& notification_data) {
-  ((std::get<Indices>(observers)->OnFree(notification_data.address())), ...);
+    const FreeNotificationData& notification_data) {
+  ((std::get<Indices>(observers)->OnFree(notification_data)), ...);
 }
 
 // DispatcherImpl provides hooks into the various memory subsystems. These hooks
@@ -83,215 +83,303 @@ struct DispatcherImpl {
  private:
   static DispatchData CreateDispatchData() {
     return DispatchData()
-#if BUILDFLAG(USE_PARTITION_ALLOC)
+#if PA_BUILDFLAG(USE_PARTITION_ALLOC)
         .SetAllocationObserverHooks(&PartitionAllocatorAllocationHook,
                                     &PartitionAllocatorFreeHook)
 #endif
-#if BUILDFLAG(USE_ALLOCATOR_SHIM)
+#if PA_BUILDFLAG(USE_ALLOCATOR_SHIM)
         .SetAllocatorDispatch(&allocator_dispatch_)
 #endif
         ;
   }
 
-#if BUILDFLAG(USE_PARTITION_ALLOC)
+#if PA_BUILDFLAG(USE_PARTITION_ALLOC)
   static void PartitionAllocatorAllocationHook(
-      const partition_alloc::AllocationNotificationData& notification_data) {
-    DoNotifyAllocation(notification_data,
-                       AllocationSubsystem::kPartitionAllocator);
+      const partition_alloc::AllocationNotificationData& pa_notification_data) {
+    AllocationNotificationData dispatcher_notification_data(
+        pa_notification_data.address(), pa_notification_data.size(),
+        pa_notification_data.type_name(),
+        AllocationSubsystem::kPartitionAllocator);
+
+#if PA_BUILDFLAG(HAS_MEMORY_TAGGING)
+    dispatcher_notification_data.SetMteReportingMode(
+        ConvertToMTEMode(pa_notification_data.mte_reporting_mode()));
+#endif
+
+    DoNotifyAllocation(dispatcher_notification_data);
   }
 
   static void PartitionAllocatorFreeHook(
-      const partition_alloc::FreeNotificationData& notification_data) {
-    DoNotifyFree(notification_data);
-  }
+      const partition_alloc::FreeNotificationData& pa_notification_data) {
+    FreeNotificationData dispatcher_notification_data(
+        pa_notification_data.address(),
+        AllocationSubsystem::kPartitionAllocator);
+
+#if PA_BUILDFLAG(HAS_MEMORY_TAGGING)
+    dispatcher_notification_data.SetMteReportingMode(
+        ConvertToMTEMode(pa_notification_data.mte_reporting_mode()));
 #endif
 
-#if BUILDFLAG(USE_ALLOCATOR_SHIM)
-  static void* AllocFn(const AllocatorDispatch* self,
-                       size_t size,
+    DoNotifyFree(dispatcher_notification_data);
+  }
+#endif  // PA_BUILDFLAG(USE_PARTITION_ALLOC)
+
+#if PA_BUILDFLAG(USE_ALLOCATOR_SHIM)
+  static void* AllocFn(size_t size,
+                       allocator_shim::AllocToken alloc_token,
                        void* context) {
-    void* const address = self->next->alloc_function(self->next, size, context);
-
-    DoNotifyAllocation(
-        partition_alloc::AllocationNotificationData(address, size, nullptr),
-        AllocationSubsystem::kAllocatorShim);
-
-    return address;
-  }
-
-  static void* AllocUncheckedFn(const AllocatorDispatch* self,
-                                size_t size,
-                                void* context) {
     void* const address =
-        self->next->alloc_unchecked_function(self->next, size, context);
+        allocator_dispatch_.next->alloc_function(size, alloc_token, context);
 
-    DoNotifyAllocation(
-        partition_alloc::AllocationNotificationData(address, size, nullptr),
-        AllocationSubsystem::kAllocatorShim);
+    DoNotifyAllocationForShim(address, size);
 
     return address;
   }
 
-  static void* AllocZeroInitializedFn(const AllocatorDispatch* self,
-                                      size_t n,
+  static void* AllocUncheckedFn(size_t size,
+                                allocator_shim::AllocToken alloc_token,
+                                void* context) {
+    void* const address = allocator_dispatch_.next->alloc_unchecked_function(
+        size, alloc_token, context);
+
+    DoNotifyAllocationForShim(address, size);
+
+    return address;
+  }
+
+  static void* AllocZeroInitializedFn(size_t n,
                                       size_t size,
+                                      allocator_shim::AllocToken alloc_token,
                                       void* context) {
-    void* const address = self->next->alloc_zero_initialized_function(
-        self->next, n, size, context);
+    void* const address =
+        allocator_dispatch_.next->alloc_zero_initialized_function(
+            n, size, alloc_token, context);
 
-    DoNotifyAllocation(
-        partition_alloc::AllocationNotificationData(address, n * size, nullptr),
-        AllocationSubsystem::kAllocatorShim);
+    DoNotifyAllocationForShim(address, n * size);
 
     return address;
   }
 
-  static void* AllocAlignedFn(const AllocatorDispatch* self,
-                              size_t alignment,
+  static void* AllocZeroInitializedUncheckedFn(
+      size_t n,
+      size_t size,
+      allocator_shim::AllocToken alloc_token,
+      void* context) {
+    void* const address =
+        allocator_dispatch_.next->alloc_zero_initialized_unchecked_function(
+            n, size, alloc_token, context);
+
+    DoNotifyAllocationForShim(address, n * size);
+
+    return address;
+  }
+
+  static void* AllocAlignedFn(size_t alignment,
                               size_t size,
+                              allocator_shim::AllocToken alloc_token,
                               void* context) {
-    void* const address = self->next->alloc_aligned_function(
-        self->next, alignment, size, context);
+    void* const address = allocator_dispatch_.next->alloc_aligned_function(
+        alignment, size, alloc_token, context);
 
-    DoNotifyAllocation(
-        partition_alloc::AllocationNotificationData(address, size, nullptr),
-        AllocationSubsystem::kAllocatorShim);
+    DoNotifyAllocationForShim(address, size);
 
     return address;
   }
 
-  static void* ReallocFn(const AllocatorDispatch* self,
-                         void* address,
+  static void* AllocAlignedUncheckedFn(size_t alignment,
+                                       size_t size,
+                                       allocator_shim::AllocToken alloc_token,
+                                       void* context) {
+    void* const address =
+        allocator_dispatch_.next->alloc_aligned_unchecked_function(
+            alignment, size, alloc_token, context);
+
+    DoNotifyAllocationForShim(address, size);
+
+    return address;
+  }
+
+  static void* ReallocFn(void* address,
                          size_t size,
+                         allocator_shim::AllocToken alloc_token,
                          void* context) {
     // Note: size == 0 actually performs free.
-    DoNotifyFree(partition_alloc::FreeNotificationData(address));
+    DoNotifyFreeForShim(address);
     void* const reallocated_address =
-        self->next->realloc_function(self->next, address, size, context);
+        allocator_dispatch_.next->realloc_function(address, size, alloc_token,
+                                                   context);
 
-    DoNotifyAllocation(partition_alloc::AllocationNotificationData(
-                           reallocated_address, size, nullptr),
-                       AllocationSubsystem::kAllocatorShim);
+    DoNotifyAllocationForShim(reallocated_address, size);
 
     return reallocated_address;
   }
 
-  static void FreeFn(const AllocatorDispatch* self,
-                     void* address,
-                     void* context) {
-    // Note: The RecordFree should be called before free_function (here and in
+  static void* ReallocUncheckedFn(void* address,
+                                  size_t size,
+                                  allocator_shim::AllocToken alloc_token,
+                                  void* context) {
+    // Note: size == 0 actually performs free.
+    DoNotifyFreeForShim(address);
+    void* const reallocated_address =
+        allocator_dispatch_.next->realloc_unchecked_function(
+            address, size, alloc_token, context);
+
+    DoNotifyAllocationForShim(reallocated_address, size);
+
+    return reallocated_address;
+  }
+
+  static void FreeFn(void* address, void* context) {
+    // Note: DoNotifyFree should be called before free_function (here and in
     // other places). That is because observers need to handle the allocation
     // being freed before calling free_function, as once the latter is executed
     // the address becomes available and can be allocated by another thread.
     // That would be racy otherwise.
-    DoNotifyFree(partition_alloc::FreeNotificationData(address));
-    self->next->free_function(self->next, address, context);
+    DoNotifyFreeForShim(address);
+    MUSTTAIL return allocator_dispatch_.next->free_function(address, context);
   }
 
-  static size_t GetSizeEstimateFn(const AllocatorDispatch* self,
-                                  void* address,
+  static void FreeWithSizeFn(void* address, size_t size, void* context) {
+    DoNotifyFreeForShim(address);
+    MUSTTAIL return allocator_dispatch_.next->free_with_size_function(
+        address, size, context);
+  }
+
+  static void FreeWithAlignmentFn(void* address,
+                                  size_t alignment,
                                   void* context) {
-    return self->next->get_size_estimate_function(self->next, address, context);
+    DoNotifyFreeForShim(address);
+    MUSTTAIL return allocator_dispatch_.next->free_with_alignment_function(
+        address, alignment, context);
   }
 
-  static bool ClaimedAddressFn(const AllocatorDispatch* self,
-                               void* address,
-                               void* context) {
-    return self->next->claimed_address_function(self->next, address, context);
+  static void FreeWithSizeAndAlignmentFn(void* address,
+                                         size_t size,
+                                         size_t alignment,
+                                         void* context) {
+    DoNotifyFreeForShim(address);
+    MUSTTAIL return allocator_dispatch_.next
+        ->free_with_size_and_alignment_function(address, size, alignment,
+                                                context);
   }
 
-  static unsigned BatchMallocFn(const AllocatorDispatch* self,
-                                size_t size,
+  static unsigned BatchMallocFn(size_t size,
                                 void** results,
                                 unsigned num_requested,
                                 void* context) {
-    unsigned const num_allocated = self->next->batch_malloc_function(
-        self->next, size, results, num_requested, context);
+    unsigned const num_allocated =
+        allocator_dispatch_.next->batch_malloc_function(size, results,
+                                                        num_requested, context);
     for (unsigned i = 0; i < num_allocated; ++i) {
-      DoNotifyAllocation(partition_alloc::AllocationNotificationData(
-                             results[i], size, nullptr),
-                         AllocationSubsystem::kAllocatorShim);
+      DoNotifyAllocationForShim(UNSAFE_TODO(results[i]), size);
     }
     return num_allocated;
   }
 
-  static void BatchFreeFn(const AllocatorDispatch* self,
-                          void** to_be_freed,
+  static void BatchFreeFn(void** to_be_freed,
                           unsigned num_to_be_freed,
                           void* context) {
     for (unsigned i = 0; i < num_to_be_freed; ++i) {
-      DoNotifyFree(partition_alloc::FreeNotificationData(to_be_freed[i]));
+      DoNotifyFreeForShim(UNSAFE_TODO(to_be_freed[i]));
     }
 
-    self->next->batch_free_function(self->next, to_be_freed, num_to_be_freed,
-                                    context);
+    MUSTTAIL return allocator_dispatch_.next->batch_free_function(
+        to_be_freed, num_to_be_freed, context);
   }
 
-  static void FreeDefiniteSizeFn(const AllocatorDispatch* self,
-                                 void* address,
-                                 size_t size,
-                                 void* context) {
-    DoNotifyFree(partition_alloc::FreeNotificationData(address));
-    self->next->free_definite_size_function(self->next, address, size, context);
+  static void TryFreeDefaultFn(void* address, void* context) {
+    DoNotifyFreeForShim(address);
+    MUSTTAIL return allocator_dispatch_.next->try_free_default_function(
+        address, context);
   }
 
-  static void TryFreeDefaultFn(const AllocatorDispatch* self,
-                               void* address,
-                               void* context) {
-    DoNotifyFree(partition_alloc::FreeNotificationData(address));
-    self->next->try_free_default_function(self->next, address, context);
-  }
-
-  static void* AlignedMallocFn(const AllocatorDispatch* self,
-                               size_t size,
+  static void* AlignedMallocFn(size_t size,
                                size_t alignment,
+                               allocator_shim::AllocToken alloc_token,
                                void* context) {
-    void* const address = self->next->aligned_malloc_function(
-        self->next, size, alignment, context);
+    void* const address = allocator_dispatch_.next->aligned_malloc_function(
+        size, alignment, alloc_token, context);
 
-    DoNotifyAllocation(
-        partition_alloc::AllocationNotificationData(address, size, nullptr),
-        AllocationSubsystem::kAllocatorShim);
+    DoNotifyAllocationForShim(address, size);
 
     return address;
   }
 
-  static void* AlignedReallocFn(const AllocatorDispatch* self,
-                                void* address,
+  static void* AlignedMallocUncheckedFn(size_t size,
+                                        size_t alignment,
+                                        allocator_shim::AllocToken alloc_token,
+                                        void* context) {
+    void* const address =
+        allocator_dispatch_.next->aligned_malloc_unchecked_function(
+            size, alignment, alloc_token, context);
+
+    DoNotifyAllocationForShim(address, size);
+
+    return address;
+  }
+
+  static void* AlignedReallocFn(void* address,
                                 size_t size,
                                 size_t alignment,
+                                allocator_shim::AllocToken alloc_token,
                                 void* context) {
     // Note: size == 0 actually performs free.
-    DoNotifyFree(partition_alloc::FreeNotificationData(address));
-    address = self->next->aligned_realloc_function(self->next, address, size,
-                                                   alignment, context);
+    DoNotifyFreeForShim(address);
+    address = allocator_dispatch_.next->aligned_realloc_function(
+        address, size, alignment, alloc_token, context);
 
-    DoNotifyAllocation(
-        partition_alloc::AllocationNotificationData(address, size, nullptr),
-        AllocationSubsystem::kAllocatorShim);
+    DoNotifyAllocationForShim(address, size);
 
     return address;
   }
 
-  static void AlignedFreeFn(const AllocatorDispatch* self,
-                            void* address,
-                            void* context) {
-    DoNotifyFree(partition_alloc::FreeNotificationData(address));
-    self->next->aligned_free_function(self->next, address, context);
+  static void* AlignedReallocUncheckedFn(void* address,
+                                         size_t size,
+                                         size_t alignment,
+                                         allocator_shim::AllocToken alloc_token,
+                                         void* context) {
+    // Note: size == 0 actually performs free.
+    DoNotifyFreeForShim(address);
+    address = allocator_dispatch_.next->aligned_realloc_unchecked_function(
+        address, size, alignment, alloc_token, context);
+
+    DoNotifyAllocationForShim(address, size);
+
+    return address;
+  }
+
+  static void AlignedFreeFn(void* address, void* context) {
+    DoNotifyFreeForShim(address);
+    MUSTTAIL return allocator_dispatch_.next->aligned_free_function(address,
+                                                                    context);
+  }
+
+  ALWAYS_INLINE static void DoNotifyAllocationForShim(void* address,
+                                                      size_t size) {
+    AllocationNotificationData notification_data(
+        address, size, nullptr, AllocationSubsystem::kAllocatorShim);
+
+    DoNotifyAllocation(notification_data);
+  }
+
+  ALWAYS_INLINE static void DoNotifyFreeForShim(void* address) {
+    FreeNotificationData notification_data(address,
+                                           AllocationSubsystem::kAllocatorShim);
+
+    DoNotifyFree(notification_data);
   }
 
   static AllocatorDispatch allocator_dispatch_;
-#endif
+#endif  // PA_BUILDFLAG(USE_ALLOCATOR_SHIM)
 
   ALWAYS_INLINE static void DoNotifyAllocation(
-      const partition_alloc::AllocationNotificationData& notification_data,
-      AllocationSubsystem sub_system) {
+      const AllocationNotificationData& notification_data) {
     PerformAllocationNotification(s_observers, AllObservers{},
-                                  notification_data, sub_system);
+                                  notification_data);
   }
 
   ALWAYS_INLINE static void DoNotifyFree(
-      const partition_alloc::FreeNotificationData& notification_data) {
+      const FreeNotificationData& notification_data) {
     PerformFreeNotification(s_observers, AllObservers{}, notification_data);
   }
 
@@ -301,26 +389,36 @@ struct DispatcherImpl {
 template <typename... ObserverTypes>
 std::tuple<ObserverTypes*...> DispatcherImpl<ObserverTypes...>::s_observers;
 
-#if BUILDFLAG(USE_ALLOCATOR_SHIM)
+#if PA_BUILDFLAG(USE_ALLOCATOR_SHIM)
 template <typename... ObserverTypes>
 AllocatorDispatch DispatcherImpl<ObserverTypes...>::allocator_dispatch_ = {
-    &AllocFn,
-    &AllocUncheckedFn,
-    &AllocZeroInitializedFn,
-    &AllocAlignedFn,
-    &ReallocFn,
-    &FreeFn,
-    &GetSizeEstimateFn,
-    &ClaimedAddressFn,
-    &BatchMallocFn,
-    &BatchFreeFn,
-    &FreeDefiniteSizeFn,
-    &TryFreeDefaultFn,
-    &AlignedMallocFn,
-    &AlignedReallocFn,
-    &AlignedFreeFn,
-    nullptr};
-#endif
+    .alloc_function = AllocFn,
+    .alloc_unchecked_function = AllocUncheckedFn,
+    .alloc_zero_initialized_function = AllocZeroInitializedFn,
+    .alloc_zero_initialized_unchecked_function =
+        AllocZeroInitializedUncheckedFn,
+    .alloc_aligned_function = AllocAlignedFn,
+    .alloc_aligned_unchecked_function = AllocAlignedUncheckedFn,
+    .realloc_function = ReallocFn,
+    .realloc_unchecked_function = ReallocUncheckedFn,
+    .free_function = FreeFn,
+    .free_with_size_function = FreeWithSizeFn,
+    .free_with_alignment_function = FreeWithAlignmentFn,
+    .free_with_size_and_alignment_function = FreeWithSizeAndAlignmentFn,
+    .get_size_estimate_function = nullptr,
+    .good_size_function = nullptr,
+    .claimed_address_function = nullptr,
+    .batch_malloc_function = BatchMallocFn,
+    .batch_free_function = BatchFreeFn,
+    .try_free_default_function = TryFreeDefaultFn,
+    .aligned_malloc_function = AlignedMallocFn,
+    .aligned_malloc_unchecked_function = AlignedMallocUncheckedFn,
+    .aligned_realloc_function = AlignedReallocFn,
+    .aligned_realloc_unchecked_function = AlignedReallocUncheckedFn,
+    .aligned_free_function = AlignedFreeFn,
+    .next = nullptr,
+};
+#endif  // PA_BUILDFLAG(USE_ALLOCATOR_SHIM)
 
 // Specialization of DispatcherImpl in case we have no observers to notify. In
 // this special case we return a set of null pointers as the Dispatcher must not
@@ -329,10 +427,10 @@ template <>
 struct DispatcherImpl<> {
   static DispatchData GetNotificationHooks(std::tuple<> /*observers*/) {
     return DispatchData()
-#if BUILDFLAG(USE_PARTITION_ALLOC)
+#if PA_BUILDFLAG(USE_PARTITION_ALLOC)
         .SetAllocationObserverHooks(nullptr, nullptr)
 #endif
-#if BUILDFLAG(USE_ALLOCATOR_SHIM)
+#if PA_BUILDFLAG(USE_ALLOCATOR_SHIM)
         .SetAllocatorDispatch(nullptr)
 #endif
         ;

@@ -4,7 +4,7 @@ set -ex
 . ./get-sysroot.sh
 
 if [ "$SYSROOT_ARCH" -a ! -d ./"$WITH_SYSROOT/lib" ]; then
-  ./build/linux/sysroot_scripts/sysroot-creator.sh build "$SYSROOT_ARCH"
+  ./build/linux/sysroot_scripts/sysroot_creator.py build "$SYSROOT_ARCH"
 fi
 
 if [ "$OPENWRT_FLAGS" ]; then
@@ -25,12 +25,21 @@ mkdir -p third_party/llvm-build/Release+Asserts
 cd tools/clang/scripts
 CLANG_REVISION=$($PYTHON -c 'import update; print(update.PACKAGE_VERSION)')
 cd -
-echo $CLANG_REVISION >third_party/llvm-build/Release+Asserts/cr_build_revision
-if [ ! -d third_party/llvm-build/Release+Asserts/bin ]; then
+installed_revision=$(cat third_party/llvm-build/Release+Asserts/cr_build_revision 2>/dev/null || true)
+if [ "$installed_revision" != "$CLANG_REVISION" ] || [ ! -f third_party/llvm-build/Release+Asserts/bin/clang ]; then
   mkdir -p third_party/llvm-build/Release+Asserts
-  clang_path="clang-$CLANG_REVISION.tgz"
+  clang_path="clang-$CLANG_REVISION.tar.xz"
   clang_url="https://commondatastorage.googleapis.com/chromium-browser-clang/$WITH_CLANG/$clang_path"
-  curl "$clang_url" | tar xzf - -C third_party/llvm-build/Release+Asserts
+  curl --fail "$clang_url" | tar xJf - -C third_party/llvm-build/Release+Asserts
+  echo "$CLANG_REVISION" >third_party/llvm-build/Release+Asserts/cr_build_revision
+  rm -f third_party/llvm-build/Release+Asserts/.android-runtime
+fi
+
+if [ "$target_os" = android -a ! -f third_party/llvm-build/Release+Asserts/.android-runtime ]; then
+  clang_path="clang-android-runtime-library-$CLANG_REVISION.tar.xz"
+  curl --fail "https://commondatastorage.googleapis.com/chromium-browser-clang/$WITH_CLANG/$clang_path" |
+    tar xJf - -C third_party/llvm-build/Release+Asserts
+  touch third_party/llvm-build/Release+Asserts/.android-runtime
 fi
 
 # sccache
@@ -50,52 +59,18 @@ esac
 if [ "$host_os" = mac -a "$host_cpu" = arm64 ]; then
   WITH_GN=mac-arm64
 fi
-if [ ! -f gn/out/gn ]; then
-  gn_version=$(grep "'gn_version':" DEPS | cut -d"'" -f4)
+gn_version=$(grep "'gn_version':" DEPS | cut -d"'" -f4)
+installed_gn=$(cat gn/out/revision 2>/dev/null || true)
+if [ ! -f gn/out/gn ] || [ "$installed_gn" != "$gn_version" ]; then
   mkdir -p gn/out
-  curl -L "https://chrome-infra-packages.appspot.com/dl/gn/gn/$WITH_GN/+/$gn_version" -o gn.zip
-  unzip gn.zip -d gn/out
+  curl --fail -L "https://chrome-infra-packages.appspot.com/dl/gn/gn/$WITH_GN/+/$gn_version" -o gn.zip
+  unzip -o gn.zip -d gn/out
   rm gn.zip
-fi
-
-# See src/build/config/compiler/pgo/BUILD.gn
-case "$target_os" in
-  win)
-    case "$target_cpu" in
-      arm64) WITH_PGO=win-arm64;;
-      x64) WITH_PGO=win64;;
-      *) WITH_PGO=win32;;
-    esac
-  ;;
-  mac)
-    case "$target_cpu" in
-      arm64) WITH_PGO=mac-arm;;
-      *) WITH_PGO=mac;;
-    esac
-  ;;
-  linux|openwrt)
-    WITH_PGO=linux
-  ;;
-  android)
-    case "$target_cpu" in
-      arm64) WITH_PGO=android-arm64;;
-      *) WITH_PGO=android-arm32;;
-    esac
-  ;;
-esac
-if [ "$WITH_PGO" ]; then
-  PGO_PATH=$(cat chrome/build/$WITH_PGO.pgo.txt)
-fi
-if [ "$WITH_PGO" -a ! -f chrome/build/pgo_profiles/"$PGO_PATH" ]; then
-  mkdir -p chrome/build/pgo_profiles
-  cd chrome/build/pgo_profiles
-  curl --limit-rate 10M -LO "https://storage.googleapis.com/chromium-optimization-profiles/pgo_profiles/$PGO_PATH"
-  cd ../../..
+  echo "$gn_version" > gn/out/revision
 fi
 
 if [ "$target_os" = android -a ! -d third_party/android_toolchain/ndk ]; then
-  # https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
-  android_ndk_version=$(grep 'default_android_ndk_version = ' build/config/android/config.gni | cut -d'"' -f2)
+  android_ndk_version=r24
   curl -LO https://dl.google.com/android/repository/android-ndk-$android_ndk_version-linux.zip
   unzip android-ndk-$android_ndk_version-linux.zip
   mkdir -p third_party/android_toolchain/ndk
@@ -106,6 +81,12 @@ if [ "$target_os" = android -a ! -d third_party/android_toolchain/ndk ]; then
   cd third_party/android_toolchain/ndk
   find toolchains -type f -regextype egrep \! -regex \
     '.*(lib(atomic|gcc|gcc_real|compiler_rt-extras|android_support|unwind).a|crt.*o|lib(android|c|dl|log|m).so|usr/local.*|usr/include.*)' -delete
+  # Works around https://github.com/android/ndk/issues/2082
+  # .../android/hardware_buffer.h:322:42: error: expression is not an integral constant expression
+  #   322 |     AHARDWAREBUFFER_USAGE_FRONT_BUFFER = 1UL << 32,
+  # .../android/hardware_buffer.h:322:46: note: shift count 32 >= width of type 'unsigned long' (32 bits)
+  #   322 |     AHARDWAREBUFFER_USAGE_FRONT_BUFFER = 1UL << 32,
+  sed -i 's/AHARDWAREBUFFER_USAGE_FRONT_BUFFER = 1UL /AHARDWAREBUFFER_USAGE_FRONT_BUFFER = 1ULL /' toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/android/hardware_buffer.h
   cd -
   rm -rf android-ndk-$android_ndk_version android-ndk-$android_ndk_version-linux.zip
 fi

@@ -41,10 +41,18 @@ extern const char kTestLauncherTrace[];
 extern const char kTestTinyTimeout[];
 extern const char kUiTestActionMaxTimeout[];
 extern const char kUiTestActionTimeout[];
+extern const char kWithDeathTestStackTraces[];
+extern const char kFuzz[];
+extern const char kFuzzFor[];
+extern const char kListFuzzTests[];
 
 #if BUILDFLAG(IS_IOS)
 extern const char kEnableRunIOSUnittestsWithXCTest[];
 extern const char kWriteCompiledTestsJsonToWritablePath[];
+#endif
+
+#if BUILDFLAG(IS_WIN)
+extern const char kDisableStrictHandleCheckingForTesting[];
 #endif
 
 }  // namespace switches

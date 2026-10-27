@@ -4,14 +4,30 @@
 
 #include "quiche/quic/core/quic_coalesced_packet.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <vector>
+
 #include "absl/memory/memory.h"
 #include "absl/strings/str_cat.h"
+#include "quiche/quic/core/quic_packets.h"
+#include "quiche/quic/core/quic_types.h"
 #include "quiche/quic/platform/api/quic_bug_tracker.h"
+#include "quiche/quic/platform/api/quic_flag_utils.h"
+#include "quiche/quic/platform/api/quic_logging.h"
+#include "quiche/quic/platform/api/quic_socket_address.h"
+#include "quiche/common/platform/api/quiche_logging.h"
+#include "quiche/common/quiche_buffer_allocator.h"
 
 namespace quic {
 
 QuicCoalescedPacket::QuicCoalescedPacket()
-    : length_(0), max_packet_length_(0), ecn_codepoint_(ECN_NOT_ECT) {}
+    : length_(0),
+      max_packet_length_(0),
+      ecn_codepoint_(ECN_NOT_ECT),
+      flow_label_(0) {}
 
 QuicCoalescedPacket::~QuicCoalescedPacket() { Clear(); }
 
@@ -19,8 +35,8 @@ bool QuicCoalescedPacket::MaybeCoalescePacket(
     const SerializedPacket& packet, const QuicSocketAddress& self_address,
     const QuicSocketAddress& peer_address,
     quiche::QuicheBufferAllocator* allocator,
-    QuicPacketLength current_max_packet_length,
-    QuicEcnCodepoint ecn_codepoint) {
+    QuicPacketLength current_max_packet_length, QuicEcnCodepoint ecn_codepoint,
+    uint32_t flow_label) {
   if (packet.encrypted_length == 0) {
     QUIC_BUG(quic_bug_10611_1) << "Trying to coalesce an empty packet";
     return true;
@@ -44,10 +60,16 @@ bool QuicCoalescedPacket::MaybeCoalescePacket(
           << "Cannot coalesce packet because self/peer address changed";
       return false;
     }
-    if (max_packet_length_ != current_max_packet_length) {
-      QUIC_BUG(quic_bug_10611_2)
-          << "Max packet length changes in the middle of the write path";
+    if (max_packet_length_ > current_max_packet_length) {
+      QUIC_BUG(quic_bug_coalesced_packet_max_packet_length_shrinks)
+          << "Max packet length shrinks in the middle of the write path";
       return false;
+    }
+    if (max_packet_length_ < current_max_packet_length) {
+      QUIC_BUG_IF(quic_bug_coalesced_packet_max_packet_length_increases,
+                  !max_packet_length_may_increase_)
+          << "Max packet length increases in the middle of the write path";
+      max_packet_length_ = current_max_packet_length;
     }
     if (ContainsPacketOfEncryptionLevel(packet.encryption_level)) {
       // Do not coalesce packets of the same encryption level.
@@ -55,6 +77,10 @@ bool QuicCoalescedPacket::MaybeCoalescePacket(
     }
     if (ecn_codepoint != ecn_codepoint_) {
       // Do not coalesce packets with different ECN codepoints.
+      return false;
+    }
+    if (flow_label != flow_label_) {
+      // Do not coalesce packets with different flow labels
       return false;
     }
   }
@@ -72,6 +98,7 @@ bool QuicCoalescedPacket::MaybeCoalescePacket(
     QUIC_CODE_COUNT(QUIC_SUCCESSFULLY_COALESCED_MULTIPLE_PACKETS);
   }
   ecn_codepoint_ = ecn_codepoint;
+  flow_label_ = flow_label;
   length_ += packet.encrypted_length;
   transmission_types_[packet.encryption_level] = packet.transmission_type;
   if (packet.encryption_level == ENCRYPTION_INITIAL) {

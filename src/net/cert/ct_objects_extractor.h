@@ -6,8 +6,8 @@
 #define NET_CERT_CT_OBJECTS_EXTRACTOR_H_
 
 #include <string>
+#include <string_view>
 
-#include "base/strings/string_piece.h"
 #include "net/base/net_export.h"
 #include "net/cert/x509_certificate.h"
 
@@ -56,8 +56,8 @@ NET_EXPORT_PRIVATE bool GetX509SignedEntry(const CRYPTO_BUFFER* leaf,
 // |*sct_list| can then be further decoded with ct::DecodeSCTList.
 NET_EXPORT_PRIVATE bool ExtractSCTListFromOCSPResponse(
     const CRYPTO_BUFFER* issuer,
-    const std::string& cert_serial_number,
-    base::StringPiece ocsp_response,
+    base::span<const uint8_t> cert_serial_number,
+    std::string_view ocsp_response,
     std::string* sct_list);
 
 }  // namespace net::ct

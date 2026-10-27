@@ -10,21 +10,20 @@
 // any gtest based tests that are linked into your executable.
 
 #include <memory>
+#include <string_view>
 
 #include "base/at_exit.h"
 #include "base/check.h"
+#include "base/i18n/test/scoped_icu_locale.h"
 #include "base/memory/raw_ptr.h"
-#include "base/strings/string_piece.h"
+#include "base/test/tracing/trace_to_file.h"
 #include "base/tracing_buildflags.h"
 #include "build/build_config.h"
 
-#if BUILDFLAG(ENABLE_BASE_TRACING)
-#include "base/test/trace_to_file.h"
-#endif  // BUILDFLAG(ENABLE_BASE_TRACING)
-
 #if BUILDFLAG(IS_WIN)
 #include <vector>
-#include "base/allocator/partition_allocator/pointers/raw_ptr_exclusion.h"
+
+#include "base/memory/raw_ptr_exclusion.h"
 #endif
 
 namespace logging {
@@ -66,14 +65,19 @@ class TestSuite {
   // Disables checks for certain global objects being leaked across tests.
   void DisableCheckForLeakedGlobals();
 
+  // Resets the ScopedFeatureList instance that is initialized for each test.
+  // This may be needed in cases where there's an exit() in the middle of a test
+  // that has its own ScopedFeatureList, such as fuzz tests.
+  static void ResetScopedFeatureListInstance();
+
  protected:
   // By default fatal log messages (e.g. from DCHECKs) result in error dialogs
   // which gum up buildbots. Use a minimalistic assert handler which just
   // terminates the process.
   void UnitTestAssertHandler(const char* file,
                              int line,
-                             const base::StringPiece summary,
-                             const base::StringPiece stack_trace);
+                             std::string_view summary,
+                             std::string_view stack_trace);
 
   // Disable crash dialogs so that it doesn't gum up the buildbot
   virtual void SuppressErrorDialogs();
@@ -95,13 +99,12 @@ class TestSuite {
 
   void AddTestLauncherResultPrinter();
 
-#if BUILDFLAG(ENABLE_BASE_TRACING)
   test::TraceToFile trace_to_file_;
-#endif  // BUILDFLAG(ENABLE_BASE_TRACING)
 
   raw_ptr<XmlUnitTestResultPrinter, DanglingUntriaged> printer_ = nullptr;
 
   std::unique_ptr<logging::ScopedLogAssertHandler> assert_handler_;
+  std::optional<i18n::ScopedDefaultIcuLocale> icu_locale_;
 
   bool initialized_command_line_ = false;
   bool check_for_leaked_globals_ = true;

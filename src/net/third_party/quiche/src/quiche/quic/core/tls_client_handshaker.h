@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "absl/strings/string_view.h"
@@ -47,11 +48,16 @@ class QUICHE_EXPORT TlsClientHandshaker
   bool IsResumption() const override;
   bool EarlyDataAccepted() const override;
   ssl_early_data_reason_t EarlyDataReason() const override;
+  std::optional<QuicWallTime> GetSessionTicketCreationTime() const override;
   bool ReceivedInchoateReject() const override;
   int num_scup_messages_received() const override;
   std::string chlo_hash() const override;
   bool ExportKeyingMaterial(absl::string_view label, absl::string_view context,
                             size_t result_len, std::string* result) override;
+  bool MatchedTrustAnchorIdForTesting() const override;
+  bool ServerPaddingSentForTesting() const override;
+  std::optional<ssl_compliance_policy_t> SslCompliancePolicyForTesting()
+      const override;
 
   // From QuicCryptoClientStream::HandshakerInterface and TlsHandshaker
   bool encryption_established() const override;
@@ -84,15 +90,16 @@ class QUICHE_EXPORT TlsClientHandshaker
       std::unique_ptr<ApplicationState> application_state) override;
 
   void AllowEmptyAlpnForTests() { allow_empty_alpn_for_tests_ = true; }
-  void AllowInvalidSNIForTests() { allow_invalid_sni_for_tests_ = true; }
 
   // Make the SSL object from BoringSSL publicly accessible.
   using TlsHandshaker::ssl;
 
  protected:
-  const TlsConnection* tls_connection() const override {
-    return &tls_connection_;
+  const TlsConnection& tls_connection() const override {
+    return tls_connection_;
   }
+
+  TlsConnection& tls_connection() override { return tls_connection_; }
 
   void FinishHandshake() override;
   void OnEnterEarlyData() override;
@@ -100,7 +107,7 @@ class QUICHE_EXPORT TlsClientHandshaker
   void ProcessPostHandshakeMessage() override;
   bool ShouldCloseConnectionOnUnexpectedError(int ssl_error) override;
   QuicAsyncStatus VerifyCertChain(
-      const std::vector<std::string>& certs, std::string* error_details,
+      const std::vector<absl::string_view>& certs, std::string* error_details,
       std::unique_ptr<ProofVerifyDetails>* details, uint8_t* out_alert,
       std::unique_ptr<ProofVerifierCallback> callback) override;
   void OnProofVerifyDetailsAvailable(
@@ -120,6 +127,8 @@ class QUICHE_EXPORT TlsClientHandshaker
   void OnHandshakeConfirmed();
 
   void InsertSession(bssl::UniquePtr<SSL_SESSION> session) override;
+
+  int OnClientCertRequested(SSL* ssl) override;
 
   bool PrepareZeroRttConfig(QuicResumptionState* cached_state);
 
@@ -153,8 +162,8 @@ class QUICHE_EXPORT TlsClientHandshaker
   quiche::QuicheReferenceCountedPointer<QuicCryptoNegotiatedParameters>
       crypto_negotiated_params_;
 
+  bool session_cache_lookup_done_ = false;
   bool allow_empty_alpn_for_tests_ = false;
-  bool allow_invalid_sni_for_tests_ = false;
 
   const bool has_application_state_;
   // Contains the state for performing a resumption, if one is attempted. This
@@ -169,6 +178,20 @@ class QUICHE_EXPORT TlsClientHandshaker
 
   std::unique_ptr<TransportParameters> received_transport_params_ = nullptr;
   std::unique_ptr<ApplicationState> received_application_state_ = nullptr;
+
+  // True if the server indicated during the handshake that it served a
+  // certificate which matched a Trust Anchor ID sent by the client. This value
+  // is needed only for testing.
+  bool matched_trust_anchor_id_ = false;
+
+  // True if the server indicated during the handshake that it sent the
+  // requested amount of padding. This value is needed only for testing.
+  bool server_sent_padding_ = false;
+
+  // If not nullopt, the SSL compliance policy to use. See documentation for
+  // ssl_compliance_policy_t values in BoringSSL:
+  // https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#Compliance-policy-configurations
+  std::optional<ssl_compliance_policy_t> ssl_compliance_policy_ = std::nullopt;
 };
 
 }  // namespace quic

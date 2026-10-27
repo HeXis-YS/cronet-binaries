@@ -24,11 +24,16 @@ if [ ! "$target_cpu" ]; then
   target_cpu="$host_cpu"
 fi
 
-PYTHON=$(which python3 2>/dev/null || which python 2>/dev/null)
+if which python3 >/dev/null 2>/dev/null; then
+  PYTHON=python3
+else
+  PYTHON=python
+fi
 
 # sysroot
 case "$target_os" in
   linux)
+    RELEASE=bullseye
     case "$target_cpu" in
       x64) SYSROOT_ARCH=amd64;;
       x86) SYSROOT_ARCH=i386;;
@@ -36,10 +41,17 @@ case "$target_os" in
       arm) SYSROOT_ARCH=armhf;;
       mipsel) SYSROOT_ARCH=mipsel;;
       mips64el) SYSROOT_ARCH=mips64el;;
-      riscv64) SYSROOT_ARCH=riscv64;;
+      riscv64) SYSROOT_ARCH=riscv64; RELEASE=trixie;;
+      loong64) SYSROOT_ARCH=loong64; RELEASE=sid;;
     esac
     if [ "$SYSROOT_ARCH" ]; then
-      WITH_SYSROOT="out/sysroot-build/bullseye/bullseye_${SYSROOT_ARCH}_staging"
+      WITH_SYSROOT="out/sysroot-build/${RELEASE}/${RELEASE}_${SYSROOT_ARCH}_staging"
+    fi
+    # This is the case where running ./build.sh without EXTRA_FLAGS
+    # wants to avoid downloading sysroots.
+    if [ ! "$EXTRA_FLAGS" -a "$target_cpu" = "$host_cpu" ]; then
+      SYSROOT_ARCH=
+      WITH_SYSROOT=
     fi
   ;;
   openwrt)
@@ -48,6 +60,8 @@ case "$target_os" in
   ;;
   android)
     WITH_SYSROOT=
+    # https://dl.google.com/android/repository/sys-img/android/sys-img.xml
+    # https://dl.google.com/android/repository/sys-img/google_apis/sys-img.xml
     case "$target_cpu" in
       x64) WITH_ANDROID_IMG=x86_64-24_r08;;
       x86) WITH_ANDROID_IMG=x86-24_r08;;

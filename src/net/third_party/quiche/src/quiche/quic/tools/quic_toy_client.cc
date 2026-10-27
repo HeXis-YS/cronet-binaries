@@ -42,29 +42,47 @@
 
 #include "quiche/quic/tools/quic_toy_client.h"
 
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/escaping.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
+#include "openssl/base.h"
+#include "openssl/bytestring.h"
+#include "quiche/quic/core/crypto/certificate_view.h"
+#include "quiche/quic/core/crypto/client_proof_source.h"
+#include "quiche/quic/core/crypto/proof_verifier.h"
 #include "quiche/quic/core/crypto/quic_client_session_cache.h"
-#include "quiche/quic/core/quic_packets.h"
-#include "quiche/quic/core/quic_server_id.h"
-#include "quiche/quic/core/quic_utils.h"
+#include "quiche/quic/core/crypto/quic_crypto_client_config.h"
+#include "quiche/quic/core/quic_config.h"
+#include "quiche/quic/core/quic_connection_id.h"
+#include "quiche/quic/core/quic_constants.h"
+#include "quiche/quic/core/quic_error_codes.h"
+#include "quiche/quic/core/quic_tag.h"
+#include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/core/quic_versions.h"
 #include "quiche/quic/platform/api/quic_default_proof_providers.h"
-#include "quiche/quic/platform/api/quic_ip_address.h"
+#include "quiche/quic/platform/api/quic_logging.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
 #include "quiche/quic/tools/fake_proof_verifier.h"
+#include "quiche/quic/tools/quic_spdy_client_base.h"
 #include "quiche/quic/tools/quic_url.h"
+#include "quiche/common/http/http_header_block.h"
 #include "quiche/common/platform/api/quiche_command_line_flags.h"
+#include "quiche/common/platform/api/quiche_logging.h"
+#include "quiche/common/platform/api/quiche_reference_counted.h"
 #include "quiche/common/quiche_text_utils.h"
-#include "quiche/spdy/core/http2_header_block.h"
 
 namespace {
 
@@ -136,6 +154,10 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     "packets. Only works with QUIC+TLS.");
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    std::string, force_debugging_sni, "",
+    "When non-empty, overrides the debugging_sni transport parameter.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
     bool, redirect_is_success, true,
     "If true, an HTTP response code of 3xx is considered to be a "
     "successful response, otherwise a failure.");
@@ -164,6 +186,19 @@ DEFINE_QUICHE_COMMAND_LINE_FLAG(
     std::string, default_client_cert_key, "",
     "The path to the file containing PEM-encoded private key of the client's "
     "default certificate for signing, if server requested client certs.");
+
+DEFINE_QUICHE_COMMAND_LINE_FLAG(
+    std::string, request_trust_anchors, "",
+    "A space-separated list of Trust Anchor IDs to request from the server via "
+    "the TLS trust_anchors extension, e.g. \"11129.9.1 11129.9.2\". When the "
+    "flag is not specified or its value is the empty string, the trust_anchors "
+    "extension will not be sent. When its value is \"EMPTY_TRUST_ANCHORS\", "
+    "the client will send the trust_anchors extension with an empty value. "
+    "Presently, Trust Anchor ID assignments are recorded here: "
+    // clang-format off
+    "<https://github.com/tlswg/tls-trust-anchor-ids/blob/main/assignments.md>."
+    // clang-format on
+);
 
 DEFINE_QUICHE_COMMAND_LINE_FLAG(
     bool, drop_response_body, false,
@@ -234,13 +269,55 @@ std::unique_ptr<ClientProofSource> CreateTestClientProofSource(
   }
 
   auto proof_source = std::make_unique<DefaultClientProofSource>();
-  proof_source->AddCertAndKey(
-      {"*"},
-      quiche::QuicheReferenceCountedPointer<ClientProofSource::Chain>(
-          new ClientProofSource::Chain(certs)),
-      std::move(*private_key));
+  if (!proof_source->AddCertAndKey(
+          {"*"},
+          quiche::QuicheReferenceCountedPointer<ClientProofSource::Chain>(
+              new ClientProofSource::Chain(certs)),
+          std::move(*private_key))) {
+    std::cerr << "Failed to add client cert and key." << std::endl;
+    return nullptr;
+  }
 
   return proof_source;
+}
+
+// Parses `text_oid_list` as a list of ASN.1 relative OIDs representing Trust
+// Anchor IDs and serializes the corresponding TLS `trust_anchors` extension, as
+// defined by draft-ietf-tls-trust-anchor-ids-02. Returns an error if the list
+// is empty, any of the OIDs cannot be parsed, or if serialization fails. Note
+// that on success, the returned serialization elides the 16-bit length prefix
+// on the `TrustAnchorIDList` structure.
+absl::StatusOr<std::optional<std::string>> SerializeTrustAnchorIdsFromTextOids(
+    absl::string_view text_oid_list) {
+#if BORINGSSL_API_VERSION >= 38
+  const std::vector<absl::string_view> text_oids =
+      absl::StrSplit(text_oid_list, ' ', absl::SkipWhitespace());
+  if (text_oids.empty()) {
+    return absl::InvalidArgumentError(
+        "Expected a non-empty list of Trust Anchor IDs.");
+  }
+  bssl::ScopedCBB cbb;
+  if (!CBB_init(cbb.get(), 32)) {
+    return absl::InternalError("Failed to initialize CBB.");
+  }
+  for (absl::string_view text_oid : text_oids) {
+    CBB id;
+    if (!CBB_add_u8_length_prefixed(cbb.get(), &id) ||
+        !CBB_add_asn1_relative_oid_from_text(&id, text_oid.data(),
+                                             text_oid.size()) ||
+        !CBB_flush(cbb.get())) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Invalid Trust Anchor ID: ", text_oid));
+    }
+  }
+  return std::string(reinterpret_cast<const char*>(CBB_data(cbb.get())),
+                     CBB_len(cbb.get()));
+#else   // BORINGSSL_API_VERSION
+  (void)text_oid_list;
+  return absl::UnimplementedError(
+      "SerializeTrustAnchorIdsFromTextOids requires BORINGSSL_API_VERSION >= "
+      "38");
+#endif  // BORINGSSL_API_VERSION
 }
 
 }  // namespace
@@ -311,13 +388,14 @@ int QuicToyClient::SendRequestsAndPrintResponses(
         ParseQuicTagVector(client_connection_options_string));
   }
   if (quiche::GetQuicheCommandLineFlag(FLAGS_multi_packet_chlo)) {
-    // Make the ClientHello span multiple packets by adding a custom transport
-    // parameter.
-    constexpr auto kCustomParameter =
-        static_cast<TransportParameters::TransportParameterId>(0x173E);
-    std::string custom_value(2000, '?');
-    config.custom_transport_parameters_to_send()[kCustomParameter] =
-        custom_value;
+    // Make the ClientHello span multiple packets by adding a large 'discard'
+    // transport parameter.
+    config.SetDiscardLengthToSend(2000);
+  }
+  std::string force_debugging_sni =
+      quiche::GetQuicheCommandLineFlag(FLAGS_force_debugging_sni);
+  if (!force_debugging_sni.empty()) {
+    config.SetDebuggingSniToSend(force_debugging_sni);
   }
   config.set_max_time_before_crypto_handshake(
       QuicTime::Delta::FromMilliseconds(quiche::GetQuicheCommandLineFlag(
@@ -356,6 +434,24 @@ int QuicToyClient::SendRequestsAndPrintResponses(
     client->crypto_config()->set_proof_source(std::move(proof_source));
   }
 
+  if (const std::string request_trust_anchors =
+          quiche::GetQuicheCommandLineFlag(FLAGS_request_trust_anchors);
+      !request_trust_anchors.empty()) {
+    if (request_trust_anchors == "EMPTY_TRUST_ANCHORS") {
+      client->crypto_config()->ssl_config().trust_anchor_ids = "";
+    } else {
+      absl::StatusOr<std::optional<std::string>> serialized =
+          SerializeTrustAnchorIdsFromTextOids(request_trust_anchors);
+      if (!serialized.ok()) {
+        std::cerr << "Failed to serialize trust_anchors extension: "
+                  << serialized.status() << std::endl;
+        return 1;
+      }
+      client->crypto_config()->ssl_config().trust_anchor_ids =
+          std::move(*serialized);
+    }
+  }
+
   int32_t initial_mtu = quiche::GetQuicheCommandLineFlag(FLAGS_initial_mtu);
   client->set_initial_max_packet_length(
       initial_mtu != 0 ? initial_mtu : quic::kDefaultMaxPacketSize);
@@ -367,8 +463,10 @@ int QuicToyClient::SendRequestsAndPrintResponses(
       << "The length of --server_connection_id must be even. It is "
       << server_connection_id_hex_string.size() << "-byte long.";
   if (!server_connection_id_hex_string.empty()) {
-    const std::string server_connection_id_bytes =
-        absl::HexStringToBytes(server_connection_id_hex_string);
+    std::string server_connection_id_bytes;
+    QUICHE_CHECK(absl::HexStringToBytes(server_connection_id_hex_string,
+                                        &server_connection_id_bytes))
+        << "Failed to parse --server_connection_id hex string.";
     client->set_server_connection_id_override(QuicConnectionId(
         server_connection_id_bytes.data(), server_connection_id_bytes.size()));
   }
@@ -428,12 +526,13 @@ int QuicToyClient::SendRequestsAndPrintResponses(
   if (!quiche::GetQuicheCommandLineFlag(FLAGS_body_hex).empty()) {
     QUICHE_DCHECK(quiche::GetQuicheCommandLineFlag(FLAGS_body).empty())
         << "Only set one of --body and --body_hex.";
-    body = absl::HexStringToBytes(
-        quiche::GetQuicheCommandLineFlag(FLAGS_body_hex));
+    const bool success = absl::HexStringToBytes(
+        quiche::GetQuicheCommandLineFlag(FLAGS_body_hex), &body);
+    QUICHE_DCHECK(success) << "Failed to parse --body_hex.";
   }
 
   // Construct a GET or POST request for supplied URL.
-  spdy::Http2HeaderBlock header_block;
+  quiche::HttpHeaderBlock header_block;
   header_block[":method"] = body.empty() ? "GET" : "POST";
   header_block[":scheme"] = url.scheme();
   header_block[":authority"] = url.HostPort();
@@ -466,10 +565,7 @@ int QuicToyClient::SendRequestsAndPrintResponses(
       std::cout << "headers:" << header_block.DebugString();
       if (!quiche::GetQuicheCommandLineFlag(FLAGS_body_hex).empty()) {
         // Print the user provided hex, rather than binary body.
-        std::cout << "body:\n"
-                  << QuicheTextUtils::HexDump(absl::HexStringToBytes(
-                         quiche::GetQuicheCommandLineFlag(FLAGS_body_hex)))
-                  << std::endl;
+        std::cout << "body:\n" << QuicheTextUtils::HexDump(body) << std::endl;
       } else {
         std::cout << "body: " << body << std::endl;
       }

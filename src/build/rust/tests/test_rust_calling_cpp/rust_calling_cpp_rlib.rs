@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#[allow(unsafe_op_in_unsafe_fn)]
 #[cxx::bridge]
 mod ffi {
     extern "Rust" {
@@ -16,7 +15,7 @@ mod ffi {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub fn rust_calling_cpp() {
     assert_eq!(ffi::mul_by_2_in_cpp_library(3), 6);
 }

@@ -1,0 +1,46 @@
+--- a/src/third_party/perfetto/src/protovm/BUILD.gn
++++ b/src/third_party/perfetto/src/protovm/BUILD.gn
+@@ -12,7 +12,6 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
+-import("../../gn/fuzzer.gni")
+ import("../../gn/perfetto_component.gni")
+ import("../../gn/perfetto_host_executable.gni")
+ import("../../gn/proto_library.gni")
+@@ -50,35 +49,3 @@
+   ]
+ }
+ 
+-perfetto_proto_library("test_messages_@TYPE@") {
+-  sources = [ "test/protos/incremental_trace.proto" ]
+-  proto_path = perfetto_root_path
+-}
+-
+-perfetto_unittest_source_set("unittests") {
+-  testonly = true
+-  deps = [
+-    ":protovm",
+-    ":test_messages_lite",
+-    "../../gn:default_deps",
+-    "../../gn:gtest_and_gmock",
+-    "../../protos/perfetto/protovm:lite",
+-    "../../protos/perfetto/protovm:zero",
+-    "../base",
+-    "../base:test_support",
+-    "../protozero",
+-  ]
+-  sources = [
+-    "test/allocator_unittest.cc",
+-    "test/mock_executor.h",
+-    "test/parser_unittest.cc",
+-    "test/ro_cursor_unittest.cc",
+-    "test/rw_proto_unittest.cc",
+-    "test/sample_packets.h",
+-    "test/sample_programs.h",
+-    "test/slab_allocator_unittest.cc",
+-    "test/utils.cc",
+-    "test/utils.h",
+-    "test/vm_unittest.cc",
+-  ]
+-}

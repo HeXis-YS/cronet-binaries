@@ -33,10 +33,9 @@ class MockQuicSessionVisitor : public QuicTimeWaitListManager::Visitor {
               (override));
   MOCK_METHOD(void, OnConnectionIdRetired,
               (const quic::QuicConnectionId& server_connection_id), (override));
-  MOCK_METHOD(void, OnConnectionAddedToTimeWaitList,
-              (QuicConnectionId connection_id), (override));
   MOCK_METHOD(void, OnServerPreferredAddressAvailable,
               (const QuicSocketAddress& server_preferred_address), (override));
+  MOCK_METHOD(void, OnConfigNegotiated, (const QuicConfig& config), (override));
 };
 
 class MockQuicCryptoServerStreamHelper

@@ -5,6 +5,9 @@
 #ifndef QUICHE_QUIC_QBONE_BONNET_TUN_DEVICE_H_
 #define QUICHE_QUIC_QBONE_BONNET_TUN_DEVICE_H_
 
+#include <net/if.h>
+
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -46,24 +49,33 @@ class TunTapDevice : public TunDeviceInterface {
   // Marks the interface down to stop receiving packets.
   bool Down() override;
 
-  // Closes the open file descriptor for the TUN device (if one exists).
+  // Closes all open queue file descriptors for the TUN device.
   // It is safe to reinitialize and reuse this TunTapDevice after calling
   // CloseDevice.
   void CloseDevice() override;
 
-  // Gets the file descriptor that can be used to send/receive packets.
-  // This returns -1 when the TUN device is in an invalid state.
-  int GetFileDescriptor() const override;
+  // Get the file descriptors that can be used to send/receive packets for
+  // the primary queue (queue 0).
+  // These return -1 when the TUN device is in an invalid state.
+  int GetReadFileDescriptor() const override;
+  int GetWriteFileDescriptor() const override;
+
+  // Opens the next sequential queue file descriptor for this multiqueue device.
+  // Returns the open queue FD on success, or -1 on failure.
+  int OpenQueue() override;
+
+  static bool CheckFeatures(KernelInterface& kernel, int tun_device_fd);
+  static bool OpenFileDescriptor(KernelInterface& kernel,
+                                 const std::string& path, ifreq if_request,
+                                 int flags, bool persist, int* return_fd);
 
  private:
-  // Creates or reopens the tun device.
+  // Resets the device by closing all open queues and opening a fresh primary
+  // queue (queue 0).
   bool OpenDevice();
 
   // Configure the interface.
   bool ConfigureInterface();
-
-  // Checks if the required kernel features exists.
-  bool CheckFeatures(int tun_device_fd);
 
   // Opens a socket and makes netdevice ioctl call
   bool NetdeviceIoctl(int request, void* argp);
@@ -73,8 +85,9 @@ class TunTapDevice : public TunDeviceInterface {
   const bool persist_;
   const bool setup_tun_;
   const bool is_tap_;
-  int file_descriptor_;
   KernelInterface& kernel_;
+
+  std::vector<int> file_descriptors_;
 };
 
 }  // namespace quic

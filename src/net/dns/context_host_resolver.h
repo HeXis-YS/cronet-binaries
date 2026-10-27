@@ -6,7 +6,7 @@
 #define NET_DNS_CONTEXT_HOST_RESOLVER_H_
 
 #include <memory>
-#include <unordered_set>
+#include <optional>
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
@@ -18,7 +18,6 @@
 #include "net/dns/host_resolver.h"
 #include "net/dns/host_resolver_system_task.h"
 #include "net/log/net_log_with_source.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/scheme_host_port.h"
 
 namespace base {
@@ -57,21 +56,29 @@ class NET_EXPORT ContextHostResolver : public HostResolver {
   std::unique_ptr<ResolveHostRequest> CreateRequest(
       url::SchemeHostPort host,
       NetworkAnonymizationKey network_anonymization_key,
+      handles::NetworkHandle target_network,
       NetLogWithSource net_log,
-      absl::optional<ResolveHostParameters> optional_parameters) override;
+      std::optional<ResolveHostParameters> optional_parameters) override;
   std::unique_ptr<ResolveHostRequest> CreateRequest(
       const HostPortPair& host,
       const NetworkAnonymizationKey& network_anonymization_key,
+      handles::NetworkHandle target_network,
       const NetLogWithSource& net_log,
-      const absl::optional<ResolveHostParameters>& optional_parameters)
-      override;
+      const std::optional<ResolveHostParameters>& optional_parameters) override;
+  std::unique_ptr<ServiceEndpointRequest> CreateServiceEndpointRequest(
+      Host host,
+      NetworkAnonymizationKey network_anonymization_key,
+      handles::NetworkHandle target_network,
+      NetLogWithSource net_log,
+      ResolveHostParameters parameters) override;
   std::unique_ptr<ProbeRequest> CreateDohProbeRequest() override;
   std::unique_ptr<MdnsListener> CreateMdnsListener(
       const HostPortPair& host,
       DnsQueryType query_type) override;
   HostCache* GetHostCache() override;
-  base::Value::Dict GetDnsConfigAsValue() const override;
+  base::DictValue GetDnsConfigAsValue() const override;
   void SetRequestContext(URLRequestContext* request_context) override;
+  bool IsHappyEyeballsV3Enabled() const override;
   HostResolverManager* GetManagerForTesting() override;
   const URLRequestContext* GetContextForTesting() const override;
   handles::NetworkHandle GetTargetNetworkForTesting() const override;
@@ -90,6 +97,13 @@ class NET_EXPORT ContextHostResolver : public HostResolver {
   }
 
  private:
+  std::unique_ptr<ResolveHostRequest> CreateRequestInternal(
+      HostResolver::Host host,
+      NetworkAnonymizationKey network_anonymization_key,
+      handles::NetworkHandle target_network,
+      NetLogWithSource net_log,
+      std::optional<ResolveHostParameters> optional_parameters);
+
   std::unique_ptr<HostResolverManager> owned_manager_;
   // `manager_` might point to `owned_manager_`. It must be declared last and
   // cleared first.
@@ -101,6 +115,8 @@ class NET_EXPORT ContextHostResolver : public HostResolver {
   bool shutting_down_ = false;
 
   SEQUENCE_CHECKER(sequence_checker_);
+
+  base::WeakPtrFactory<ContextHostResolver> weak_ptr_factory_{this};
 };
 
 }  // namespace net

@@ -20,9 +20,9 @@
 #  pragma GCC system_header
 #endif
 
-_LIBCPP_BEGIN_NAMESPACE_STD
-
 #if _LIBCPP_STD_VER >= 20
+
+_LIBCPP_BEGIN_NAMESPACE_STD
 
 // [concept.assignable]
 
@@ -31,11 +31,11 @@ concept assignable_from =
     is_lvalue_reference_v<_Lhs> &&
     common_reference_with<__make_const_lvalue_ref<_Lhs>, __make_const_lvalue_ref<_Rhs>> &&
     requires(_Lhs __lhs, _Rhs&& __rhs) {
-      { __lhs = _VSTD::forward<_Rhs>(__rhs) } -> same_as<_Lhs>;
+      { __lhs = std::forward<_Rhs>(__rhs) } -> same_as<_Lhs>;
     };
 
-#endif // _LIBCPP_STD_VER >= 20
-
 _LIBCPP_END_NAMESPACE_STD
+
+#endif // _LIBCPP_STD_VER >= 20
 
 #endif // _LIBCPP___CONCEPTS_ASSIGNABLE_H

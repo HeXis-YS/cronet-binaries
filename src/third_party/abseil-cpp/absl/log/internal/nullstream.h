@@ -23,11 +23,6 @@
 #ifndef ABSL_LOG_INTERNAL_NULLSTREAM_H_
 #define ABSL_LOG_INTERNAL_NULLSTREAM_H_
 
-#ifdef _WIN32
-#include <cstdlib>
-#else
-#include <unistd.h>
-#endif
 #include <ios>
 #include <ostream>
 
@@ -35,6 +30,12 @@
 #include "absl/base/config.h"
 #include "absl/base/log_severity.h"
 #include "absl/strings/string_view.h"
+
+#ifdef _WIN32
+#include <cstdlib>
+#else
+#include <unistd.h>
+#endif
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
@@ -79,6 +80,7 @@ class NullStream {
     return *this;
   }
   NullStream& InternalStream() { return *this; }
+  void Flush() {}
 };
 template <typename T>
 inline NullStream& operator<<(NullStream& str, const T&) {
@@ -117,20 +119,11 @@ class NullStreamMaybeFatal final : public NullStream {
 class NullStreamFatal final : public NullStream {
  public:
   NullStreamFatal() = default;
-  // ABSL_ATTRIBUTE_NORETURN doesn't seem to work on destructors with msvc, so
-  // disable msvc's warning about the d'tor never returning.
-#if defined(_MSC_VER) && !defined(__clang__)
-#pragma warning(push)
-#pragma warning(disable : 4722)
-#endif
-  ABSL_ATTRIBUTE_NORETURN ~NullStreamFatal() { _exit(1); }
-#if defined(_MSC_VER) && !defined(__clang__)
-#pragma warning(pop)
-#endif
+  [[noreturn]] ~NullStreamFatal() { _exit(1); }
 };
 
 }  // namespace log_internal
 ABSL_NAMESPACE_END
 }  // namespace absl
 
-#endif  // ABSL_LOG_INTERNAL_GLOBALS_H_
+#endif  // ABSL_LOG_INTERNAL_NULLSTREAM_H_

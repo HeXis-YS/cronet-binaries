@@ -22,6 +22,8 @@
 #ifndef ABSL_TIME_CLOCK_H_
 #define ABSL_TIME_CLOCK_H_
 
+#include <cstdint>
+
 #include "absl/base/config.h"
 #include "absl/base/macros.h"
 #include "absl/time/time.h"
@@ -32,6 +34,9 @@ ABSL_NAMESPACE_BEGIN
 // Now()
 //
 // Returns the current time, expressed as an `absl::Time` absolute time value.
+//
+// To improve testability, consider injecting an absl::Clock and using
+// absl::Clock::TimeNow() instead.
 absl::Time Now();
 
 // GetCurrentTimeNanos()

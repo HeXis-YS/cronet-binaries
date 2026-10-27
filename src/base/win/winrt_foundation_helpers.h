@@ -9,10 +9,12 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <optional>
+#include <type_traits>
 #include <vector>
 
 #include "base/check.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "base/compiler_specific.h"
 
 // This file provides helpers for WinRT types.
 
@@ -59,17 +61,17 @@ using LogicalType =
 // It queries the internals of Windows::Foundation to obtain this information.
 template <typename TComplex>
 using StorageType = std::conditional_t<
-    std::is_convertible<AbiType<TComplex>, IUnknown*>::value,
+    std::is_convertible_v<AbiType<TComplex>, IUnknown*>,
     Microsoft::WRL::ComPtr<std::remove_pointer_t<AbiType<TComplex>>>,
     AbiType<TComplex>>;
 
-// Similar to StorageType, but returns a absl::optional in case underlying Abi
+// Similar to StorageType, but returns a std::optional in case underlying Abi
 // type is not a pointer to IUnknown.
 template <typename TComplex>
 using OptionalStorageType = std::conditional_t<
-    std::is_convertible<AbiType<TComplex>, IUnknown*>::value,
+    std::is_convertible_v<AbiType<TComplex>, IUnknown*>,
     Microsoft::WRL::ComPtr<std::remove_pointer_t<AbiType<TComplex>>>,
-    absl::optional<AbiType<TComplex>>>;
+    std::optional<AbiType<TComplex>>>;
 
 template <typename T>
 HRESULT CopyTo(const T& value, T* ptr) {
@@ -83,7 +85,7 @@ HRESULT CopyTo(const Microsoft::WRL::ComPtr<T>& value, T** ptr) {
 }
 
 template <typename T>
-HRESULT CopyTo(const absl::optional<T>& value, T* ptr) {
+HRESULT CopyTo(const std::optional<T>& value, T* ptr) {
   *ptr = *value;
   return S_OK;
 }
@@ -102,7 +104,7 @@ HRESULT CopyN(
     unsigned count,
     T** result) {
   for (unsigned i = 0; i < count; ++i) {
-    CopyTo(*first++, result++);
+    CopyTo(*first++, UNSAFE_TODO(result++));
   }
   return S_OK;
 }

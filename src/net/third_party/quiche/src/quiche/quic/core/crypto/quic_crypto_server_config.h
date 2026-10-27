@@ -12,7 +12,10 @@
 #include <string>
 #include <vector>
 
+#include "absl/base/nullability.h"
+#include "absl/base/thread_annotations.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "openssl/base.h"
 #include "quiche/quic/core/crypto/crypto_handshake.h"
 #include "quiche/quic/core/crypto/crypto_handshake_message.h"
@@ -20,6 +23,7 @@
 #include "quiche/quic/core/crypto/crypto_secret_boxer.h"
 #include "quiche/quic/core/crypto/key_exchange.h"
 #include "quiche/quic/core/crypto/proof_source.h"
+#include "quiche/quic/core/crypto/proof_verifier.h"
 #include "quiche/quic/core/crypto/quic_compressed_certs_cache.h"
 #include "quiche/quic/core/crypto/quic_crypto_proof.h"
 #include "quiche/quic/core/crypto/quic_random.h"
@@ -27,7 +31,6 @@
 #include "quiche/quic/core/proto/source_address_token_proto.h"
 #include "quiche/quic/core/quic_time.h"
 #include "quiche/quic/platform/api/quic_export.h"
-#include "quiche/quic/platform/api/quic_mutex.h"
 #include "quiche/quic/platform/api/quic_socket_address.h"
 #include "quiche/common/platform/api/quiche_reference_counted.h"
 
@@ -35,6 +38,7 @@ namespace quic {
 
 class CryptoHandshakeMessage;
 class ProofSource;
+class ProofVerifier;
 class QuicClock;
 class QuicServerConfigProtobuf;
 struct QuicSignedServerConfig;
@@ -184,9 +188,6 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
     // expiry_time is the time, in UNIX seconds, when the server config will
     // expire. If unset, it defaults to the current time plus six months.
     QuicWallTime expiry_time;
-    // channel_id_enabled controls whether the server config will indicate
-    // support for ChannelIDs.
-    bool channel_id_enabled;
     // id contains the server config id for the resulting config. If empty, a
     // random id is generated.
     std::string id;
@@ -212,7 +213,8 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
       absl::string_view source_address_token_secret,
       QuicRandom* server_nonce_entropy,
       std::unique_ptr<ProofSource> proof_source,
-      std::unique_ptr<KeyExchangeSource> key_exchange_source);
+      std::unique_ptr<KeyExchangeSource> key_exchange_source,
+      std::unique_ptr<ProofVerifier> proof_verifier = nullptr);
   QuicCryptoServerConfig(const QuicCryptoServerConfig&) = delete;
   QuicCryptoServerConfig& operator=(const QuicCryptoServerConfig&) = delete;
   ~QuicCryptoServerConfig();
@@ -427,7 +429,7 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
   // token contains a CachedNetworkParameters proto.
   HandshakeFailureReason ValidateSourceAddressTokens(
       const SourceAddressTokens& tokens, const QuicIpAddress& ip,
-      QuicWallTime now, CachedNetworkParameters* cached_network_params) const;
+      QuicWallTime now, CachedNetworkParameters& cached_network_params) const;
 
   // Callers retain the ownership of |rejection_observer| which must outlive the
   // config.
@@ -436,6 +438,7 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
   }
 
   ProofSource* proof_source() const;
+  ProofVerifier* absl_nullable proof_verifier() const;
 
   SSL_CTX* ssl_ctx() const;
 
@@ -467,6 +470,8 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
     return source_address_token_boxer_;
   }
 
+  const QuicSSLConfig& ssl_config() const { return ssl_config_; }
+
  private:
   friend class test::QuicCryptoServerConfigPeer;
   friend struct QuicSignedServerConfig;
@@ -494,10 +499,6 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
     // key_exchanges contains key exchange objects. The values correspond,
     // one-to-one, with the tags in |kexs| from the parent class.
     std::vector<std::unique_ptr<AsynchronousKeyExchange>> key_exchanges;
-
-    // channel_id_enabled is true if the config in |serialized| specifies that
-    // ChannelIDs are supported.
-    bool channel_id_enabled;
 
     // is_primary is true if this config is the one that we'll give out to
     // clients as the current one.
@@ -537,7 +538,7 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
   // Get a ref to the config with a given server config id.
   quiche::QuicheReferenceCountedPointer<Config> GetConfigWithScid(
       absl::string_view requested_scid) const
-      QUIC_SHARED_LOCKS_REQUIRED(configs_lock_);
+      ABSL_SHARED_LOCKS_REQUIRED(configs_lock_);
 
   // A snapshot of the configs associated with an in-progress handshake.
   struct QUICHE_EXPORT Configs {
@@ -566,7 +567,7 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
   // SelectNewPrimaryConfig reevaluates the primary config based on the
   // "primary_time" deadlines contained in each.
   void SelectNewPrimaryConfig(QuicWallTime now) const
-      QUIC_EXCLUSIVE_LOCKS_REQUIRED(configs_lock_);
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(configs_lock_);
 
   // EvaluateClientHello checks |client_hello_state->client_hello| for gross
   // errors and determines whether it is fresh (i.e. not a replay). The results
@@ -841,7 +842,7 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
 
   // Returns true if the next config promotion should happen now.
   bool IsNextConfigReady(QuicWallTime now) const
-      QUIC_SHARED_LOCKS_REQUIRED(configs_lock_);
+      ABSL_SHARED_LOCKS_REQUIRED(configs_lock_);
 
   // replay_protection_ controls whether the server enforces that handshakes
   // aren't replays.
@@ -856,16 +857,16 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
   //   1) configs_.empty() <-> primary_config_ == nullptr
   //   2) primary_config_ != nullptr -> primary_config_->is_primary
   //   3) ∀ c∈configs_, c->is_primary <-> c == primary_config_
-  mutable QuicMutex configs_lock_;
+  mutable absl::Mutex configs_lock_;
 
   // configs_ contains all active server configs. It's expected that there are
   // about half-a-dozen configs active at any one time.
-  ConfigMap configs_ QUIC_GUARDED_BY(configs_lock_);
+  ConfigMap configs_ ABSL_GUARDED_BY(configs_lock_);
 
   // primary_config_ points to a Config (which is also in |configs_|) which is
   // the primary config - i.e. the one that we'll give out to new clients.
   mutable quiche::QuicheReferenceCountedPointer<Config> primary_config_
-      QUIC_GUARDED_BY(configs_lock_);
+      ABSL_GUARDED_BY(configs_lock_);
 
   // fallback_config_ points to a Config (which is also in |configs_|) which is
   // the fallback config, which will be used if the other configs are unuseable
@@ -873,16 +874,16 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
   //
   // TODO(b/112548056): This is currently always nullptr.
   quiche::QuicheReferenceCountedPointer<Config> fallback_config_
-      QUIC_GUARDED_BY(configs_lock_);
+      ABSL_GUARDED_BY(configs_lock_);
 
   // next_config_promotion_time_ contains the nearest, future time when an
   // active config will be promoted to primary.
   mutable QuicWallTime next_config_promotion_time_
-      QUIC_GUARDED_BY(configs_lock_);
+      ABSL_GUARDED_BY(configs_lock_);
 
   // Callback to invoke when the primary config changes.
   std::unique_ptr<PrimaryConfigChangedCallback> primary_config_changed_cb_
-      QUIC_GUARDED_BY(configs_lock_);
+      ABSL_GUARDED_BY(configs_lock_);
 
   // Used to protect the source-address tokens that are given to clients.
   CryptoSecretBoxer source_address_token_boxer_;
@@ -899,6 +900,12 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
   // proof_source_ contains an object that can provide certificate chains and
   // signatures.
   std::unique_ptr<ProofSource> proof_source_;
+
+  // proof_verifier_ is an optional object that can verify a client's
+  // certificate chain. Crypto server stream implementations can use this when
+  // verifying a client's certificate chain, but must be able to handle the case
+  // where this is null.
+  std::unique_ptr<ProofVerifier> proof_verifier_;
 
   // key_exchange_source_ contains an object that can provide key exchange
   // objects.
@@ -941,6 +948,9 @@ class QUICHE_EXPORT QuicCryptoServerConfig {
   // When source address is validated by some other means (e.g. when using ICE),
   // source address token validation may be disabled.
   bool validate_source_address_token_;
+
+  // Configs applied to BoringSSL's SSL object. TLS only.
+  QuicSSLConfig ssl_config_;
 };
 
 struct QUICHE_EXPORT QuicSignedServerConfig

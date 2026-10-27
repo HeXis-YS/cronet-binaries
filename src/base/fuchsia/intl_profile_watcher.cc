@@ -6,12 +6,12 @@
 
 #include <fuchsia/intl/cpp/fidl.h>
 #include <lib/sys/cpp/component_context.h>
+
 #include <string>
 #include <vector>
 
 #include "base/fuchsia/fuchsia_logging.h"
 #include "base/fuchsia/process_context.h"
-#include "base/strings/string_piece.h"
 
 using ::fuchsia::intl::Profile;
 
@@ -34,11 +34,12 @@ FuchsiaIntlProfileWatcher::FuchsiaIntlProfileWatcher(
   DCHECK(on_profile_changed_);
 
   property_provider_.set_error_handler([](zx_status_t status) {
-    ZX_LOG(ERROR, status) << "intl.PropertyProvider disconnected. "
-                          << "Profile changes will not be monitored.";
+    ZX_LOG_IF(ERROR, status != ZX_ERR_PEER_CLOSED, status)
+        << "intl.PropertyProvider disconnected. "
+        << "Profile changes will not be monitored.";
   });
 
-  property_provider_.events().OnChange = [this]() {
+  property_provider_.events().OnChange = [this] {
     property_provider_->GetProfile(
         [this](Profile profile) { on_profile_changed_.Run(profile); });
   };

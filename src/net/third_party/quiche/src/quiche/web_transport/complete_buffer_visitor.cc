@@ -4,10 +4,13 @@
 
 #include "quiche/web_transport/complete_buffer_visitor.h"
 
+#include <string>
 #include <utility>
 
+#include "absl/status/status.h"
 #include "quiche/common/platform/api/quiche_logging.h"
-#include "quiche/common/quiche_stream.h"
+#include "quiche/web_transport/stream_helpers.h"
+#include "quiche/web_transport/web_transport.h"
 
 namespace webtransport {
 
@@ -29,10 +32,9 @@ void CompleteBufferVisitor::OnCanWrite() {
   if (!stream_->CanWrite()) {
     return;
   }
-  quiche::StreamWriteOptions options;
+  StreamWriteOptions options;
   options.set_send_fin(true);
-  absl::Status status =
-      quiche::WriteIntoStream(*stream_, *outgoing_data_, options);
+  absl::Status status = WriteIntoStream(*stream_, *outgoing_data_, options);
   if (!status.ok()) {
     QUICHE_DLOG(WARNING) << "Write from OnCanWrite() failed: " << status;
     return;

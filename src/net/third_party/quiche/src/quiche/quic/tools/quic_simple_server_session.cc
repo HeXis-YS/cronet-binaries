@@ -4,6 +4,7 @@
 
 #include "quiche/quic/tools/quic_simple_server_session.h"
 
+#include <memory>
 #include <utility>
 
 #include "absl/memory/memory.h"
@@ -27,9 +28,13 @@ QuicSimpleServerSession::QuicSimpleServerSession(
     QuicCompressedCertsCache* compressed_certs_cache,
     QuicSimpleServerBackend* quic_simple_server_backend)
     : QuicServerSessionBase(config, supported_versions, connection, visitor,
-                            helper, crypto_config, compressed_certs_cache),
+                            helper, crypto_config, compressed_certs_cache,
+                            quic_simple_server_backend->SupportsWebTransport()
+                                ? QuicPriorityType::kWebTransport
+                                : QuicPriorityType::kHttp),
       quic_simple_server_backend_(quic_simple_server_backend) {
   QUICHE_DCHECK(quic_simple_server_backend_);
+  set_max_streams_accepted_per_loop(5u);
 }
 
 QuicSimpleServerSession::~QuicSimpleServerSession() { DeleteConnection(); }
@@ -64,14 +69,6 @@ QuicSpdyStream* QuicSimpleServerSession::CreateIncomingStream(QuicStreamId id) {
   return stream;
 }
 
-QuicSpdyStream* QuicSimpleServerSession::CreateIncomingStream(
-    PendingStream* pending) {
-  QuicSpdyStream* stream =
-      new QuicSimpleServerStream(pending, this, quic_simple_server_backend_);
-  ActivateStream(absl::WrapUnique(stream));
-  return stream;
-}
-
 QuicSpdyStream* QuicSimpleServerSession::CreateOutgoingBidirectionalStream() {
   if (!WillNegotiateWebTransport()) {
     QUIC_BUG(QuicSimpleServerSession CreateOutgoingBidirectionalStream without
@@ -90,15 +87,11 @@ QuicSpdyStream* QuicSimpleServerSession::CreateOutgoingBidirectionalStream() {
   return stream;
 }
 
-QuicSimpleServerStream*
-QuicSimpleServerSession::CreateOutgoingUnidirectionalStream() {
-  if (!ShouldCreateOutgoingUnidirectionalStream()) {
-    return nullptr;
-  }
-
-  QuicSimpleServerStream* stream = new QuicSimpleServerStream(
-      GetNextOutgoingUnidirectionalStreamId(), this, WRITE_UNIDIRECTIONAL,
-      quic_simple_server_backend_);
+QuicStream* QuicSimpleServerSession::ProcessBidirectionalPendingStream(
+    PendingStream& pending) {
+  QUICHE_DCHECK(IsEncryptionEstablished());
+  QuicSpdyStream* stream =
+      new QuicSimpleServerStream(pending, this, quic_simple_server_backend_);
   ActivateStream(absl::WrapUnique(stream));
   return stream;
 }

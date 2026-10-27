@@ -1,16 +1,16 @@
-// Copyright (c) 2020, Google Inc.
+// Copyright 2020 The BoringSSL Authors
 //
-// Permission to use, copy, modify, and/or distribute this software for any
-// purpose with or without fee is hereby granted, provided that the above
-// copyright notice and this permission notice appear in all copies.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
-// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
-// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
-// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
-// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
-// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package subprocess
 
@@ -32,12 +32,13 @@ type aeadVectorSet struct {
 }
 
 type aeadTestGroup struct {
-	ID        uint64 `json:"tgId"`
-	Type      string `json:"testType"`
-	Direction string `json:"direction"`
-	KeyBits   int    `json:"keyLen"`
-	TagBits   int    `json:"tagLen"`
-	Tests     []struct {
+	ID          uint64 `json:"tgId"`
+	Type        string `json:"testType"`
+	Direction   string `json:"direction"`
+	KeyBits     int    `json:"keyLen"`
+	TagBits     int    `json:"tagLen"`
+	NonceSource string `json:"ivGen"`
+	Tests       []struct {
 		ID            uint64 `json:"tcId"`
 		PlaintextHex  string `json:"pt"`
 		CiphertextHex string `json:"ct"`
@@ -57,6 +58,7 @@ type aeadTestResponse struct {
 	ID            uint64  `json:"tcId"`
 	CiphertextHex *string `json:"ct,omitempty"`
 	TagHex        string  `json:"tag,omitempty"`
+	NonceHex      string  `json:"iv,omitempty"`
 	PlaintextHex  *string `json:"pt,omitempty"`
 	Passed        *bool   `json:"testPassed,omitempty"`
 }
@@ -87,9 +89,24 @@ func (a *aead) Process(vectorSet []byte, m Transactable) (any, error) {
 			return nil, fmt.Errorf("test group %d has unknown direction %q", group.ID, group.Direction)
 		}
 
-		op := a.algo + "/seal"
-		if !encrypt {
-			op = a.algo + "/open"
+		var randnonce bool
+		switch group.NonceSource {
+		case "internal":
+			randnonce = true
+		case "external", "":
+			randnonce = false
+		default:
+			return nil, fmt.Errorf("test group %d has unknown nonce source %q", group.ID, group.NonceSource)
+		}
+
+		op := a.algo
+		if randnonce {
+			op += "-randnonce"
+		}
+		if encrypt {
+			op += "/seal"
+		} else {
+			op += "/open"
 		}
 
 		if group.KeyBits%8 != 0 || group.KeyBits < 0 {
@@ -173,17 +190,27 @@ func (a *aead) Process(vectorSet []byte, m Transactable) (any, error) {
 						ciphertextHex := hex.EncodeToString(result[0])
 						testResp.CiphertextHex = &ciphertextHex
 					} else {
-						ciphertext := result[0][:len(result[0])-tagBytes]
+						ciphertext := result[0]
+						if randnonce {
+							var nonce []byte
+							ciphertext, nonce = splitOffRight(ciphertext, 12)
+							testResp.NonceHex = hex.EncodeToString(nonce)
+						}
+						ciphertext, tag := splitOffRight(ciphertext, tagBytes)
 						ciphertextHex := hex.EncodeToString(ciphertext)
 						testResp.CiphertextHex = &ciphertextHex
-						tag := result[0][len(result[0])-tagBytes:]
 						testResp.TagHex = hex.EncodeToString(tag)
 					}
 					response.Tests = append(response.Tests, testResp)
 					return nil
 				})
 			} else {
-				m.TransactAsync(op, 2, [][]byte{uint32le(uint32(tagBytes)), key, append(input, tag...), nonce, aad}, func(result [][]byte) error {
+				ciphertext := append(input, tag...)
+				if randnonce {
+					ciphertext = append(ciphertext, nonce...)
+					nonce = []byte{}
+				}
+				m.TransactAsync(op, 2, [][]byte{uint32le(uint32(tagBytes)), key, ciphertext, nonce, aad}, func(result [][]byte) error {
 					if len(result[0]) != 1 || (result[0][0]&0xfe) != 0 {
 						return fmt.Errorf("invalid AEAD status result from subprocess")
 					}
@@ -209,4 +236,12 @@ func (a *aead) Process(vectorSet []byte, m Transactable) (any, error) {
 	}
 
 	return ret, nil
+}
+
+func splitOffRight(in []byte, suffixSize int) ([]byte, []byte) {
+	if len(in) < suffixSize {
+		panic("input too small to split")
+	}
+	split := len(in) - suffixSize
+	return in[:split], in[split:]
 }
