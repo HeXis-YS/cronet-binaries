@@ -38,3 +38,4 @@
 38-perfetto-protovm-tests.patch
 39-unused-build-targets.patch
 40-root-certs-source.patch
+41-protoc-without-java.patch

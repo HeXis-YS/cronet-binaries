@@ -47,6 +47,10 @@ Set Xray's `XRAY_CRONET_LIBRARY` to the absolute library path.
 For an interface build failure, `./build.sh release NINJA_TARGET` builds only
 that target and its prerequisites without packaging a library.
 
+The host `protoc` builds only C++ and Python generators. Python output is used
+by Chromium's current proto build actions; Java generation is unused by this
+native library, including Android builds, and is removed by patch 41.
+
 The upstream project description below describes the original v119 distribution;
 its full Cronet API and release automation do not describe this branch's output.
 
