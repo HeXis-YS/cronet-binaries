@@ -35,7 +35,7 @@ python3 tools/install-upstream.py STAGE_DIRECTORY
 ```
 
 Wait for staging to finish before applying patches. A patch conflict stops the
-upgrade and must be resolved for that release before installation. The ordered
+upgrade and must be resolved for that release before installation. The
 staging entry uses `curl | tar` for streaming download and extraction, prints
 curl progress, and writes its completion marker only if both commands succeed.
 An incomplete stage must not be installed. The ordered
