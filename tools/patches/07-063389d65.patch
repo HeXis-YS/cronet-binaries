@@ -6,11 +6,13 @@ Subject: [PATCH] android: build: Disable Android java templates
 Default Android tests to raw executables when Java templates are disabled,
 including Chromium builds that only need the native library dependency graph.
 Import the upstream test runner templates directly for Java-free native tests.
+Keep shared Android configuration available independently of Java templates.
 
 ---
  src/build_overrides/build.gni | 2 +-
  src/testing/test.gni         | 6 +++++-
- 2 files changed, 6 insertions(+), 2 deletions(-)
+ src/build/config/android/rules.gni | 2 +-
+ 3 files changed, 7 insertions(+), 3 deletions(-)
 
 diff --git a/src/build_overrides/build.gni b/src/build_overrides/build.gni
 index ea3301998..fdf2e9c5b 100644
@@ -47,6 +49,19 @@ diff --git a/src/testing/test.gni b/src/testing/test.gni
      } else {
        not_needed([ "_use_default_launcher" ])
        _use_raw_android_executable = invoker.use_raw_android_executable
+diff --git a/src/build/config/android/rules.gni b/src/build/config/android/rules.gni
+--- a/src/build/config/android/rules.gni
++++ b/src/build/config/android/rules.gni
+@@ -5,3 +5,4 @@
+ import("//build/config/android/abi.gni")
++import("//build/config/android/config.gni")
+ import("//build/config/android/copy_ex.gni")
+ import("//build/config/chrome_build.gni")
+@@ -120,4 +121,3 @@
+ if (!is_robolectric && enable_java_templates) {
+-  import("//build/config/android/config.gni")
+   import("//build/config/android/internal_rules.gni")
+   import("//build/config/android/tiered_dex.gni")
 -- 
 2.53.0
 
