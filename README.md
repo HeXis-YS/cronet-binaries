@@ -42,6 +42,7 @@ Only the entries in `tools/patches/series` are applied:
 | `03-native-system-trust.patch` | Combine Chrome roots with file-backed Linux/Android roots. Preserve Windows native trust. Android reads Conscrypt APEX and system certificate directories without Java. |
 | `04-android-native-runtime.patch` | Use Android properties for device/build information; handle absent APK/activity metadata and optional Java network services without attaching a JVM. Preserve native scheduling, socket binding and DNS APIs. |
 | `05-windows-oom-declaration.patch` | Keep the upstream Windows OOM exception code declared when PartitionAlloc is disabled. |
+| `06-android-build-config-dependencies.patch` | Declare the Java targets whose GN-time parameter files are consumed by Android build-config actions. |
 
 File roots are loaded lazily on verification workers and remain a snapshot for
 the verifier's lifetime. `SSL_CERT_FILE` and `SSL_CERT_DIR` override default file
@@ -75,8 +76,9 @@ upgrading the pinned release, update `CHROMIUM_VERSION` explicitly.
 Each platform workflow moves its prepared source tree into `src` before
 restoring toolchain caches; no source artifact is repackaged or exchanged.
 The old `import-upstream.sh` rewrites history and is not this workflow.
-GN selects `components/xray_native` with `--root-target`; upstream build
-descriptions and source files outside the listed patches remain intact. The
+GN starts from `components/xray_native` with `--root-target` and limits generation
+to `cronet` and its dependencies with `--root-pattern`; upstream build descriptions
+and source files outside the listed patches remain intact. The
 stream ABI is internal:
 deploy hray-core and its matching native library together.
 

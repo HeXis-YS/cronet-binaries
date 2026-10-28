@@ -1,0 +1,59 @@
+diff --git a/src/build/config/android/internal_rules.gni b/src/build/config/android/internal_rules.gni
+--- a/src/build/config/android/internal_rules.gni
++++ b/src/build/config/android/internal_rules.gni
+@@ -264,12 +264,15 @@
+     }
+   } else {
+     _deps_configs = []
++    # Loading each Java dependency also writes its params.json at GN time.
++    # File paths alone do not load those targets with root_patterns enabled.
+     if (defined(invoker.config_deps)) {
+       foreach(_dep, invoker.config_deps) {
+         _dep_gen_dir = get_label_info(_dep, "target_gen_dir")
+         _dep_name = get_label_info(_dep, "name")
+         _dep_config = "$_dep_gen_dir/$_dep_name.params.json"
+         _deps_configs += [ _dep_config ]
++        _deps += [ _dep ]
+       }
+     }
+     if (defined(invoker.possible_config_deps)) {
+@@ -282,6 +285,7 @@
+           _dep_name = get_label_info(_possible_dep, "name")
+           _dep_config = "$_dep_gen_dir/$_dep_name.params.json"
+           _deps_configs += [ _dep_config ]
++          _deps += [ _possible_dep ]
+           if (_is_bundle) {
+             _inputs += [ "$_dep_gen_dir/$_dep_name.build_config.json" ]
+             _deps += [ "$_dep_label$build_config_target_suffix" ]
+@@ -310,6 +314,7 @@
+         _dep_name = get_label_info(_possible_dep, "name")
+         _dep_config = "$_dep_gen_dir/$_dep_name.params.json"
+         _public_deps_configs += [ _dep_config ]
++        _deps += [ _possible_dep ]
+       }
+       _inputs += _public_deps_configs
+     }
+@@ -321,6 +326,7 @@
+         _dep_name = get_label_info(_dep_label, "name")
+         _dep_config = "$_dep_gen_dir/$_dep_name.params.json"
+         _processor_configs += [ _dep_config ]
++        _deps += [ _dep_label ]
+       }
+       _inputs += _processor_configs
+     }
+@@ -344,6 +350,7 @@
+       _parent_module_config = "$_dep_gen_dir/$_dep_name.params.json"
+       _inputs += [ _parent_module_config ]
+       _deps_configs += [ _parent_module_config ]
++      _deps += [ _dep_label ]
+     }
+     if (defined(invoker.base_module_target)) {
+       _dep_label = invoker.base_module_target
+@@ -351,6 +358,7 @@
+       _dep_name = get_label_info(_dep_label, "name")
+       _base_module_config = "$_dep_gen_dir/$_dep_name.params.json"
+       _inputs += [ _base_module_config ]
++      _deps += [ _dep_label ]
+       if (!defined(invoker.parent_module_target)) {
+         _deps_configs += [ _base_module_config ]
+       }
