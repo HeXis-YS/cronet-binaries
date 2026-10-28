@@ -21,20 +21,26 @@ engine initialization, rejected starts and cancellation; successful H2/H3
 transfers were not checked. Linux runtime dependencies include NSS/NSPR;
 the artifact's `linkage.txt` records the complete resolved dependency list.
 
-For a Linux x64 build, install Python 3 (with `requests`), curl, xz, unzip, Ninja,
-pkg-config and NSS development libraries. From this automation checkout, run:
+For a Linux x64 build, install Git, Python 3, curl, unzip,
+Ninja, pkg-config and NSS development libraries. From this automation checkout,
+create a full fork checkout named `src` in a dedicated Chromium workspace:
 
 ```sh
-bash tools/prepare-source.sh /path/to/chromium-fork /path/to/new-build-tree
-bash tools/build-linux.sh /path/to/new-build-tree
+git clone --depth 1 --filter=blob:none --branch hray/157.0.8103.14 \
+  https://github.com/HeXis-YS/cronet-binaries.git /path/to/chromium/src
+bash tools/prepare-source.sh /path/to/chromium/src
+bash tools/build-linux.sh /path/to/chromium/src
 ```
 
-Source preparation downloads the matching official release archive, which
-includes Chromium's DEPS sources, then copies the fork's `net` and
-`components/hray_native` source trees over it. The fork checkout only needs those
-directories and `chrome/VERSION`. No hand-maintained patch series is used.
-The build downloads the matching upstream Clang, Rust, GN and Linux sysroot.
-It builds the library with ThinLTO and runs a C ABI smoke check. `JOBS` controls
+Source preparation initializes the fork's pinned `third_party/depot_tools`
+submodule, writes `.gclient` in the workspace, and runs
+`gclient sync --no-history` to fetch dependencies from that commit's
+`DEPS`. The `src` solution is unmanaged so synchronization keeps the selected
+fork commit. Builds use this checkout directly, including changes in any
+directory; no official source archive or source overlay is used.
+Synchronization installs the pinned Clang, Rust, GN and Linux sysroot and runs
+the upstream hooks to generate build metadata. The build script uses these tools
+to build the library with ThinLTO and run a C ABI smoke check. `JOBS` controls
 Ninja parallelism (defaults to the available CPU count from `nproc`).
 Allow space for a full Chromium release and build
 output; run full builds in CI when local resources are limited.

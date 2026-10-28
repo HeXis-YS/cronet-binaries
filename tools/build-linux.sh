@@ -1,20 +1,11 @@
 #!/usr/bin/env bash
 # Usage: tools/build-linux.sh PREPARED_BUILD_DIRECTORY
-# Requires Linux x64, Python 3, curl, unzip, Ninja, pkg-config and libnss3-dev.
+# Requires a DEPS-synced Linux x64 checkout, Python 3, Ninja, pkg-config and libnss3-dev.
 set -euo pipefail
 automation_dir=$(cd "$(dirname "$0")/.." && pwd)
 cd "${1:?prepared Chromium directory required}"
 
-python3 tools/clang/scripts/update.py
-python3 tools/rust/update_rust.py
-python3 build/linux/sysroot_scripts/install-sysroot.py --arch=amd64
-gn_version=$(sed -n "s/.*'gn_version': '\([^']*\)'.*/\1/p" DEPS)
-mkdir -p gn
-curl -fL "https://chrome-infra-packages.appspot.com/dl/gn/gn/linux-amd64/+/$gn_version" -o gn/gn.zip
-unzip -o gn/gn.zip -d gn
-rm gn/gn.zip
-
-gn/gn gen out/Release \
+buildtools/linux64/gn gen out/Release \
   --root-target=//components/hray_native:cronet \
   --root-pattern=//components/hray_native:cronet \
   --script-executable=python3 \
