@@ -134,6 +134,21 @@ int InitSocketPoolHelper(
 
 }  // namespace
 
+void ClientSocketPoolManager::ConfigureNativeSocketLimits(
+    HttpNetworkSession::SocketPoolType pool_type,
+    size_t pool_limit,
+    size_t group_limit,
+    size_t proxy_limit) {
+  CHECK_GT(group_limit, 0u);
+  CHECK_LE(group_limit, proxy_limit);
+  CHECK_LE(proxy_limit, pool_limit);
+  CHECK_LE(pool_limit, 2048u);
+  const auto index = std::to_underlying(pool_type);
+  g_socket_soft_cap_per_pool[index] = pool_limit;
+  g_max_sockets_per_group[index] = group_limit;
+  g_max_sockets_per_proxy_chain[index] = proxy_limit;
+}
+
 ClientSocketPoolManager::ClientSocketPoolManager() = default;
 ClientSocketPoolManager::~ClientSocketPoolManager() = default;
 

@@ -205,6 +205,12 @@ void BidirectionalStream::StartRequest() {
   DCHECK(!stream_request_);
   HttpRequestInfo http_request_info;
   http_request_info.url = request_info_->url;
+  http_request_info.network_isolation_key =
+      request_info_->network_isolation_key;
+  http_request_info.network_anonymization_key =
+      NetworkAnonymizationKey::CreateFromNetworkIsolationKey(
+          request_info_->network_isolation_key);
+  http_request_info.authority = request_info_->authority;
   http_request_info.method = request_info_->method;
   http_request_info.extra_headers = request_info_->extra_headers;
   http_request_info.socket_tag = request_info_->socket_tag;

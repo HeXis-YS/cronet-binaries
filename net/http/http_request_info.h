@@ -46,6 +46,9 @@ struct NET_EXPORT HttpRequestInfo {
   // The requested URL.
   GURL url;
 
+  // Optional HTTP authority, independent of the URL used for TLS verification.
+  std::string authority;
+
   // The method to use (GET, POST, etc.).
   std::string method;
 

@@ -209,6 +209,9 @@ void CreateSpdyHeadersFromHttpRequest(const HttpRequestInfo& info,
     headers->insert({spdy::kHttp2SchemeHeader, info.url.GetScheme()});
     headers->insert({spdy::kHttp2PathHeader, info.url.PathForRequest()});
   }
+  if (!info.authority.empty()) {
+    (*headers)[spdy::kHttp2AuthorityHeader] = info.authority;
+  }
 
   HttpRequestHeaders::Iterator it(request_headers);
   while (it.GetNext()) {

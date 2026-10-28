@@ -1,0 +1,12 @@
+HRAY_CRONET_1.0 {
+  global:
+    hray_cronet_engine_create;
+    hray_cronet_engine_destroy;
+    hray_stream_create;
+    hray_stream_destroy;
+    hray_stream_start;
+    hray_stream_read;
+    hray_stream_write;
+    hray_stream_cancel;
+  local: *;
+};

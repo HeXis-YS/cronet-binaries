@@ -10,6 +10,7 @@
 #include "base/time/time.h"
 #include "net/base/net_export.h"
 #include "net/base/network_handle.h"
+#include "net/base/network_isolation_key.h"
 #include "net/base/request_priority.h"
 #include "net/http/http_request_headers.h"
 #include "net/socket/socket_tag.h"
@@ -24,6 +25,13 @@ struct NET_EXPORT BidirectionalStreamRequestInfo {
 
   // The requested URL.
   GURL url;
+
+  // The embedder partitions both H2 and H3 sessions with this key.
+  NetworkIsolationKey network_isolation_key;
+
+  // HTTP routing only. URL origin remains the DNS, TLS and certificate
+  // identity.
+  std::string authority;
 
   // The method to use (GET, POST, etc.).
   std::string method;

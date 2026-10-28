@@ -32,6 +32,14 @@ class ProxyChain;
 
 class NET_EXPORT_PRIVATE ClientSocketPoolManager {
  public:
+  // Configure native embedding limits before creating any network sessions.
+  // Update all three together so the pool/group relationship stays valid.
+  static void ConfigureNativeSocketLimits(
+      HttpNetworkSession::SocketPoolType pool_type,
+      size_t pool_limit,
+      size_t group_limit,
+      size_t proxy_limit);
+
   ClientSocketPoolManager();
   virtual ~ClientSocketPoolManager();
 

@@ -1,0 +1,35 @@
+source_set("headers") {
+  public = [
+    "include/hray_stream.h",
+    "include/hray_engine.h",
+  ]
+}
+
+source_set("native") {
+  sources = [
+    "stream.cc",
+    "include/hray_stream.h",
+    "include/hray_engine.h",
+    "engine.cc",
+  ]
+
+  deps = [
+    ":headers",
+    "//base",
+    "//net",
+    "//url",
+  ]
+}
+
+shared_library("cronet") {
+  output_name = "cronet"
+  deps = [ ":native" ]
+  # Keep production LTO optimization local to our final link target.
+  configs -= [ "//build/config/compiler:thinlto_optimize_default" ]
+  configs += [ "//build/config/compiler:thinlto_optimize_max" ]
+  if (is_linux) {
+    inputs = [ "exports.map" ]
+    ldflags = [ "-Wl,--version-script=" +
+                rebase_path("exports.map", root_build_dir) ]
+  }
+}
