@@ -26,6 +26,7 @@
 checkout_android由build/config/gclient_args.gni直接赋值，不能通过GN的--args覆盖。
 get-clang.sh在安装Android原生工具链后更新该元数据；40610953711已越过原断言，完整构建仍未通过。
 补丁07同时让禁用Java模板时的默认test()使用原生可执行文件，保留调用方显式选择和原断言；不删除测试目标或重新启用Java。该兼容修复尚待完整CI验证。
+Linux运行40610948642已通过GN配置，在编译cert_verify_proc.cc时因CreateSslSystemTrustStoreChromeRoot未声明失败。补丁18已有Linux实现，但头文件条件遗漏了关闭NSS的Linux；现将IS_LINUX补入同一补丁的声明条件，完整构建仍待CI验证。
 Windows现改为windows-2025-vs2026原生构建，使用预装VS/SDK；不再下载Google的Windows工具链或使用ciopfs。
 源码解包使用MSYS=winsymlinks:nativestrict及Windows开发者模式；旧运行的符号链接错误来自MSYS默认复制目标的行为，原生编译尚待CI验证。
 生产LTO仍保留，build.sh的THIN_LTO可显式调整，不以删除全局补丁为由删除优化要求。

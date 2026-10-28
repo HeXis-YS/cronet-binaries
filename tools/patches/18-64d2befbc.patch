@@ -23,7 +23,8 @@ It reads CA certificates from:
 /system/etc/security/cacerts (Android)
 ---
  src/net/cert/internal/system_trust_store.cc | 150 +++++++++++++++++++-
- 1 file changed, 148 insertions(+), 2 deletions(-)
+ src/net/cert/internal/system_trust_store.h  |   2 +-
+ 2 files changed, 149 insertions(+), 3 deletions(-)
 
 diff --git a/src/net/cert/internal/system_trust_store.cc b/src/net/cert/internal/system_trust_store.cc
 index 6c678c5e9..57e891045 100644
@@ -209,6 +210,17 @@ index 6c678c5e9..57e891045 100644
  #elif BUILDFLAG(IS_WIN)
  
  namespace {
+diff --git a/src/net/cert/internal/system_trust_store.h b/src/net/cert/internal/system_trust_store.h
+--- a/src/net/cert/internal/system_trust_store.h
++++ b/src/net/cert/internal/system_trust_store.h
+@@ -116,6 +116,6 @@ NET_EXPORT std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStore();
+ #if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
+ #if BUILDFLAG(USE_NSS_SERVER_CERTS) || BUILDFLAG(IS_MAC) || \
+-    BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
++    BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
+ // Creates an instance of SystemTrustStore that wraps the current platform's SSL
+ // trust store for user added roots, but uses the Chrome Root Store trust
+ // anchors. This cannot return nullptr.
 -- 
 2.53.0
 
