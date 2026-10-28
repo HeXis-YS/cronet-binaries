@@ -112,7 +112,18 @@ From `src`, run:
 `get-clang.sh` runs Chromium's Rust updater and prebuilt Linux sysroot installer.
 Android NDK, JDK and SDK packages are selected from the prepared release's DEPS
 by `install-android-tools.py` (`--list` prints the selected packages). The script
-installs complete packages, preserving NDK libraries and headers. For Android,
+checks existing files and tool versions before installation, including tools
+exposed through `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `ANDROID_NDK*` and
+`JAVA_HOME*`. Matching tools are copied into the Chromium layout for caching;
+missing or incompatible tools are downloaded. A version stamp alone does not
+skip validation. The SDK platform's opaque CIPD revision must also match its
+stamp; an API level alone does not establish that revision.
+`python3 install-android-tools.py --check` checks availability without downloading
+or copying, and exits with status 1 if any required package is unavailable.
+Installation validates the files and commands again before recording a stamp.
+Installer regression checks run from the repository root with
+`python3 -m unittest discover -s tools/tests -p 'test_install_android_tools.py' -v`.
+The script installs complete packages, preserving NDK libraries and headers. For Android,
 `get-clang.sh` records the installed toolchain in `build/config/gclient_args.gni` by setting
 `checkout_android=true`. This is checkout metadata, not a GN command-line argument;
 `build_with_chromium` comes from the release archive's metadata as well.
