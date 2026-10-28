@@ -2,3 +2,4 @@
 02-native-socket-limits.patch
 03-native-system-trust.patch
 04-android-native-runtime.patch
+05-windows-oom-declaration.patch

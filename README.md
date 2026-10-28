@@ -33,7 +33,7 @@ generate upstream JNI headers; this does not introduce a runtime JVM requirement
 ### Native patch responsibilities
 
 The previous 12 active patches have been replaced from Chromium 156.0.8078.47.
-Only the four entries in `tools/patches/series` are applied:
+Only the entries in `tools/patches/series` are applied:
 
 | Patch | Responsibility |
 | --- | --- |
@@ -41,6 +41,7 @@ Only the four entries in `tools/patches/series` are applied:
 | `02-native-socket-limits.patch` | Set native pool/group/proxy limits together (2048/2040/2048), with bounds checks; leave upstream browser policy setters intact. |
 | `03-native-system-trust.patch` | Combine Chrome roots with file-backed Linux/Android roots. Preserve Windows native trust. Android reads Conscrypt APEX and system certificate directories without Java. |
 | `04-android-native-runtime.patch` | Use Android properties for device/build information; handle absent APK/activity metadata and optional Java network services without attaching a JVM. Preserve native scheduling, socket binding and DNS APIs. |
+| `05-windows-oom-declaration.patch` | Keep the upstream Windows OOM exception code declared when PartitionAlloc is disabled. |
 
 File roots are loaded lazily on verification workers and remain a snapshot for
 the verifier's lifetime. `SSL_CERT_FILE` and `SSL_CERT_DIR` override default file

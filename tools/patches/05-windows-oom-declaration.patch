@@ -1,0 +1,12 @@
+diff --git a/src/base/process/memory.h b/src/base/process/memory.h
+--- a/src/base/process/memory.h
++++ b/src/base/process/memory.h
+@@ -13,6 +13,7 @@
+ #include "build/build_config.h"
+ #include "partition_alloc/buildflags.h"
+ 
+-#if PA_BUILDFLAG(USE_PARTITION_ALLOC)
++// Windows also uses the OOM exception code when using the system allocator.
++#if PA_BUILDFLAG(USE_PARTITION_ALLOC) || BUILDFLAG(IS_WIN)
+ #include "partition_alloc/oom.h"  // nogncheck
+ #endif
