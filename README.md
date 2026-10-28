@@ -59,9 +59,14 @@ in [PATCH_REVIEW.md](PATCH_REVIEW.md).
 
 ### Build
 
-Install Ninja, pkg-config (Linux), Python, curl, xz, and unzip. All three CI
-workflows use Linux runners. Windows cross-compilation also needs `ciopfs` and
-the Windows toolchain downloaded by `get-clang.sh`; Android is built on Linux.
+Install Ninja, pkg-config (Linux), Python, curl, xz, and unzip. Linux and Android
+use Linux runners. Windows builds natively on `windows-2025-vs2026` with its
+installed Visual Studio 2026 and Windows SDK; `DEPOT_TOOLS_WIN_TOOLCHAIN=0`
+selects that installation instead of Google's toolchain download.
+For Windows source preparation under Git Bash, enable Windows Developer Mode
+and set `MSYS=winsymlinks:nativestrict` before starting Bash. This creates native
+symlinks instead of copying their targets, which may not yet exist while the
+archive is being extracted. The Windows workflow configures both settings.
 From `src`, run:
 
 ```sh

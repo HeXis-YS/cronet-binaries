@@ -25,6 +25,8 @@
 根目标通过GN命令选择。get-clang.sh改用上游Rust updater取得匹配工具链。
 checkout_android由build/config/gclient_args.gni直接赋值，不能通过GN的--args覆盖。
 get-clang.sh在安装Android原生工具链后更新该元数据；此修复尚待完整CI验证。
+Windows现改为windows-2025-vs2026原生构建，使用预装VS/SDK；不再下载Google的Windows工具链或使用ciopfs。
+源码解包使用MSYS=winsymlinks:nativestrict及Windows开发者模式；旧运行的符号链接错误来自MSYS默认复制目标的行为，原生编译尚待CI验证。
 生产LTO仍保留，build.sh的THIN_LTO可显式调整，不以删除全局补丁为由删除优化要求。
 
 ## 前一阶段审查记录

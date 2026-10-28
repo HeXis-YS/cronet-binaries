@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: windows-2025-vs2026
     defaults:
       run:
         shell: bash
@@ -18,8 +18,21 @@ jobs:
       EXTRA_FLAGS: 'target_cpu="x64" target_os="win"'
       JOBS: 2
       THIN_LTO: 'true'
+      DEPOT_TOOLS_WIN_TOOLCHAIN: '0'
+      # MSYS's default deepcopy mode fails for dangling/forward archive links.
+      MSYS: winsymlinks:nativestrict
+      # GN labels and build arguments are not Windows filesystem paths.
+      MSYS2_ARG_CONV_EXCL: '--root-target=;--root-pattern=;--args='
     steps:
       - uses: actions/checkout@v4
+      - name: Enable native Windows symlinks
+        shell: pwsh
+        working-directory: .
+        run: |
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name AllowDevelopmentWithoutDevLicense -Value 1 -PropertyType DWord -Force | Out-Null
+          git config --global core.longpaths true
       - name: Download and patch Chromium
         working-directory: .
         run: |
@@ -31,21 +44,15 @@ jobs:
           mv "$RUNNER_TEMP/chromium-stage" src
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build pkg-config bubblewrap ciopfs
-          python3 -m pip install requests
+          python3 -m pip install ninja requests
       - name: Cache toolchains
         uses: actions/cache@v4
         with:
           path: |
             src/third_party/llvm-build
-            src/third_party/android_toolchain
             src/gn
             src/third_party/rust-toolchain
-            src/third_party/depot_tools/win_toolchain
-            src/build/win_toolchain.json
-            src/out/sysroot-build
-          key: cronet-win-x64-${{ hashFiles('CHROMIUM_VERSION', 'src/get-clang.sh', 'src/tools/rust/update_rust.py') }}
+          key: cronet-win-native-vs2026-x64-${{ hashFiles('CHROMIUM_VERSION', 'src/get-clang.sh', 'src/tools/rust/update_rust.py') }}
       - name: Install matching toolchains
         run: |
           set -euo pipefail

@@ -54,11 +54,7 @@ fi
 if [ "$target_os" = android ]; then
   flags="$flags is_desktop_android=true default_min_sdk_version=24"
 fi
-if [ "$target_os" = win ] && [ "$host_os" = linux ]; then
-  export DEPOT_TOOLS_WIN_TOOLCHAIN=1
-else
-  export DEPOT_TOOLS_WIN_TOOLCHAIN=0
-fi
+export DEPOT_TOOLS_WIN_TOOLCHAIN=0
 ./gn/out/gn gen "$out" \
   --root-target=//components/xray_native:cronet \
   --root-pattern=//components/xray_native:cronet \
