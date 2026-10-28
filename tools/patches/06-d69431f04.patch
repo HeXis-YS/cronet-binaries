@@ -5,7 +5,7 @@ Subject: [PATCH] build: Support native Cronet without Java targets
 
 ---
 Only Android imports cronet_test, which packages Java test dependencies. Use
-the ordinary test template without Java, and guard URL Java targets with the
+the ordinary test template without Java, and guard URL and net Java targets with the
 same enable_java_templates switch used by the Android build rules.
 
 diff --git a/src/url/BUILD.gn b/src/url/BUILD.gn
@@ -45,6 +45,12 @@ index c1f4a88ea..5c69d7666 100644
 diff --git a/src/net/BUILD.gn b/src/net/BUILD.gn
 --- a/src/net/BUILD.gn
 +++ b/src/net/BUILD.gn
+@@ -2680,4 +2680,4 @@
+-if (is_android) {
++if (is_android && enable_java_templates) {
+   generate_jni("net_jni_headers") {
+     # quic_server links this code.
+     use_weak_called_by_natives = true
 @@ -2868,7 +2868,7 @@
    }
  }
