@@ -1,6 +1,5 @@
 01-native-request-context.patch
 02-native-socket-limits.patch
-03-native-system-trust.patch
 04-android-native-runtime.patch
 05-windows-oom-declaration.patch
 06-android-build-config-dependencies.patch

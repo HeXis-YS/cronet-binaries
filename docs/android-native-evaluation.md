@@ -3,7 +3,8 @@
 评估日期：2026-10-28。Chromium 基线为 156.0.8078.47；宿主依据为
 [SimpleXray fe1069f6](https://github.com/HeXis-YS/SimpleXray/tree/fe1069f6dc7dc9b2ce3d4ab70835fcd14c250460)。
 本次只评估 Android 简化方案，未改写 04；连接分组和轮换保持现状。
-证书策略已经调整为 Chrome 内置根库与附加 SPKI pin，不读取系统信任库。
+CA 来源不是项目目标，不限定必须使用内置或系统根库，也不添加专用信任库实现。
+沿用上游平台验证行为，SPKI pin 仍是普通证书验证之外的附加检查。
 
 ## 结论
 
@@ -54,7 +55,7 @@ App 当前仅打包 arm64-v8a，使用 `useLegacyPackaging=true`。新核心和
 | 部分 | 已核对的事实 | 简化方向与代价 |
 | --- | --- | --- |
 | IO 与线程 | 引擎选择 IO message pump；上游 Android IO 使用 `MessagePumpEpoll`。线程实现只有特定实时音频路径进入 Java。 | 保留上游 IO/普通线程，不替换整个 Android message pump 或调度器。 |
-| CA 与 pin | 07 在当前构建选择 `CreateChromeOnlySystemTrustStore`；pin 在本地验证器中计算，然后委托普通验证。 | 不需要文件根库或 Java 证书验证；CA 更新随库发布。 |
+| CA 与 pin | 文件根库补丁 03 已移除；pin 在本地验证器中计算，再委托上游普通验证。Android 默认平台信任路径仍依赖 Java，04 未处理这条路径。 | 不增加仅内置根库等专用策略；无 JVM 与上游平台信任接入之间的依赖仍待解决，不能宣称 Android 原生路径已完整。 |
 | TLS 平台策略 | builder 默认创建 `EchModeGetterAndroid`，其查询进入 Android network library。 | 适配层可设置已有的 `SSLConfigServiceDefaults`，不传平台 getter，采用上游 opportunistic ECH 默认值；不再跟随 App 的 Java ECH 策略。 |
 | 代理 | 当前适配层没有显式配置代理；builder 将空的 proxy config service 传给要求非空的通用工厂。 | 用现有 `ConfiguredProxyResolutionService::CreateDirect()` 为主连接和证书下载显式指定直连；不引入系统代理监听。源码表明当前路径有空配置前提问题，未运行复现。 |
 | DNS | 无指定 network handle 时，`AddrInfoGetter` 调用 Bionic `getaddrinfo()`；Android DNS 配置读取已有无 Java 时返回不可用的分支。 | 保留系统解析，覆盖证书 AIA；不要复制 Linux 的 `/etc/resolv.conf` 解析。网络变化后缓存失效仍需处理。 |

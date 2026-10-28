@@ -37,8 +37,6 @@ flags="$flags
   use_platform_icu_alternatives=false
   enable_rust=true
   enable_chromium_prelude=true
-  chrome_root_store_optional=false
-  chrome_root_store_only=true
   is_perfetto_embedder=true
   disable_file_support=true
   enable_websockets=false
@@ -48,9 +46,6 @@ flags="$flags
   include_transport_security_state_preload_list=false
   enable_device_bound_sessions=false
   enable_disk_cache_sql_backend=false
-  use_nss_certs=false
-  use_nss_client_certs=false
-  use_nss_server_certs=false
 "
 if [ "${WITH_SYSROOT:-}" ]; then
   flags="$flags target_sysroot=\"//$WITH_SYSROOT\""

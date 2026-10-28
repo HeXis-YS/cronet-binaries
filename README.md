@@ -24,9 +24,9 @@ in flight, and a single terminal callback follows transport teardown.
 The baseline retains upstream ICU, Rust, JNI generators and Android build
 templates. The checked-in Chromium snapshot still contains older patches;
 prepare a clean source tree using the command below before building.
-Certificate validation uses the Chrome root store with platform
-system roots; support for separately installed user or enterprise CAs is outside
-the delivery requirements. Android is consumed by hray-core through the native
+Certificate validation follows upstream platform defaults; this project does
+not customize CA sources. The leaf SPKI pin remains an additional check.
+Android is consumed by hray-core through the native
 C ABI without initializing a JVM. Java tools are used during the build to
 generate upstream JNI headers; this does not introduce a runtime JVM requirement.
 
@@ -39,15 +39,15 @@ Only the entries in `tools/patches/series` are applied:
 | --- | --- |
 | `01-native-request-context.patch` | Carry the isolation key into H2/H3 session selection and derive the anonymization key from it. Carry HTTP authority separately from the DNS/TLS URL. |
 | `02-native-socket-limits.patch` | Set native pool/group/proxy limits together (2048/2040/2048), with bounds checks; leave upstream browser policy setters intact. |
-| `03-native-system-trust.patch` | Combine Chrome roots with file-backed Linux/Android roots. Preserve Windows native trust. Android reads Conscrypt APEX and system certificate directories without Java. |
 | `04-android-native-runtime.patch` | Use Android properties for device/build information; handle absent APK/activity metadata and optional Java network services without attaching a JVM. Preserve native scheduling, socket binding and DNS APIs. |
 | `05-windows-oom-declaration.patch` | Keep the upstream Windows OOM exception code declared when PartitionAlloc is disabled. |
 | `06-android-build-config-dependencies.patch` | Declare the Java targets whose GN-time parameter files are consumed by Android build-config actions. |
 
-File roots are loaded lazily on verification workers and remain a snapshot for
-the verifier's lifetime. `SSL_CERT_FILE` and `SSL_CERT_DIR` override default file
-and directory locations. Missing file roots leave Chrome roots active and emit
-a warning. CA/hostname checks and the leaf SPKI pin remain required.
+The former file-backed trust patch has been removed. Linux uses upstream NSS
+integration; Windows and Android retain upstream platform trust integration.
+Android's Java-backed trust path remains an open dependency for a no-JVM core;
+patch 04 does not resolve it. CA/hostname checks and the leaf SPKI pin remain
+required. A matching pin does not bypass ordinary certificate validation.
 Without Java, Android uses the system resolver when Chromium cannot obtain a
 Java DNS configuration. Activity notifications, TrafficStats tags and Java QUIC
 socket registration are unavailable. Native network binding is retained.
@@ -97,7 +97,8 @@ and logs. This check does not replace a complete GN/build or runtime test.
 
 ### Build
 
-Install Ninja, pkg-config (Linux), Python, curl, xz, and unzip. Linux and Android
+Install Ninja, pkg-config and NSS development libraries (Linux), Python, curl,
+xz, and unzip. Linux and Android
 use Linux runners. Windows builds natively on `windows-2025-vs2026` with its
 installed Visual Studio 2026. `tools/install-windows-sdk.ps1` installs the required
 Windows SDK 10.0.28000.0 before configuration; `DEPOT_TOOLS_WIN_TOOLCHAIN=0`
