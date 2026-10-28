@@ -61,7 +61,6 @@ fi
 export DEPOT_TOOLS_WIN_TOOLCHAIN=0
 ./gn/out/gn gen "$out" \
   --root-target=//components/xray_native:cronet \
-  --root-pattern=//components/xray_native:cronet \
   --script-executable=python3 \
   --args="$flags ${EXTRA_FLAGS:-}"
 if [ "${1:-}" = configure ]; then

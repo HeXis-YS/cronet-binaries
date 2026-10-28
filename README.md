@@ -74,9 +74,9 @@ upgrading the pinned release, update `CHROMIUM_VERSION` explicitly.
 Each platform workflow moves its prepared source tree into `src` before
 restoring toolchain caches; no source artifact is repackaged or exchanged.
 The old `import-upstream.sh` rewrites history and is not this workflow.
-GN selects `components/xray_native`
-with `--root-target` and `--root-pattern`; upstream build descriptions and source
-files outside the listed patches remain intact. The stream ABI is internal:
+GN selects `components/xray_native` with `--root-target`; upstream build
+descriptions and source files outside the listed patches remain intact. The
+stream ABI is internal:
 deploy hray-core and its matching native library together.
 
 To verify patch application without downloading or compiling full Chromium:
