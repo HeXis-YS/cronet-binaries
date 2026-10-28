@@ -26,7 +26,6 @@
 #include "net/http/http_network_session.h"
 #include "net/proxy_resolution/configured_proxy_resolution_service.h"
 #include "net/quic/quic_context.h"
-#include "net/socket/client_socket_pool.h"
 #include "net/socket/client_socket_pool_manager.h"
 #include "net/url_request/url_request_context.h"
 #include "net/url_request/url_request_context_builder.h"
@@ -51,7 +50,6 @@ class Runtime {
     using Type = net::HttpNetworkSession::SocketPoolType;
     net::ClientSocketPoolManager::ConfigureNativeSocketLimits(
         Type::kNormal, 2048, 2040, 2048);
-    net::ClientSocketPool::set_used_idle_socket_timeout(base::Seconds(60));
     base::Thread::Options options;
     options.message_pump_type = base::MessagePumpType::IO;
     started_ = thread_.StartWithOptions(std::move(options));
