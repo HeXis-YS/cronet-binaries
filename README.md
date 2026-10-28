@@ -51,6 +51,9 @@ a warning. CA/hostname checks and the leaf SPKI pin remain required.
 Without Java, Android uses the system resolver when Chromium cannot obtain a
 Java DNS configuration. Activity notifications, TrafficStats tags and Java QUIC
 socket registration are unavailable. Native network binding is retained.
+The [Android native evaluation](docs/android-native-evaluation.md) assesses a
+simpler implementation for SimpleXray's separate core process; it is not an
+implemented replacement for patch 04.
 
 The old Java-template suppression, JNI stubs, `-latomic` removal, Windows SDK
 downgrade and custom Debian sysroot builder are no longer applied.
