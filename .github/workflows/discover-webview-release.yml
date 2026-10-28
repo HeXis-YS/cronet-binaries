@@ -1,0 +1,23 @@
+name: Discover WebView release
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Query ChromiumDash
+        run: |
+          set -euo pipefail
+          curl -s "https://chromiumdash.appspot.com/fetch_releases?channel=Stable&platform=Webview&num=1" |
+            jq -r '.[0].version' | tee webview-version.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webview-release
+          path: webview-version.txt
