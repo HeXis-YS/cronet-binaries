@@ -1,0 +1,5 @@
+# Keep shell build inputs and patch payloads unchanged on Windows checkout.
+*.sh text eol=lf
+/CHROMIUM_VERSION text eol=lf
+/tools/patches/series text eol=lf
+/tools/patches/*.patch text eol=lf

@@ -67,6 +67,8 @@ For Windows source preparation under Git Bash, enable Windows Developer Mode
 and set `MSYS=winsymlinks:nativestrict` before starting Bash. This creates native
 symlinks instead of copying their targets, which may not yet exist while the
 archive is being extracted. The Windows workflow configures both settings.
+Repository `.gitattributes` keeps shell scripts, the Chromium version, patch
+series, and patch files in LF format even when Git uses `core.autocrlf=true`.
 From `src`, run:
 
 ```sh
