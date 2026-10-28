@@ -4,8 +4,8 @@
 
 用户进一步确认：优先控制升级维护成本。ICU等裁剪只影响构建成本和体积，
 不作为必须维护的能力；恢复上游实现优先于维护替代代码。
-新基线已转交三个独立平台CI，本地构建保持停止。Android运行40610953711
-已越过checkout_android检查，但GN在url_unittests遇到禁用Java模板与默认APK测试形态冲突，未进入编译。
+新基线已转交三个独立平台CI，本地构建保持停止。Android运行40614162913
+已越过checkout_android及默认APK断言，但GN在url_unittests遇到test_runner_script未导入，未进入编译。
 下面旧审查保留为前一阶段记录；与此节冲突的“保留裁剪”决定已被覆盖。
 
 | 类别 | 原编号 | 新基线处理 |
@@ -25,7 +25,7 @@
 根目标通过GN命令选择。get-clang.sh改用上游Rust updater取得匹配工具链。
 checkout_android由build/config/gclient_args.gni直接赋值，不能通过GN的--args覆盖。
 get-clang.sh在安装Android原生工具链后更新该元数据；40610953711已越过原断言，完整构建仍未通过。
-补丁07同时让禁用Java模板时的默认test()使用原生可执行文件，保留调用方显式选择和原断言；不删除测试目标或重新启用Java。该兼容修复尚待完整CI验证。
+补丁07同时让禁用Java模板时的默认test()使用原生可执行文件，保留调用方显式选择和原断言；不删除测试目标或重新启用Java。40614162913已越过选择断言，但后续runner依赖暴露出验证缺口：internal_rules.gni原先仅经Java条件分支间接导入。现于test.gni的Android分支直接导入该上游文件；精简GN图已验证原生runner/wrapper生成，完整配置及构建仍待CI验证。
 Linux运行40610948642已通过GN配置，在编译cert_verify_proc.cc时因CreateSslSystemTrustStoreChromeRoot未声明失败。补丁18已有Linux实现，但头文件条件遗漏了关闭NSS的Linux；现将IS_LINUX补入同一补丁的声明条件，完整构建仍待CI验证。
 Windows现改为windows-2025-vs2026原生构建，使用预装VS/SDK；不再下载Google的Windows工具链或使用ciopfs。
 源码解包使用MSYS=winsymlinks:nativestrict及Windows开发者模式；旧运行的符号链接错误来自MSYS默认复制目标的行为，原生编译尚待CI验证。
