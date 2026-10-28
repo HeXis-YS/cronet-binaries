@@ -47,12 +47,8 @@ class Runtime {
                                     "");
     base::ThreadPoolInstance::CreateAndStartWithDefaultParams("xray-cronet");
     using Type = net::HttpNetworkSession::SocketPoolType;
-    net::ClientSocketPoolManager::set_socket_soft_cap_per_pool_for_test(
-        Type::kNormal, 2048);
-    net::ClientSocketPoolManager::set_max_sockets_per_proxy_chain(
-        Type::kNormal, 2048);
-    net::ClientSocketPoolManager::set_max_sockets_per_group_for_test(
-        Type::kNormal, 2040);
+    net::ClientSocketPoolManager::ConfigureNativeSocketLimits(
+        Type::kNormal, 2048, 2040, 2048);
     net::ClientSocketPool::set_used_idle_socket_timeout(base::Seconds(60));
     base::Thread::Options options;
     options.message_pump_type = base::MessagePumpType::IO;

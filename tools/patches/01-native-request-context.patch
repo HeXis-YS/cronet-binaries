@@ -1,0 +1,67 @@
+diff --git a/src/net/http/bidirectional_stream_request_info.h b/src/net/http/bidirectional_stream_request_info.h
+--- a/src/net/http/bidirectional_stream_request_info.h
++++ b/src/net/http/bidirectional_stream_request_info.h
+@@ -10,6 +10,7 @@
+ #include "base/time/time.h"
+ #include "net/base/net_export.h"
+ #include "net/base/network_handle.h"
++#include "net/base/network_isolation_key.h"
+ #include "net/base/request_priority.h"
+ #include "net/http/http_request_headers.h"
+ #include "net/socket/socket_tag.h"
+@@ -24,6 +25,13 @@
+ 
+   // The requested URL.
+   GURL url;
++
++  // The embedder partitions both H2 and H3 sessions with this key.
++  NetworkIsolationKey network_isolation_key;
++
++  // HTTP routing only. URL origin remains the DNS, TLS and certificate
++  // identity.
++  std::string authority;
+ 
+   // The method to use (GET, POST, etc.).
+   std::string method;
+diff --git a/src/net/http/bidirectional_stream.cc b/src/net/http/bidirectional_stream.cc
+--- a/src/net/http/bidirectional_stream.cc
++++ b/src/net/http/bidirectional_stream.cc
+@@ -205,6 +205,12 @@
+   DCHECK(!stream_request_);
+   HttpRequestInfo http_request_info;
+   http_request_info.url = request_info_->url;
++  http_request_info.network_isolation_key =
++      request_info_->network_isolation_key;
++  http_request_info.network_anonymization_key =
++      NetworkAnonymizationKey::CreateFromNetworkIsolationKey(
++          request_info_->network_isolation_key);
++  http_request_info.authority = request_info_->authority;
+   http_request_info.method = request_info_->method;
+   http_request_info.extra_headers = request_info_->extra_headers;
+   http_request_info.socket_tag = request_info_->socket_tag;
+diff --git a/src/net/http/http_request_info.h b/src/net/http/http_request_info.h
+--- a/src/net/http/http_request_info.h
++++ b/src/net/http/http_request_info.h
+@@ -45,6 +45,9 @@
+ 
+   // The requested URL.
+   GURL url;
++
++  // Optional HTTP authority, independent of the URL used for TLS verification.
++  std::string authority;
+ 
+   // The method to use (GET, POST, etc.).
+   std::string method;
+diff --git a/src/net/spdy/spdy_http_utils.cc b/src/net/spdy/spdy_http_utils.cc
+--- a/src/net/spdy/spdy_http_utils.cc
++++ b/src/net/spdy/spdy_http_utils.cc
+@@ -209,6 +209,9 @@
+     headers->insert({spdy::kHttp2SchemeHeader, info.url.GetScheme()});
+     headers->insert({spdy::kHttp2PathHeader, info.url.PathForRequest()});
+   }
++  if (!info.authority.empty()) {
++    (*headers)[spdy::kHttp2AuthorityHeader] = info.authority;
++  }
+ 
+   HttpRequestHeaders::Iterator it(request_headers);
+   while (it.GetNext()) {

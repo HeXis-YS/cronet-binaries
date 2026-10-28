@@ -40,10 +40,11 @@ jobs:
           path: |
             src/third_party/llvm-build
             src/third_party/android_toolchain
+            src/third_party/android_sdk/public
+            src/third_party/jdk/current
             src/gn
             src/third_party/rust-toolchain
-            src/out/sysroot-build
-          key: cronet-android-arm64-${{ hashFiles('CHROMIUM_VERSION', 'src/get-clang.sh', 'src/tools/rust/update_rust.py') }}
+          key: cronet-android-arm64-${{ hashFiles('CHROMIUM_VERSION', 'src/get-clang.sh', 'src/install-android-tools.py', 'src/tools/rust/update_rust.py') }}
       - name: Install matching toolchains
         run: |
           set -euo pipefail

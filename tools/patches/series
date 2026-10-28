@@ -1,12 +1,4 @@
-03-31bae8d4e.patch
-04-47feb56f1.patch
-05-f4bda65db.patch
-06-d69431f04.patch
-07-063389d65.patch
-08-5e20f9342.patch
-18-64d2befbc.patch
-21-c61ed0046.patch
-26-xhttp-isolation.patch
-27-xhttp-authority.patch
-28-windows-sdk.patch
-29-sysroot-builder.patch
+01-native-request-context.patch
+02-native-socket-limits.patch
+03-native-system-trust.patch
+04-android-native-runtime.patch

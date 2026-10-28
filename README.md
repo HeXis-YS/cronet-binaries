@@ -7,9 +7,8 @@ Windows x64, and Android arm64 artifacts with production ThinLTO. Start the
 desired platform with `workflow_dispatch`; publishing a release starts all three.
 Each run prepares and patches its own Chromium source tree. Runs have no shared
 concurrency group, so a new request does not cancel an older request. Each job
-uploads its logs, revision, patch series and GN arguments. The upstream-source
-migration is validated by CI; no successful build of that new baseline has been
-established yet.
+uploads its logs, revision, patch series and GN arguments. The rewritten patch
+series still requires complete platform builds and runtime validation in CI.
 
 This branch builds a shared library for Xray's HTTP/2 and HTTP/3 bidirectional
 streams on Linux, Windows, and Android. Its C ABI is
@@ -22,14 +21,39 @@ it has no gRPC dependency. Its six `xray_stream_*` operations cover creation,
 start, read, write, cancellation, and destruction. One read and one write may be
 in flight, and a single terminal callback follows transport teardown.
 
-The new baseline retains upstream ICU and Rust implementations to reduce patch
-maintenance. Source migration and GN validation are in progress; the previously
-installed source tree still contains the older trimming patches. Complete the
-source preparation below before using the new build flags.
+The baseline retains upstream ICU, Rust, JNI generators and Android build
+templates. The checked-in Chromium snapshot still contains older patches;
+prepare a clean source tree using the command below before building.
 Certificate validation uses the Chrome root store with platform
 system roots; support for separately installed user or enterprise CAs is outside
 the delivery requirements. Android is consumed by hray-core through the native
-C ABI, without a Java-facing API.
+C ABI without initializing a JVM. Java tools are used during the build to
+generate upstream JNI headers; this does not introduce a runtime JVM requirement.
+
+### Native patch responsibilities
+
+The previous 12 active patches have been replaced from Chromium 156.0.8078.47.
+Only the four entries in `tools/patches/series` are applied:
+
+| Patch | Responsibility |
+| --- | --- |
+| `01-native-request-context.patch` | Carry the isolation key into H2/H3 session selection and derive the anonymization key from it. Carry HTTP authority separately from the DNS/TLS URL. |
+| `02-native-socket-limits.patch` | Set native pool/group/proxy limits together (2048/2040/2048), with bounds checks; leave upstream browser policy setters intact. |
+| `03-native-system-trust.patch` | Combine Chrome roots with file-backed Linux/Android roots. Preserve Windows native trust. Android reads Conscrypt APEX and system certificate directories without Java. |
+| `04-android-native-runtime.patch` | Use Android properties for device/build information; handle absent APK/activity metadata and optional Java network services without attaching a JVM. Preserve native scheduling, socket binding and DNS APIs. |
+
+File roots are loaded lazily on verification workers and remain a snapshot for
+the verifier's lifetime. `SSL_CERT_FILE` and `SSL_CERT_DIR` override default file
+and directory locations. Missing file roots leave Chrome roots active and emit
+a warning. CA/hostname checks and the leaf SPKI pin remain required.
+Without Java, Android uses the system resolver when Chromium cannot obtain a
+Java DNS configuration. Activity notifications, TrafficStats tags and Java QUIC
+socket registration are unavailable. Native network binding is retained.
+
+The old Java-template suppression, JNI stubs, `-latomic` removal, Windows SDK
+downgrade and custom Debian sysroot builder are no longer applied.
+`PATCH_REVIEW.md` remains the frozen **previous** design baseline; its old patch
+table is historical. This section and `series` describe the current build.
 
 ### Upgrade Chromium
 
@@ -49,19 +73,28 @@ below. Existing `src` files and toolchain caches are left untouched. When
 upgrading the pinned release, update `CHROMIUM_VERSION` explicitly.
 Each platform workflow moves its prepared source tree into `src` before
 restoring toolchain caches; no source artifact is repackaged or exchanged.
-The patches retain NaiveProxy authorship and include the Xray isolation/authority
-adapters. The old `import-upstream.sh` rewrites history and is not this workflow.
+The old `import-upstream.sh` rewrites history and is not this workflow.
 GN selects `components/xray_native`
 with `--root-target` and `--root-pattern`; upstream build descriptions and source
-files remain intact. The stream ABI is internal: deploy hray-core and its matching
-native library together. Patch categories and the migration status are recorded
-in [PATCH_REVIEW.md](PATCH_REVIEW.md).
+files outside the listed patches remain intact. The stream ABI is internal:
+deploy hray-core and its matching native library together.
+
+To verify patch application without downloading or compiling full Chromium:
+
+```sh
+python3 tools/verify-patches.py .codex/runs/patch-check-01
+```
+
+Use a new output directory each time. The verifier downloads only touched files
+from the pinned upstream tag and saves their hashes, applied sources, conditions
+and logs. This check does not replace a complete GN/build or runtime test.
 
 ### Build
 
 Install Ninja, pkg-config (Linux), Python, curl, xz, and unzip. Linux and Android
 use Linux runners. Windows builds natively on `windows-2025-vs2026` with its
-installed Visual Studio 2026 and Windows SDK; `DEPOT_TOOLS_WIN_TOOLCHAIN=0`
+installed Visual Studio 2026. `tools/install-windows-sdk.ps1` installs the required
+Windows SDK 10.0.28000.0 before configuration; `DEPOT_TOOLS_WIN_TOOLCHAIN=0`
 selects that installation instead of Google's toolchain download.
 For Windows source preparation under Git Bash, enable Windows Developer Mode
 and set `MSYS=winsymlinks:nativestrict` before starting Bash. This creates native
@@ -76,8 +109,11 @@ From `src`, run:
 ./build.sh
 ```
 
-`get-clang.sh` also runs Chromium's Rust toolchain updater. For Android, it records
-the installed native toolchain in `build/config/gclient_args.gni` by setting
+`get-clang.sh` runs Chromium's Rust updater and prebuilt Linux sysroot installer.
+Android NDK, JDK and SDK packages are selected from the prepared release's DEPS
+by `install-android-tools.py` (`--list` prints the selected packages). The script
+installs complete packages, preserving NDK libraries and headers. For Android,
+`get-clang.sh` records the installed toolchain in `build/config/gclient_args.gni` by setting
 `checkout_android=true`. This is checkout metadata, not a GN command-line argument;
 `build_with_chromium` comes from the release archive's metadata as well.
 `./build.sh configure`
@@ -106,7 +142,7 @@ Pre-built, cross-platform binaries for [cronet](https://chromium.googlesource.co
 
 This repository is based on [NaiveProxy](https://github.com/klzgrad/naiveproxy)'s excellent build system, but doesn't include any Naive binaries, tests or go files. The last release of Naive that came with standalone cronet binaries was [v106.0.5249.91-3](https://github.com/klzgrad/naiveproxy/releases/tag/v106.0.5249.91-3) (Nov 2, 2022). Since then, new builds have been [discontinued](https://github.com/klzgrad/naiveproxy/issues/471#issuecomment-1457323770) so this project aims to fill that gap.
 
-## Applied patches
+## Original upstream distribution patches (historical)
 Patches are applied to the Chromium source code to make it compile on all supported platforms and support additional features. The following noteworthy patches are applied:
 
 - Minimize source code and build size

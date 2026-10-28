@@ -1,0 +1,218 @@
+diff --git a/src/net/cert/internal/trust_store_files.h b/src/net/cert/internal/trust_store_files.h
+new file mode 100644
+--- /dev/null
++++ b/src/net/cert/internal/trust_store_files.h
+@@ -0,0 +1,12 @@
++// File-backed trust anchors for native Linux and Android embedders.
++#ifndef NET_CERT_INTERNAL_TRUST_STORE_FILES_H_
++#define NET_CERT_INTERNAL_TRUST_STORE_FILES_H_
++
++#include <memory>
++#include "net/cert/internal/platform_trust_store.h"
++
++namespace net {
++std::unique_ptr<PlatformTrustStore> CreateFileSystemTrustStore();
++}  // namespace net
++
++#endif
+diff --git a/src/net/cert/internal/trust_store_files.cc b/src/net/cert/internal/trust_store_files.cc
+new file mode 100644
+--- /dev/null
++++ b/src/net/cert/internal/trust_store_files.cc
+@@ -0,0 +1,119 @@
++#include "net/cert/internal/trust_store_files.h"
++
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include "base/environment.h"
++#include "base/files/file_enumerator.h"
++#include "base/files/file_util.h"
++#include "base/logging.h"
++#include "base/strings/string_split.h"
++#include "base/threading/scoped_blocking_call.h"
++#include "build/build_config.h"
++#include "net/cert/x509_certificate.h"
++#include "net/cert/x509_util.h"
++#include "third_party/boringssl/src/pki/cert_errors.h"
++#include "third_party/boringssl/src/pki/trust_store_in_memory.h"
++
++namespace net {
++namespace {
++
++// Immutable after first use. Verification workers may share this snapshot.
++class FileSystemTrustStore final : public PlatformTrustStore {
++ public:
++  void SyncGetIssuersOf(const bssl::ParsedCertificate* cert,
++                        bssl::ParsedCertificateList* issuers) override {
++    Load();
++    anchors_.SyncGetIssuersOf(cert, issuers);
++  }
++  bssl::CertificateTrust GetTrust(
++      const bssl::ParsedCertificate* cert) override {
++    Load();
++    return anchors_.GetTrust(cert);
++  }
++  std::vector<CertWithTrust> GetAllUserAddedCerts() override {
++    Load();
++    return certificates_;
++  }
++
++ private:
++  bool ReadCertificates(const base::FilePath& path) {
++    std::string bytes;
++    if (!base::ReadFileToString(path, &bytes))
++      return false;
++    bool found = false;
++    for (const auto& cert : X509Certificate::CreateCertificateListFromBytes(
++             base::as_bytes(base::span(bytes)), X509Certificate::FORMAT_AUTO)) {
++      bssl::CertErrors errors;
++      auto parsed = bssl::ParsedCertificate::Create(
++          bssl::UpRef(cert->cert_buffer()),
++          x509_util::DefaultParseCertificateOptions(), &errors);
++      if (!parsed)
++        continue;
++      found = true;
++      if (anchors_.Contains(parsed.get()))
++        continue;
++      auto der = x509_util::CryptoBufferAsSpan(cert->cert_buffer());
++      certificates_.emplace_back(std::vector<uint8_t>(der.begin(), der.end()),
++                                 bssl::CertificateTrust::ForTrustAnchor());
++      anchors_.AddTrustAnchor(std::move(parsed));
++    }
++    return found;
++  }
++
++  void Load() {
++    std::call_once(loaded_, [this] {
++      base::ScopedBlockingCall blocking(FROM_HERE,
++                                        base::BlockingType::MAY_BLOCK);
++      auto env = base::Environment::Create();
++      const auto file = env->GetVar("SSL_CERT_FILE");
++      if (file && !file->empty()) {
++        ReadCertificates(base::FilePath(*file));
++      } else {
++        for (const char* path :
++             {"/etc/ssl/certs/ca-certificates.crt",
++              "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/ca-bundle.pem",
++              "/etc/pki/tls/cacert.pem",
++              "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
++              "/etc/ssl/cert.pem"}) {
++          if (ReadCertificates(base::FilePath(path)))
++            break;
++        }
++      }
++      std::vector<std::string> directories;
++      const auto dirs = env->GetVar("SSL_CERT_DIR");
++      if (dirs && !dirs->empty()) {
++        directories = base::SplitString(*dirs, ":", base::TRIM_WHITESPACE,
++                                        base::SPLIT_WANT_NONEMPTY);
++      } else {
++#if BUILDFLAG(IS_ANDROID)
++        // Conscrypt moved system roots into an APEX on recent Android releases.
++        directories = {"/apex/com.android.conscrypt/cacerts",
++                       "/system/etc/security/cacerts"};
++#else
++        directories = {"/etc/ssl/certs", "/etc/pki/tls/certs"};
++#endif
++      }
++      for (const auto& directory : directories) {
++        base::FileEnumerator files(base::FilePath(directory), true,
++                                   base::FileEnumerator::FILES);
++        for (auto path = files.Next(); !path.empty(); path = files.Next())
++          ReadCertificates(path);
++      }
++      if (certificates_.empty())
++        LOG(WARNING)
++            << "No file-backed system roots; Chrome roots remain active";
++    });
++  }
++
++  std::once_flag loaded_;
++  bssl::TrustStoreInMemory anchors_;
++  std::vector<CertWithTrust> certificates_;
++};
++}  // namespace
++
++std::unique_ptr<PlatformTrustStore> CreateFileSystemTrustStore() {
++  return std::make_unique<FileSystemTrustStore>();
++}
++}  // namespace net
+diff --git a/src/net/BUILD.gn b/src/net/BUILD.gn
+--- a/src/net/BUILD.gn
++++ b/src/net/BUILD.gn
+@@ -1384,6 +1384,12 @@
+     ]
+   }
+ 
++  if (is_linux || is_android) {
++    sources += [
++      "cert/internal/trust_store_files.cc",
++      "cert/internal/trust_store_files.h",
++    ]
++  }
+   if (is_android) {
+     sources += [
+       "android/android_http_util.cc",
+diff --git a/src/net/cert/internal/system_trust_store.cc b/src/net/cert/internal/system_trust_store.cc
+--- a/src/net/cert/internal/system_trust_store.cc
++++ b/src/net/cert/internal/system_trust_store.cc
+@@ -18,6 +18,12 @@
+ #include "base/threading/thread_restrictions.h"
+ #include "build/build_config.h"
+ #include "crypto/crypto_buildflags.h"
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID)
++#include "net/cert/internal/trust_store_files.h"
++#endif
++#if BUILDFLAG(IS_ANDROID)
++#include "base/android/jni_android.h"
++#endif
+ #include "net/cert/x509_certificate.h"
+ #include "net/cert/x509_util.h"
+ #include "third_party/boringssl/src/pki/cert_errors.h"
+@@ -380,6 +386,14 @@
+       base::BindOnce(&InitializeTrustStoreForCRSOnWorkerThread));
+ }
+ 
++#elif BUILDFLAG(IS_LINUX)
++
++std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStoreChromeRoot(
++    std::unique_ptr<TrustStoreChrome> chrome_root) {
++  return std::make_unique<SystemTrustStoreChrome>(std::move(chrome_root),
++                                                  CreateFileSystemTrustStore());
++}
++
+ #elif BUILDFLAG(IS_ANDROID)
+ 
+ #if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
+@@ -397,11 +411,17 @@
+ 
+ std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStoreChromeRoot(
+     std::unique_ptr<TrustStoreChrome> chrome_root) {
++  if (!base::android::IsJavaAvailable()) {
++    return std::make_unique<SystemTrustStoreChrome>(
++        std::move(chrome_root), CreateFileSystemTrustStore());
++  }
+   return std::make_unique<SystemTrustStoreChromeWithUnOwnedSystemStore>(
+       std::move(chrome_root), GetGlobalTrustStoreAndroidForCRS());
+ }
+ 
+ void InitializeTrustStoreAndroid() {
++  if (!base::android::IsJavaAvailable())
++    return;
+   // Start observing DB change before the Trust Store is initialized so we don't
+   // accidentally miss any changes. See https://crrev.com/c/4226436 for context.
+   //
+diff --git a/src/net/cert/internal/system_trust_store.h b/src/net/cert/internal/system_trust_store.h
+--- a/src/net/cert/internal/system_trust_store.h
++++ b/src/net/cert/internal/system_trust_store.h
+@@ -115,7 +115,7 @@
+ 
+ #if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
+ #if BUILDFLAG(USE_NSS_SERVER_CERTS) || BUILDFLAG(IS_MAC) || \
+-    BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
++    BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX)
+ // Creates an instance of SystemTrustStore that wraps the current platform's SSL
+ // trust store for user added roots, but uses the Chrome Root Store trust
+ // anchors. This cannot return nullptr.

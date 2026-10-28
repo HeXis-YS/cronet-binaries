@@ -22,4 +22,5 @@ while IFS= read -r patch; do
 done < "$root/tools/patches/series"
 cp -R "$root/src/components/xray_native" "$source_dir/components/"
 cp "$root"/src/*.sh "$source_dir/"
+cp "$root/src/install-android-tools.py" "$source_dir/"
 echo "Prepared Chromium $version in $source_dir"

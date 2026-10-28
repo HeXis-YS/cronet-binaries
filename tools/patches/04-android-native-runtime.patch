@@ -1,0 +1,283 @@
+diff --git a/src/base/android/android_info.cc b/src/base/android/android_info.cc
+--- a/src/base/android/android_info.cc
++++ b/src/base/android/android_info.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "base/android/android_info.h"
+ 
++#include <android/api-level.h>
++#include <sys/system_properties.h>
+ #include <cstring>
+ #include <mutex>
+ #include <string>
+@@ -62,6 +64,35 @@
+ }
+ 
+ const IAndroidInfo& get_android_info() {
++  if (!IsJavaAvailable()) {
++    static const base::NoDestructor<IAndroidInfo> native([] {
++      auto property = [](const char* name) {
++        char value[PROP_VALUE_MAX] = {};
++        __system_property_get(name, value);
++        return std::string(value);
++      };
++      const int sdk = android_get_device_api_level();
++      return IAndroidInfo{
++          .abiName = property("ro.product.cpu.abilist"),
++          .androidBuildFp = property("ro.build.fingerprint"),
++          .androidBuildId = property("ro.build.id"),
++          .board = property("ro.product.board"),
++          .brand = property("ro.product.brand"),
++          .buildType = property("ro.build.type"),
++          .codename = property("ro.build.version.codename"),
++          .device = property("ro.product.device"),
++          .hardware = property("ro.hardware"),
++          .isDebugAndroid = property("ro.debuggable") == "1",
++          .manufacturer = property("ro.product.manufacturer"),
++          .model = property("ro.product.model"),
++          .sdkInt = sdk,
++          .sdkIntFull = sdk * 100000,
++          .securityPatch = property("ro.build.version.security_patch"),
++          .socManufacturer = property("ro.soc.manufacturer"),
++          .versionIncremental = property("ro.build.version.incremental")};
++    }());
++    return *native;
++  }
+   const std::optional<IAndroidInfo>& holder = get_holder();
+   if (!holder.has_value()) {
+     Java_AndroidInfo_nativeReadyForFields(AttachCurrentThread());
+diff --git a/src/base/android/apk_info.cc b/src/base/android/apk_info.cc
+--- a/src/base/android/apk_info.cc
++++ b/src/base/android/apk_info.cc
+@@ -51,6 +51,11 @@
+ }
+ 
+ const IApkInfo& get_apk_info() {
++  if (!IsJavaAvailable()) {
++    // A native process has no APK identity or manifest target SDK.
++    static const base::NoDestructor<IApkInfo> native(IApkInfo{});
++    return *native;
++  }
+   const std::optional<IApkInfo>& holder = get_holder();
+   if (!holder.has_value()) {
+     Java_ApkInfo_nativeReadyForFields(AttachCurrentThread());
+diff --git a/src/base/android/device_info.cc b/src/base/android/device_info.cc
+--- a/src/base/android/device_info.cc
++++ b/src/base/android/device_info.cc
+@@ -53,6 +53,11 @@
+ }
+ 
+ IDeviceInfo& get_device_info() {
++  if (!IsJavaAvailable()) {
++    // UI capabilities are not supplied by a native embedding process.
++    static base::NoDestructor<IDeviceInfo> native(IDeviceInfo{});
++    return *native;
++  }
+   std::optional<IDeviceInfo>& holder = get_holder();
+   if (!holder.has_value()) {
+     Java_DeviceInfo_nativeReadyForFields(AttachCurrentThread());
+diff --git a/src/base/android/sys_utils.cc b/src/base/android/sys_utils.cc
+--- a/src/base/android/sys_utils.cc
++++ b/src/base/android/sys_utils.cc
+@@ -39,11 +39,15 @@
+ }
+ 
+ int GetCachedLowMemoryDeviceThresholdMb() {
++  if (!IsJavaAvailable())
++    return 1024;  // SysUtils.java LOW_MEMORY_DEVICE_THRESHOLD_MB.
+   JNIEnv* env = AttachCurrentThread();
+   return static_cast<int>(Java_SysUtils_getLowMemoryDeviceThresholdMb(env));
+ }
+ 
+ bool IsProcessInBackground() {
++  if (!IsJavaAvailable())
++    return false;  // No Activity lifecycle in a native process.
+   JNIEnv* env = AttachCurrentThread();
+   return Java_SysUtils_isProcessInBackground(env);
+ }
+diff --git a/src/base/android/application_status_listener.cc b/src/base/android/application_status_listener.cc
+--- a/src/base/android/application_status_listener.cc
++++ b/src/base/android/application_status_listener.cc
+@@ -48,8 +48,10 @@
+     SetCallback(callback);
+     g_observers.Get().AddObserver(this);
+ 
+-    Java_ApplicationStatus_registerThreadSafeNativeApplicationStateListener(
+-        AttachCurrentThread());
++    if (IsJavaAvailable()) {
++      Java_ApplicationStatus_registerThreadSafeNativeApplicationStateListener(
++          AttachCurrentThread());
++    }
+   }
+ 
+   ~ApplicationStatusListenerImpl() override {
+@@ -107,6 +109,8 @@
+ 
+ // static
+ ApplicationState ApplicationStatusListener::GetState() {
++  if (!IsJavaAvailable())
++    return APPLICATION_STATE_UNKNOWN;
+   return static_cast<ApplicationState>(
+       Java_ApplicationStatus_getStateForApplication(AttachCurrentThread()));
+ }
+@@ -119,6 +123,8 @@
+ 
+ // static
+ bool ApplicationStatusListener::HasVisibleActivities() {
++  if (!IsJavaAvailable())
++    return false;
+   return Java_ApplicationStatus_hasVisibleActivities(AttachCurrentThread());
+ }
+ 
+diff --git a/src/base/threading/platform_thread_android.cc b/src/base/threading/platform_thread_android.cc
+--- a/src/base/threading/platform_thread_android.cc
++++ b/src/base/threading/platform_thread_android.cc
+@@ -267,7 +267,8 @@
+   // However, with
+   // https://android-review.googlesource.com/c/platform/system/core/+/1975808
+   // this becomes obsolete and we can avoid this starting in API level 33.
+-  if (thread_type == ThreadType::kRealtimeAudio &&
++  if (base::android::IsJavaAvailable() &&
++      thread_type == ThreadType::kRealtimeAudio &&
+       base::android::android_info::sdk_int() <
+           base::android::android_info::SDK_VERSION_T) {
+     JNIEnv* env = base::android::AttachCurrentThread();
+@@ -291,6 +292,8 @@
+ }
+ 
+ std::optional<ThreadType> GetCurrentEffectiveThreadTypeForPlatformForTest() {
++  if (!base::android::IsJavaAvailable())
++    return std::nullopt;
+   JNIEnv* env = base::android::AttachCurrentThread();
+   if (Java_ThreadUtils_isThreadPriorityAudio(
+           env, PlatformThread::CurrentId().raw())) {
+diff --git a/src/net/android/network_library.cc b/src/net/android/network_library.cc
+--- a/src/net/android/network_library.cc
++++ b/src/net/android/network_library.cc
+@@ -5,6 +5,8 @@
+ #include "net/android/network_library.h"
+ 
+ #include <dlfcn.h>
++#include <ifaddrs.h>
++#include <net/if.h>
+ 
+ #include <string>
+ #include <string_view>
+@@ -108,12 +110,17 @@
+ }
+ 
+ bool IsCleartextPermitted(std::string_view host) {
++  // Native embedders have no Java NetworkSecurityPolicy. HTTP is needed by AIA.
++  if (!base::android::IsJavaAvailable())
++    return true;
+   JNIEnv* env = AttachCurrentThread();
+   ScopedJavaLocalRef<jstring> host_string = ConvertUTF8ToJavaString(env, host);
+   return Java_AndroidNetworkLibrary_isCleartextPermitted(env, host_string);
+ }
+ 
+ EchMode GetEchMode(std::string_view host) {
++  if (!base::android::IsJavaAvailable())
++    return EchMode::kOpportunistic;
+   // DomainEncryptionMode was introduced in Android CINNAMON_BUN.
+   // Return default value early to avoid JNI overhead.
+   if (base::android::android_info::sdk_int() <
+@@ -127,6 +134,23 @@
+ }
+ 
+ bool HaveOnlyLoopbackAddresses() {
++  if (!base::android::IsJavaAvailable()) {
++    struct ifaddrs* interfaces = nullptr;
++    if (getifaddrs(&interfaces) != 0)
++      return false;
++    bool only_loopback = true;
++    for (auto* entry = interfaces; entry; entry = entry->ifa_next) {
++      if (entry->ifa_addr && (entry->ifa_flags & IFF_UP) &&
++          !(entry->ifa_flags & IFF_LOOPBACK) &&
++          (entry->ifa_addr->sa_family == AF_INET ||
++           entry->ifa_addr->sa_family == AF_INET6)) {
++        only_loopback = false;
++        break;
++      }
++    }
++    freeifaddrs(interfaces);
++    return only_loopback;
++  }
+   base::ScopedBlockingCall scoped_blocking_call(FROM_HERE,
+                                                 base::BlockingType::MAY_BLOCK);
+   JNIEnv* env = AttachCurrentThread();
+@@ -134,6 +158,8 @@
+ }
+ 
+ bool GetMimeTypeFromExtension(std::string_view extension, std::string* result) {
++  if (!base::android::IsJavaAvailable())
++    return false;
+   JNIEnv* env = AttachCurrentThread();
+ 
+   ScopedJavaLocalRef<jstring> extension_string =
+@@ -149,22 +175,30 @@
+ }
+ 
+ std::string GetTelephonyNetworkOperator() {
++  if (!base::android::IsJavaAvailable())
++    return {};
+   return base::android::ConvertJavaStringToUTF8(
+       Java_AndroidNetworkLibrary_getNetworkOperator(
+           base::android::AttachCurrentThread()));
+ }
+ 
+ bool GetIsRoaming() {
++  if (!base::android::IsJavaAvailable())
++    return false;
+   return Java_AndroidNetworkLibrary_getIsRoaming(
+       base::android::AttachCurrentThread());
+ }
+ 
+ bool GetIsCaptivePortal() {
++  if (!base::android::IsJavaAvailable())
++    return false;
+   return Java_AndroidNetworkLibrary_getIsCaptivePortal(
+       base::android::AttachCurrentThread());
+ }
+ 
+ std::string GetWifiSSID() {
++  if (!base::android::IsJavaAvailable())
++    return {};
+   return base::android::ConvertJavaStringToUTF8(
+       Java_AndroidNetworkLibrary_getWifiSSID(
+           base::android::AttachCurrentThread()));
+@@ -176,6 +210,8 @@
+ }
+ 
+ std::optional<int32_t> GetWifiSignalLevel() {
++  if (!base::android::IsJavaAvailable())
++    return std::nullopt;
+   const int count_buckets = 5;
+   int signal_strength = Java_AndroidNetworkLibrary_getWifiSignalLevel(
+       base::android::AttachCurrentThread(), count_buckets);
+@@ -266,6 +302,8 @@
+ }
+ 
+ void TagSocket(SocketDescriptor socket, uid_t uid, int32_t tag) {
++  if (!base::android::IsJavaAvailable())
++    return;
+   Java_AndroidNetworkLibrary_tagSocket(AttachCurrentThread(), socket, uid, tag);
+ }
+ 
+@@ -357,6 +395,8 @@
+ }
+ 
+ void RegisterQuicConnectionClosePayload(int fd, base::span<uint8_t> payload) {
++  if (!base::android::IsJavaAvailable())
++    return;
+   JNIEnv* env = AttachCurrentThread();
+   ScopedJavaLocalRef<jbyteArray> payload_array = ToJavaByteArray(env, payload);
+   DCHECK(!payload_array.is_null());
+@@ -365,6 +405,8 @@
+ }
+ 
+ void UnregisterQuicConnectionClosePayload(int fd) {
++  if (!base::android::IsJavaAvailable())
++    return;
+   JNIEnv* env = AttachCurrentThread();
+   Java_AndroidNetworkLibrary_unregisterQuicConnectionClosePayload(env, fd);
+ }

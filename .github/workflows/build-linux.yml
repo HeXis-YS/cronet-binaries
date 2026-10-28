@@ -42,7 +42,7 @@ jobs:
             src/third_party/android_toolchain
             src/gn
             src/third_party/rust-toolchain
-            src/out/sysroot-build
+            src/build/linux/debian_bullseye_amd64-sysroot
           key: cronet-linux-x64-${{ hashFiles('CHROMIUM_VERSION', 'src/get-clang.sh', 'src/tools/rust/update_rust.py') }}
       - name: Install matching toolchains
         run: |

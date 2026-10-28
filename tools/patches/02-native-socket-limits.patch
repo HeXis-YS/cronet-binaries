@@ -1,0 +1,43 @@
+diff --git a/src/net/socket/client_socket_pool_manager.h b/src/net/socket/client_socket_pool_manager.h
+--- a/src/net/socket/client_socket_pool_manager.h
++++ b/src/net/socket/client_socket_pool_manager.h
+@@ -32,6 +32,14 @@
+ 
+ class NET_EXPORT_PRIVATE ClientSocketPoolManager {
+  public:
++  // Configure native embedding limits before creating any network sessions.
++  // Update all three together so the pool/group relationship stays valid.
++  static void ConfigureNativeSocketLimits(
++      HttpNetworkSession::SocketPoolType pool_type,
++      size_t pool_limit,
++      size_t group_limit,
++      size_t proxy_limit);
++
+   ClientSocketPoolManager();
+   virtual ~ClientSocketPoolManager();
+ 
+diff --git a/src/net/socket/client_socket_pool_manager.cc b/src/net/socket/client_socket_pool_manager.cc
+--- a/src/net/socket/client_socket_pool_manager.cc
++++ b/src/net/socket/client_socket_pool_manager.cc
+@@ -133,6 +133,21 @@
+ }
+ 
+ }  // namespace
++
++void ClientSocketPoolManager::ConfigureNativeSocketLimits(
++    HttpNetworkSession::SocketPoolType pool_type,
++    size_t pool_limit,
++    size_t group_limit,
++    size_t proxy_limit) {
++  CHECK_GT(group_limit, 0u);
++  CHECK_LE(group_limit, proxy_limit);
++  CHECK_LE(proxy_limit, pool_limit);
++  CHECK_LE(pool_limit, 2048u);
++  const auto index = std::to_underlying(pool_type);
++  g_socket_soft_cap_per_pool[index] = pool_limit;
++  g_max_sockets_per_group[index] = group_limit;
++  g_max_sockets_per_proxy_chain[index] = proxy_limit;
++}
+ 
+ ClientSocketPoolManager::ClientSocketPoolManager() = default;
+ ClientSocketPoolManager::~ClientSocketPoolManager() = default;

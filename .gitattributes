@@ -2,4 +2,5 @@
 *.sh text eol=lf
 /CHROMIUM_VERSION text eol=lf
 /tools/patches/series text eol=lf
-/tools/patches/*.patch text eol=lf
+# A unified diff represents blank context lines with a single space.
+/tools/patches/*.patch text eol=lf whitespace=-blank-at-eol

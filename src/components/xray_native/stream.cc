@@ -247,8 +247,6 @@ int xray_stream_start(bidirectional_stream* stream,
     return -1;
   }
   request->network_isolation_key = net::NetworkIsolationKey(site, site);
-  request->network_anonymization_key =
-      net::NetworkAnonymizationKey::CreateSameSite(site);
   for (size_t i = 0; i < headers->count; ++i) {
     // The C caller supplies count entries, alive until this call returns.
     const auto& header = UNSAFE_BUFFERS(headers->headers[i]);

@@ -4,7 +4,7 @@ set -ex
 . ./get-sysroot.sh
 
 if [ "$SYSROOT_ARCH" -a ! -d ./"$WITH_SYSROOT/lib" ]; then
-  ./build/linux/sysroot_scripts/sysroot_creator.py build "$SYSROOT_ARCH"
+  "$PYTHON" build/linux/sysroot_scripts/install-sysroot.py --arch="$SYSROOT_ARCH"
 fi
 
 if [ "$OPENWRT_FLAGS" ]; then
@@ -66,29 +66,8 @@ if [ ! -f gn/out/gn ] || [ "$installed_gn" != "$gn_version" ]; then
   echo "$gn_version" > gn/out/revision
 fi
 
-if [ "$target_os" = android -a ! -d third_party/android_toolchain/ndk ]; then
-  android_ndk_version=r24
-  curl -LO https://dl.google.com/android/repository/android-ndk-$android_ndk_version-linux.zip
-  unzip android-ndk-$android_ndk_version-linux.zip
-  mkdir -p third_party/android_toolchain/ndk
-  cd android-ndk-$android_ndk_version
-  cp -r --parents sources/android/cpufeatures ../third_party/android_toolchain/ndk
-  cp -r --parents toolchains/llvm/prebuilt ../third_party/android_toolchain/ndk
-  cd ..
-  cd third_party/android_toolchain/ndk
-  find toolchains -type f -regextype egrep \! -regex \
-    '.*(lib(atomic|gcc|gcc_real|compiler_rt-extras|android_support|unwind).a|crt.*o|lib(android|c|dl|log|m).so|usr/local.*|usr/include.*)' -delete
-  # Works around https://github.com/android/ndk/issues/2082
-  # .../android/hardware_buffer.h:322:42: error: expression is not an integral constant expression
-  #   322 |     AHARDWAREBUFFER_USAGE_FRONT_BUFFER = 1UL << 32,
-  # .../android/hardware_buffer.h:322:46: note: shift count 32 >= width of type 'unsigned long' (32 bits)
-  #   322 |     AHARDWAREBUFFER_USAGE_FRONT_BUFFER = 1UL << 32,
-  sed -i 's/AHARDWAREBUFFER_USAGE_FRONT_BUFFER = 1UL /AHARDWAREBUFFER_USAGE_FRONT_BUFFER = 1ULL /' toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/android/hardware_buffer.h
-  cd -
-  rm -rf android-ndk-$android_ndk_version android-ndk-$android_ndk_version-linux.zip
-fi
-
 if [ "$target_os" = android ]; then
+  "$PYTHON" install-android-tools.py
   # The release archive records a desktop checkout. After installing the native
   # Android tools, update its metadata; checkout_android is not a GN build arg.
   sed -i 's/^checkout_android = false$/checkout_android = true/' build/config/gclient_args.gni
