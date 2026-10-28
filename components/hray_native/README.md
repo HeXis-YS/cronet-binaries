@@ -4,7 +4,7 @@ Build `//components/hray_native:cronet` to produce `libcronet.so`.
 The public C headers are `include/hray_engine.h` and `include/hray_stream.h`.
 Linux exports exactly their eight functions under `HRAY_CRONET_1.0`; Chromium
 and C++ symbols remain private. These function signatures, structure layouts,
-callback order, buffer ownership and return values define ABI 1. Compatible
+callback field order, buffer ownership and return values define ABI 1. Compatible
 Chromium updates do not require rebuilding hray-core.
 
 An engine connects directly to `address:port`, using `server_name` for TLS
@@ -14,6 +14,11 @@ Host header overrides HTTP authority without changing TLS identity. `http3`
 selects forced HTTP/3; otherwise requests use HTTP/2. The isolation argument
 retains the existing fixed grouping behavior; connection rotation is outside
 this ABI.
+
+The request URL must use the engine's TLS name and port. Chromium derives the
+TLS identity and connection port from that URL; the engine maps the name to
+the dial address and configures forced HTTP/3 for that origin. hray-core sets
+this URL authority before sending, independently of the Host header.
 
 Create engines on a caller thread, outside network callbacks. Engine creation
 copies its strings and pin before returning. Keep the engine alive until all
