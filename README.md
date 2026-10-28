@@ -69,7 +69,11 @@ From `src`, run:
 ./build.sh
 ```
 
-`get-clang.sh` also runs Chromium's Rust toolchain updater. `./build.sh configure`
+`get-clang.sh` also runs Chromium's Rust toolchain updater. For Android, it records
+the installed native toolchain in `build/config/gclient_args.gni` by setting
+`checkout_android=true`. This is checkout metadata, not a GN command-line argument;
+`build_with_chromium` comes from the release archive's metadata as well.
+`./build.sh configure`
 generates the library dependency graph without compiling. Production ThinLTO is
 enabled by default and its link optimization is configured in the local library
 target; use `THIN_LTO=false` explicitly for a build without LTO.

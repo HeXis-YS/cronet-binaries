@@ -98,3 +98,9 @@ if [ "$target_os" = android -a ! -d third_party/android_toolchain/ndk ]; then
   cd -
   rm -rf android-ndk-$android_ndk_version android-ndk-$android_ndk_version-linux.zip
 fi
+
+if [ "$target_os" = android ]; then
+  # The release archive records a desktop checkout. After installing the native
+  # Android tools, update its metadata; checkout_android is not a GN build arg.
+  sed -i 's/^checkout_android = false$/checkout_android = true/' build/config/gclient_args.gni
+fi

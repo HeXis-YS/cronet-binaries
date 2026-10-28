@@ -15,7 +15,6 @@ flags="$flags
   is_component_build=false
   is_clang=true
   is_cronet_build=true
-  build_with_chromium=true
   chrome_pgo_phase=0
   use_thin_lto=${THIN_LTO:-true}
   thin_lto_enable_optimizations=true
@@ -53,7 +52,7 @@ if [ "${WITH_SYSROOT:-}" ]; then
   flags="$flags target_sysroot=\"//$WITH_SYSROOT\""
 fi
 if [ "$target_os" = android ]; then
-  flags="$flags is_desktop_android=true checkout_android=true default_min_sdk_version=24"
+  flags="$flags is_desktop_android=true default_min_sdk_version=24"
 fi
 if [ "$target_os" = win ] && [ "$host_os" = linux ]; then
   export DEPOT_TOOLS_WIN_TOOLCHAIN=1
