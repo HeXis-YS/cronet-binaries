@@ -1,13 +1,15 @@
-# cronet-binaries ![build workflow](https://github.com/sleeyax/cronet-binaries/actions/workflows/build.yml/badge.svg)
+# cronet-binaries
 
 ## Xray native transport branch
 
-The `Build Cronet` GitHub Actions workflow prepares and patches the selected
-Chromium release once, then builds Linux, Windows, and Android artifacts with
-production ThinLTO. Run it with `workflow_dispatch`, or push to `main`. Source
-preparation failures stop the matrix; each job uploads its logs, revision,
-patch series and GN arguments. The upstream-source migration is validated by CI;
-no successful build of that new baseline has been established locally.
+The three `Build Cronet` GitHub Actions workflows independently build Linux x64,
+Windows x64, and Android arm64 artifacts with production ThinLTO. Start the
+desired platform with `workflow_dispatch`; publishing a release starts all three.
+Each run prepares and patches its own Chromium source tree. Runs have no shared
+concurrency group, so a new request does not cancel an older request. Each job
+uploads its logs, revision, patch series and GN arguments. The upstream-source
+migration is validated by CI; no successful build of that new baseline has been
+established yet.
 
 This branch builds a shared library for Xray's HTTP/2 and HTTP/3 bidirectional
 streams on Linux, Windows, and Android. Its C ABI is
@@ -45,7 +47,7 @@ adapter into the output. Any failed command stops preparation; use the output
 only after the script succeeds. Build from that directory using the commands
 below. Existing `src` files and toolchain caches are left untouched. When
 upgrading the pinned release, update `CHROMIUM_VERSION` explicitly.
-Each CI matrix job prepares its own source tree and moves it into `src` before
+Each platform workflow moves its prepared source tree into `src` before
 restoring toolchain caches; no source artifact is repackaged or exchanged.
 The patches retain NaiveProxy authorship and include the Xray isolation/authority
 adapters. The old `import-upstream.sh` rewrites history and is not this workflow.
@@ -57,8 +59,9 @@ in [PATCH_REVIEW.md](PATCH_REVIEW.md).
 
 ### Build
 
-Install Ninja, pkg-config (Linux), Python, curl, xz, and unzip. Windows also needs
-Visual Studio with its C++ toolchain and Windows SDK; Android is built on Linux.
+Install Ninja, pkg-config (Linux), Python, curl, xz, and unzip. All three CI
+workflows use Linux runners. Windows cross-compilation also needs `ciopfs` and
+the Windows toolchain downloaded by `get-clang.sh`; Android is built on Linux.
 From `src`, run:
 
 ```sh
@@ -71,8 +74,9 @@ generates the library dependency graph without compiling. Production ThinLTO is
 enabled by default and its link optimization is configured in the local library
 target; use `THIN_LTO=false` explicitly for a build without LTO.
 
-Set `EXTRA_FLAGS='target_cpu="arm64" target_os="android"'` for Android or choose
-`linux`/`win` and a supported CPU from `.github/workflows/build.yml`. Run both
+Set `EXTRA_FLAGS='target_cpu="arm64" target_os="android"'` for Android, or use
+`target_cpu="x64"` with `target_os="linux"` or `target_os="win"` as in
+`.github/workflows/build-{linux,windows,android}.yml`. Run both
 commands with the same flags. `JOBS` controls Ninja parallelism (default 2).
 Artifacts and matching headers are placed in `src/out/Release/cronet/`.
 Set Xray's `XRAY_CRONET_LIBRARY` to the absolute library path.
