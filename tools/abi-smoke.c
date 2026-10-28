@@ -2,9 +2,12 @@
 #include "hray_engine.h"
 
 #include <assert.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <sys/socket.h>
 #include <time.h>
+#include <unistd.h>
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
@@ -23,7 +26,7 @@ static void read_complete(bidirectional_stream* stream, char* data, int count) {
 }
 static void written(bidirectional_stream* stream) { (void)stream; }
 static void done(bidirectional_stream* stream, int error) {
-  assert(error < 0);
+  assert(error == -3);  // ERR_ABORTED, not a connection or certificate failure.
   hray_stream_destroy(stream);
   pthread_mutex_lock(&mutex);
   ++done_count;
@@ -36,9 +39,27 @@ int main(void) {
   const bidirectional_stream_callback callbacks = {
       ready, headers, read_complete, written, done};
   const bidirectional_stream_header_array empty_headers = {0, NULL};
-  assert(hray_cronet_engine_create("", "127.0.0.1", 9, pin, false) == NULL);
+
+  // Keep TCP open without answering TLS so only cancel terminates the request.
+  int listener = socket(AF_INET, SOCK_STREAM, 0);
+  assert(listener >= 0);
+  struct sockaddr_in endpoint = {
+      .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+  assert(bind(listener, (struct sockaddr*)&endpoint, sizeof(endpoint)) == 0);
+  assert(listen(listener, 1) == 0);
+  socklen_t endpoint_size = sizeof(endpoint);
+  assert(getsockname(listener, (struct sockaddr*)&endpoint, &endpoint_size) == 0);
+  uint16_t port = ntohs(endpoint.sin_port);
+  char url[64];
+  snprintf(url, sizeof(url), "https://localhost:%u/", (unsigned)port);
+
+  assert(hray_cronet_engine_create("", "127.0.0.1", port, pin, false) == NULL);
+  stream_engine* default_engine =
+      hray_cronet_engine_create("localhost", "127.0.0.1", port, NULL, false);
+  assert(default_engine != NULL);
+  hray_cronet_engine_destroy(default_engine);
   stream_engine* engine =
-      hray_cronet_engine_create("localhost", "127.0.0.1", 9, pin, false);
+      hray_cronet_engine_create("localhost", "127.0.0.1", port, pin, false);
   assert(engine != NULL);
   bidirectional_stream* rejected = hray_stream_create(engine, NULL, &callbacks);
   assert(hray_stream_start(rejected, "http://localhost/", "GET", &empty_headers,
@@ -49,7 +70,7 @@ int main(void) {
   assert(stream->annotation == &done_count);
   assert(hray_stream_read(stream, NULL, 0) == 0);
   assert(hray_stream_write(stream, NULL, -1, false) == 0);
-  assert(hray_stream_start(stream, "https://localhost:9/", "GET", &empty_headers,
+  assert(hray_stream_start(stream, url, "GET", &empty_headers,
                            "https://abi.hray.invalid", true) == 0);
   hray_stream_cancel(stream);
   struct timespec deadline;
@@ -62,6 +83,7 @@ int main(void) {
   assert(done_count == 1);
   pthread_mutex_unlock(&mutex);
   hray_cronet_engine_destroy(engine);
-  puts("ABI 1: C linkage, engine initialization, rejected start and cancellation passed");
+  assert(close(listener) == 0);
+  puts("ABI 1: C linkage, optional pin, rejected start and ERR_ABORTED cancellation passed");
   return 0;
 }
