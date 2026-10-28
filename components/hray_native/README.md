@@ -8,10 +8,21 @@ callback field order, buffer ownership and return values define ABI 1. Compatibl
 Chromium updates do not require rebuilding hray-core.
 
 An engine connects directly to `address:port`, using `server_name` for TLS
-verification and the default HTTP authority. CA and hostname validation must
-succeed in addition to the supplied 32-byte leaf SPKI SHA-256 pin. A request's
-Host header overrides HTTP authority without changing TLS identity. `http3`
-selects forced HTTP/3; otherwise requests use HTTP/2. The isolation argument
+verification and the default HTTP authority. `pin_sha256` selects certificate
+verification:
+
+| Argument | Verification |
+| --- | --- |
+| `NULL` | Chromium's default CA, hostname and certificate validity checks. |
+| Pointer to 32 bytes | Leaf SPKI SHA-256 and hostname must match; CA trust and certificate validity dates are not checked. This supports self-signed certificates. |
+
+TLS handshake signatures are verified in both modes to prove possession of
+the private key. An all-zero hash is a supplied pin, not an absent pin. The C
+signatures and structure layouts are unchanged; this replaces the previous
+mandatory CA-plus-pin policy.
+
+A request's Host header overrides HTTP authority without changing TLS identity.
+`http3` selects forced HTTP/3; otherwise requests use HTTP/2. The isolation argument
 retains the existing fixed grouping behavior; connection rotation is outside
 this ABI.
 
@@ -21,8 +32,8 @@ the dial address and configures forced HTTP/3 for that origin. hray-core sets
 this URL authority before sending, independently of the Host header.
 
 Create engines on a caller thread, outside network callbacks. Engine creation
-copies its strings and pin before returning. Keep the engine alive until all
-its streams have been destroyed. Keep the library loaded for the process
+copies its strings and any supplied pin before returning. Keep the engine alive
+until all its streams have been destroyed. Keep the library loaded for the process
 lifetime because it owns Chromium's shared runtime and network thread.
 
 Create a stream with five non-null callbacks and an optional caller-owned

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -66,52 +67,55 @@ class Runtime {
   bool started_ = false;
 };
 
-// Apply the leaf pin before delegating to Chromium's ordinary CA/name verifier.
-// Keeping the verifier's request handle unchanged preserves cancellation and
-// asynchronous completion without introducing another verification cache.
+// A configured pin is the trust anchor, including for self-signed certificates.
+// Match the TLS name as well; BoringSSL still verifies handshake signatures.
 class PinnedVerifier final : public net::CertVerifier {
  public:
-  PinnedVerifier(std::unique_ptr<net::CertVerifier> verifier,
-                 net::SHA256HashValue pin)
-      : verifier_(std::move(verifier)), pin_(pin) {}
+  explicit PinnedVerifier(net::SHA256HashValue pin) : pin_(pin) {}
 
   int Verify(const RequestParams& params,
              net::CertVerifyResult* result,
-             net::CompletionOnceCallback callback,
+             net::CompletionOnceCallback,
              std::unique_ptr<Request>* request,
-             const net::NetLogWithSource& log) override {
+             const net::NetLogWithSource&) override {
+    request->reset();
+    result->Reset();
+    result->verified_cert = params.certificate();
     std::string_view spki;
     if (!net::asn1::ExtractSPKIFromDERCert(
             net::x509_util::CryptoBufferAsStringPiece(
                 params.certificate()->cert_buffer()), &spki)) {
-      result->Reset();
       result->cert_status = net::CERT_STATUS_INVALID;
       return net::ERR_CERT_INVALID;
     }
     net::SHA256HashValue hash;
     SHA256(reinterpret_cast<const uint8_t*>(spki.data()), spki.size(), hash.data());
     if (hash != pin_) {
-      result->Reset();
       result->cert_status = net::CERT_STATUS_PINNED_KEY_MISSING;
       return net::ERR_SSL_PINNED_KEY_NOT_IN_CERT_CHAIN;
     }
-    return verifier_->Verify(params, result, std::move(callback), request, log);
+    if (!params.certificate()->VerifyNameMatch(params.hostname())) {
+      result->cert_status = net::CERT_STATUS_COMMON_NAME_INVALID;
+      return net::ERR_CERT_COMMON_NAME_INVALID;
+    }
+    result->public_key_hashes.push_back(hash);
+    return net::OK;
   }
 
   void Verify2QwacBinding(
-      const std::string& binding,
-      const std::string& hostname,
-      const scoped_refptr<net::X509Certificate>& cert,
+      const std::string&,
+      const std::string&,
+      const scoped_refptr<net::X509Certificate>&,
       base::OnceCallback<void(const scoped_refptr<net::X509Certificate>&)> callback,
-      const net::NetLogWithSource& log) override {
-    verifier_->Verify2QwacBinding(binding, hostname, cert, std::move(callback), log);
+      const net::NetLogWithSource&) override {
+    std::move(callback).Run(nullptr);
   }
-  void SetConfig(const Config& config) override { verifier_->SetConfig(config); }
-  void AddObserver(Observer* observer) override { verifier_->AddObserver(observer); }
-  void RemoveObserver(Observer* observer) override { verifier_->RemoveObserver(observer); }
+  // The fixed pin has no mutable trust settings or change notifications.
+  void SetConfig(const Config&) override {}
+  void AddObserver(Observer*) override {}
+  void RemoveObserver(Observer*) override {}
 
  private:
-  std::unique_ptr<net::CertVerifier> verifier_;
   net::SHA256HashValue pin_;
 };
 
@@ -121,22 +125,25 @@ class Context final : public net::URLRequestContextGetter {
       : runner_(std::move(runner)) {}
 
   void Initialize(std::string name, std::string address, uint16_t port,
-                  net::SHA256HashValue pin, bool http3) {
-    net::URLRequestContextBuilder cert_builder;
-    cert_builder.DisableHttpCache();
-    cert_builder.set_proxy_resolution_service(
-        net::ConfiguredProxyResolutionService::CreateDirect());
-    cert_context_ = cert_builder.Build();
-    cert_fetcher_ = base::MakeRefCounted<net::CertNetFetcherURLRequest>();
-    cert_fetcher_->SetURLRequestContext(cert_context_.get());
+                  std::optional<net::SHA256HashValue> pin, bool http3) {
     net::URLRequestContextBuilder builder;
     builder.DisableHttpCache();
     builder.set_proxy_resolution_service(
         net::ConfiguredProxyResolutionService::CreateDirect());
     builder.SetSpdyAndQuicEnabled(true, http3);
     builder.set_host_mapping_rules("MAP " + name + " " + address);
-    builder.SetCertVerifier(std::make_unique<PinnedVerifier>(
-        net::CertVerifier::CreateDefault(cert_fetcher_), pin));
+    if (pin) {
+      builder.SetCertVerifier(std::make_unique<PinnedVerifier>(*pin));
+    } else {
+      net::URLRequestContextBuilder cert_builder;
+      cert_builder.DisableHttpCache();
+      cert_builder.set_proxy_resolution_service(
+          net::ConfiguredProxyResolutionService::CreateDirect());
+      cert_context_ = cert_builder.Build();
+      cert_fetcher_ = base::MakeRefCounted<net::CertNetFetcherURLRequest>();
+      cert_fetcher_->SetURLRequestContext(cert_context_.get());
+      builder.SetCertVerifier(net::CertVerifier::CreateDefault(cert_fetcher_));
+    }
     if (http3) {
       auto quic = std::make_unique<net::QuicContext>();
       quic->params()->origins_to_force_quic_on.insert(
@@ -158,7 +165,8 @@ class Context final : public net::URLRequestContextGetter {
     auto context = std::move(context_);
     NotifyContextShuttingDown();
     context.reset();
-    cert_fetcher_->Shutdown();
+    if (cert_fetcher_)
+      cert_fetcher_->Shutdown();
   }
   scoped_refptr<base::SingleThreadTaskRunner> runner_;
   std::unique_ptr<net::URLRequestContext> cert_context_;
@@ -173,7 +181,7 @@ stream_engine* hray_cronet_engine_create(const char* server_name,
                                          uint16_t port,
                                          const uint8_t* pin_sha256,
                                          bool http3) {
-  if (!server_name || !address || !*address || !port || !pin_sha256)
+  if (!server_name || !address || !*address || !port)
     return nullptr;
   GURL origin(std::string("https://") + server_name);
   if (!origin.is_valid() || origin.host().empty() || origin.has_username() ||
@@ -182,14 +190,18 @@ stream_engine* hray_cronet_engine_create(const char* server_name,
   auto& runtime = Runtime::Get();
   if (!runtime.started_)
     return nullptr;
-  net::SHA256HashValue pin;
-  std::copy_n(pin_sha256, pin.size(), pin.begin());
+  std::optional<net::SHA256HashValue> pin;
+  if (pin_sha256) {
+    pin.emplace();
+    std::copy_n(pin_sha256, pin->size(), pin->begin());
+  }
   auto context = base::MakeRefCounted<Context>(runtime.thread_.task_runner());
   base::WaitableEvent initialized;
   runtime.thread_.task_runner()->PostTask(
       FROM_HERE, base::BindOnce(
           [](scoped_refptr<Context> context, std::string name,
-             std::string address, uint16_t port, net::SHA256HashValue pin,
+             std::string address, uint16_t port,
+             std::optional<net::SHA256HashValue> pin,
              bool http3, base::WaitableEvent* initialized) {
             context->Initialize(std::move(name), std::move(address), port, pin, http3);
             initialized->Signal();

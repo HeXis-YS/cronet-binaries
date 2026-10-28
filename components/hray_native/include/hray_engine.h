@@ -10,10 +10,13 @@
 extern "C" {
 #endif
 
-/* All strings and the 32-byte leaf SPKI SHA256 pin are copied before return.
+/* All strings and any supplied 32-byte leaf SPKI SHA256 pin are copied before
+ * return. NULL pin_sha256 selects Chromium's default certificate validation.
+ * A supplied pin requires matching leaf SPKI and hostname, without requiring
+ * a trusted CA chain or checking certificate validity dates. TLS handshake
+ * signatures are verified in both modes. An all-zero pin is still a pin.
  * server_name supplies the TLS name and default authority; address:port is the
  * dial target. A stream may override its HTTP authority with a Host header.
- * CA validation remains mandatory, including when the pin matches.
  * Returns NULL on invalid parameters or failure to start the network thread.
  * The engine must outlive all streams created from it.
  */
