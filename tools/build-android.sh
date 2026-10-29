@@ -5,9 +5,10 @@ set -euo pipefail
 automation_dir=$(cd "$(dirname "$0")/.." && pwd)
 cd "${1:?prepared Chromium directory required}"
 
+# Android's Java metadata uses GN-time write_file() across dependency directories;
+# root-pattern pruning leaves inputs of other parsed targets without those files.
 buildtools/linux64/gn gen out/Release \
   --root-target=//components/hray_native:cronet \
-  --root-pattern=//components/hray_native:cronet \
   --script-executable=python3 \
   --args='target_os="android" target_cpu="arm64" is_cronet_build=true
     is_debug=false is_official_build=true is_component_build=false symbol_level=0
