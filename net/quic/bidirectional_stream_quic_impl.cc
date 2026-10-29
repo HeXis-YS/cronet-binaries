@@ -113,6 +113,7 @@ int BidirectionalStreamQuicImpl::WriteHeaders() {
   HttpRequestInfo http_request_info;
   http_request_info.url = request_info_->url;
   http_request_info.method = request_info_->method;
+  http_request_info.authority = request_info_->authority;
   http_request_info.extra_headers = request_info_->extra_headers;
 
   CreateSpdyHeadersFromHttpRequest(http_request_info, std::nullopt,
