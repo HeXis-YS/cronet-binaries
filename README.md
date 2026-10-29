@@ -6,8 +6,8 @@ same repository. The release baseline is the Stable WebView entry returned by
 ChromiumDash. The release version selects the corresponding Chromium tag.
 
 The weekly workflow currently records the newest WebView release. Automatic
-rebase remains pending. The Linux x64 workflow builds a selected source branch
-or commit through `workflow_dispatch`.
+rebase remains pending. The Linux x64 and Android ARM64 workflows build a selected
+source branch or commit through `workflow_dispatch`.
 
 `hray-core` consumes the stable C ABI from the resulting `libcronet.so`; a
 Chromium update does not require an hray-core update when that ABI is unchanged.
@@ -45,6 +45,25 @@ Ninja parallelism (defaults to the available CPU count from `nproc`).
 Allow space for a full Chromium release and build
 output; run full builds in CI when local resources are limited.
 
+For Android ARM64, use a Linux x64 host with Git, Python 3, curl, unzip,
+Ninja, pkg-config and bubblewrap. Clone the fork as above into a separate
+workspace, then prepare and build with:
+
+```sh
+bash tools/prepare-source.sh /path/to/android-chromium/src android
+bash tools/build-android.sh /path/to/android-chromium/src
+```
+
+The `android` preparation argument adds `target_os = ["android"]` to `.gclient`.
+gclient enables `checkout_android`, installs the DEPS-pinned SDK, NDK, JDK and
+Clang Android runtime, and generates the Android build metadata. The build uses
+`target_os="android"`, `target_cpu="arm64"` and `is_cronet_build=true`, whose
+upstream minimum SDK default is API 24. It builds the same native C ABI library,
+without APK or AAR packaging. ELF checks require AArch64 and exactly the eight
+ABI functions from `exports.map`. They do not execute the library; engine startup,
+JNI initialization and network transfers still need validation on Android.
+
 Output is under `out/Release/cronet`: `libcronet.so`, its C headers, WebView
 version, source and automation revisions, dynamic exports and linkage details.
-The workflow also uploads preparation/build logs and GN arguments.
+The workflows also upload preparation/build logs and GN arguments; Android logs
+include the generated `gclient_args.gni`.

@@ -1,0 +1,63 @@
+name: Build Cronet (Android ARM64)
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Chromium fork branch or commit
+        required: true
+        default: hray/157.0.8103.14
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: automation
+          filter: blob:none
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          path: chromium/src
+          filter: blob:none
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config bubblewrap
+      - name: Sync fork dependencies
+        run: |
+          set -euo pipefail
+          mkdir logs
+          bash automation/tools/prepare-source.sh chromium/src android 2>&1 | tee logs/source.log
+      - name: Build and check ELF ABI
+        run: |
+          set -euo pipefail
+          nproc
+          free -m
+          bash automation/tools/build-android.sh chromium/src 2>&1 | tee logs/build.log
+      - name: Collect build conditions
+        if: always()
+        run: |
+          mkdir -p logs
+          git -C automation rev-parse HEAD > logs/AUTOMATION_REVISION
+          git -C chromium/src rev-parse HEAD > logs/SOURCE_REVISION
+          cp chromium/src/chrome/VERSION logs/
+          if [ -f chromium/src/out/Release/args.gn ]; then
+            cp chromium/src/out/Release/args.gn logs/
+          fi
+          if [ -f chromium/src/build/config/gclient_args.gni ]; then
+            cp chromium/src/build/config/gclient_args.gni logs/
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-android-arm64
+          path: logs/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cronet-android-arm64
+          path: chromium/src/out/Release/cronet/
+          if-no-files-found: error
