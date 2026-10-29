@@ -2,8 +2,8 @@
 
 Build `//components/hray_native:cronet` to produce `libcronet.so`.
 The public C headers are `include/hray_engine.h` and `include/hray_stream.h`.
-Linux exports exactly their eight functions under `HRAY_CRONET_1.0`; Chromium
-and C++ symbols remain private. These function signatures, structure layouts,
+Linux and Android export exactly their eight functions under `HRAY_CRONET_1.0`;
+Chromium and C++ symbols remain private. These function signatures, structure layouts,
 callback field order, buffer ownership and return values define ABI 1. Compatible
 Chromium updates do not require rebuilding hray-core.
 

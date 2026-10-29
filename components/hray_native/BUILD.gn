@@ -27,7 +27,7 @@ shared_library("cronet") {
   # Keep production LTO optimization local to our final link target.
   configs -= [ "//build/config/compiler:thinlto_optimize_default" ]
   configs += [ "//build/config/compiler:thinlto_optimize_max" ]
-  if (is_linux) {
+  if (is_linux || is_android) {
     inputs = [ "exports.map" ]
     ldflags = [ "-Wl,--version-script=" +
                 rebase_path("exports.map", root_build_dir) ]
