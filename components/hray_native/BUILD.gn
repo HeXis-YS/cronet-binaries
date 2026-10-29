@@ -24,6 +24,9 @@ source_set("native") {
 shared_library("cronet") {
   output_name = "cronet"
   deps = [ ":native" ]
+  if (is_android) {
+    sources = [ "android_tls_visibility.S" ]
+  }
   # Keep production LTO optimization local to our final link target.
   configs -= [ "//build/config/compiler:thinlto_optimize_default" ]
   configs += [ "//build/config/compiler:thinlto_optimize_max" ]
